@@ -243,3 +243,21 @@ class UTMBackendConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class UTMBackendGuestTests(FakeUTMCtlTestCase):
+	def test_pull_file(self):
+		self.update_vm(files={"C:\\wn-setup-done": "done\r\n"})
+		self.assertEqual(self.backend().pull_file("C:\\wn-setup-done").strip(), "done")
+
+	def test_pull_missing_file_raises(self):
+		with self.assertRaises(UTMCtlError):
+			self.backend().pull_file("C:\\missing")
+
+	def test_delete(self):
+		self.backend().delete()
+		self.assertEqual([vm["name"] for vm in self.read_state()["vms"]], ["Linux"])
+
+	def test_exists(self):
+		self.assertTrue(self.backend().exists())
+		self.assertFalse(self.backend(vm_name="Other").exists())

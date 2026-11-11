@@ -12,6 +12,8 @@ from wn.utm_config import (
 	build_config,
 	config_plist_bytes,
 	create_disk_image,
+	detach_drives,
+	set_display_hardware,
 	update_additional_arguments,
 	write_bundle,
 )
@@ -163,6 +165,10 @@ class ConfigContentTests(unittest.TestCase):
 			("disk.qcow2", "Disk", "NVMe", False),
 		])
 
+	def test_display_hardware(self):
+		config = build_config(options(display="virtio-gpu-pci"))
+		self.assertEqual([display["Hardware"] for display in config["Display"]], ["virtio-gpu-pci"])
+
 	def test_no_iso_means_disk_only(self):
 		drives = build_config(options(iso_image=None))["Drive"]
 		self.assertEqual([drive["ImageType"] for drive in drives], ["Disk"])
@@ -295,6 +301,36 @@ class WriteBundleTests(unittest.TestCase):
 		open(os.path.join(data, "disk.qcow2"), "w").close()
 		write_bundle(self.directory, options())
 		self.assertEqual(os.listdir(data), ["disk.qcow2"])
+
+
+class EditBundleTests(unittest.TestCase):
+	def setUp(self):
+		directory = tempfile.TemporaryDirectory()
+		self.addCleanup(directory.cleanup)
+		self.bundle = write_bundle(directory.name, options(driver_iso_image="wnsetup.iso"))
+		for image in ("win11-arm64.iso", "wnsetup.iso", "disk.qcow2"):
+			open(os.path.join(self.bundle, "Data", image), "w").close()
+
+	def read_config(self):
+		with open(os.path.join(self.bundle, "config.plist"), "rb") as plist_file:
+			return plistlib.load(plist_file)
+
+	def test_set_display_hardware(self):
+		before = self.read_config()
+		set_display_hardware(self.bundle, "virtio-gpu-pci")
+		after = self.read_config()
+		self.assertEqual(after["Display"][0]["Hardware"], "virtio-gpu-pci")
+		after["Display"][0]["Hardware"] = before["Display"][0]["Hardware"]
+		self.assertEqual(after, before)
+
+	def test_detach_drives_removes_entries_and_files(self):
+		detach_drives(self.bundle, ["win11-arm64.iso", "wnsetup.iso"])
+		self.assertEqual([drive["ImageName"] for drive in self.read_config()["Drive"]], ["disk.qcow2"])
+		self.assertEqual(os.listdir(os.path.join(self.bundle, "Data")), ["disk.qcow2"])
+
+	def test_edit_missing_bundle(self):
+		with self.assertRaises(UTMConfigError):
+			set_display_hardware(os.path.join(self.bundle, "missing.utm"), "virtio-gpu-pci")
 
 
 class UpdateAdditionalArgumentsTests(unittest.TestCase):

@@ -552,3 +552,68 @@ class UpdateVMArgsTests(CLITestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class SetupCommandTests(CLITestCase):
+	def run_setup(self, *argv, answers=""):
+		stdout = io.StringIO()
+		stderr = io.StringIO()
+		with mock.patch("wn.cli.Installer") as installer_class, mock.patch("wn.cli.getpass.getuser", return_value="macuser"):
+			exit_code = main(["setup"] + list(argv), stdout=stdout, stderr=stderr, stdin=io.StringIO(answers))
+		options = installer_class.call_args[0][0] if installer_class.called else None
+		return exit_code, options, stdout.getvalue(), stderr.getvalue()
+
+	def test_yes_uses_defaults(self):
+		exit_code, options, _, _ = self.run_setup("--yes")
+		self.assertEqual(exit_code, 0)
+		self.assertEqual((options.name, options.username, options.password), ("Windows", "macuser", ""))
+		self.assertEqual((options.cpus, options.memory_mib, options.disk_gib, options.headless), (8, 8192, 64, False))
+		self.assertEqual((options.software, options.edition), (("nvda",), "Pro"))
+		self.assertEqual(options.downloads_dir, os.path.join("~", "Library", "Application Support", "wn", "downloads"))
+
+	def test_yes_with_flags(self):
+		_, options, _, _ = self.run_setup("--yes", "--name", "Win", "--username", "carter", "--password", "pw", "--cpus", "4",
+			"--memory-mib", "4096", "--disk-gib", "80", "--headless", "--software", "none", "--edition", "Home", "--downloads-dir", "/tmp/dl")
+		self.assertEqual((options.name, options.username, options.password), ("Win", "carter", "pw"))
+		self.assertEqual((options.cpus, options.memory_mib, options.disk_gib, options.headless), (4, 4096, 80, True))
+		self.assertEqual((options.software, options.edition, options.downloads_dir), ((), "Home", "/tmp/dl"))
+
+	def test_prompts_accept_defaults(self):
+		exit_code, options, stdout, _ = self.run_setup(answers="\n" * 9)
+		self.assertEqual(exit_code, 0)
+		self.assertEqual((options.name, options.username, options.software), ("Windows", "macuser", ("nvda",)))
+		self.assertIn("VM name [Windows]: ", stdout)
+		self.assertIn("1. NVDA screen reader", stdout)
+
+	def test_prompts_take_answers(self):
+		answers = "\n".join(["Work", "carter", "secret", "6", "6144", "100", "yes", "0", "Education"]) + "\n"
+		_, options, _, _ = self.run_setup(answers=answers)
+		self.assertEqual((options.name, options.username, options.password), ("Work", "carter", "secret"))
+		self.assertEqual((options.cpus, options.memory_mib, options.disk_gib, options.headless), (6, 6144, 100, True))
+		self.assertEqual((options.software, options.edition), ((), "Education"))
+
+	def test_prompt_repeats_bad_number(self):
+		answers = "\n".join(["", "", "", "many", "4", "", "", "", "", ""]) + "\n"
+		_, options, stdout, _ = self.run_setup(answers=answers)
+		self.assertEqual(options.cpus, 4)
+		self.assertIn("Enter a whole number", stdout)
+
+	def test_flags_become_prompt_defaults(self):
+		_, options, stdout, _ = self.run_setup("--name", "Lab", answers="\n" * 9)
+		self.assertEqual(options.name, "Lab")
+		self.assertIn("VM name [Lab]: ", stdout)
+
+	def test_unknown_software(self):
+		exit_code, _, _, stderr = self.run_setup("--yes", "--software", "jaws")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("jaws", stderr)
+
+	def test_unknown_edition(self):
+		exit_code, _, _, stderr = self.run_setup("--yes", "--edition", "Ultimate")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("Ultimate", stderr)
+
+	def test_end_of_input_uses_defaults(self):
+		exit_code, options, _, _ = self.run_setup(answers="")
+		self.assertEqual(exit_code, 0)
+		self.assertEqual(options.name, "Windows")

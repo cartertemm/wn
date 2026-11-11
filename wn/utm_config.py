@@ -2,6 +2,7 @@
 
 import os
 import plistlib
+import random
 import shlex
 import subprocess
 import uuid
@@ -21,6 +22,9 @@ AUDIO_MODES = (AUDIO_SPICE, AUDIO_COREAUDIO)
 MAXIMUM_USB_SHARE = 3
 INTERFACE_VERSION = 1
 QMP_SESSION_PORT_OFFSET = 1
+QEMU_MAC_PREFIX = "52:54:00"
+MAC_SUFFIX_OCTET_COUNT = 3
+OCTET_VALUES = 256
 
 REQUIRED_OPTIONS = ("name", "mac_address")
 DEFAULT_OPTIONS = {
@@ -29,6 +33,7 @@ DEFAULT_OPTIONS = {
 	"disk_image": "disk.qcow2",
 	"iso_image": None,
 	"driver_iso_image": None,
+	"display": "virtio-ramfb",
 	"machine_properties": "kernel-irqchip=off",
 	"headless": False,
 	"qmp_port": 4444,
@@ -44,6 +49,11 @@ DEFAULT_OPTIONS = {
 
 class UTMConfigError(WnError):
 	"""Raised when VM options are invalid or the bundle or disk image cannot be created."""
+
+
+def random_mac_address():
+	suffix = ["{:02x}".format(random.randrange(OCTET_VALUES)) for _ in range(MAC_SUFFIX_OCTET_COUNT)]
+	return ":".join([QEMU_MAC_PREFIX] + suffix)
 
 
 def _new_uuid():
@@ -132,7 +142,7 @@ def _displays(options):
 	if options["headless"]:
 		return []
 	return [{
-		"Hardware": "virtio-ramfb",
+		"Hardware": options["display"],
 		"DynamicResolution": True,
 		"NativeResolution": False,
 		"UpscalingFilter": "Linear",
@@ -235,19 +245,13 @@ def write_bundle(path, options):
 	return bundle
 
 
-def update_additional_arguments(bundle_path, options):
-	"""Replace the AdditionalArguments of an existing bundle's config.plist and return the new list.
-
-	``options`` takes the same argument options as ``build_config``, such as
-	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, and ``extra_args``. Nothing
-	else in config.plist changes.
-	"""
-	arguments = _additional_arguments(_resolve_argument_options(options))
+def _edit_config(bundle_path, edit):
+	"""Load the bundle's config.plist, pass it to ``edit``, and write it back atomically."""
 	config_path = os.path.join(bundle_path, CONFIG_FILE_NAME)
 	try:
 		with open(config_path, "rb") as config_file:
 			config = plistlib.load(config_file)
-		config["QEMU"]["AdditionalArguments"] = arguments
+		edit(config)
 		temporary_path = config_path + ".tmp"
 		with open(temporary_path, "wb") as config_file:
 			config_file.write(config_plist_bytes(config))
@@ -256,7 +260,45 @@ def update_additional_arguments(bundle_path, options):
 		raise UTMConfigError("cannot update {}: {}".format(config_path, error)) from None
 	except (plistlib.InvalidFileException, KeyError, TypeError):
 		raise UTMConfigError("{} is not a UTM QEMU configuration".format(config_path)) from None
+
+
+def update_additional_arguments(bundle_path, options):
+	"""Replace the AdditionalArguments of an existing bundle's config.plist and return the new list.
+
+	``options`` takes the same argument options as ``build_config``, such as
+	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, and ``extra_args``. Nothing
+	else in config.plist changes.
+	"""
+	arguments = _additional_arguments(_resolve_argument_options(options))
+
+	def replace_arguments(config):
+		config["QEMU"]["AdditionalArguments"] = arguments
+
+	_edit_config(bundle_path, replace_arguments)
 	return arguments
+
+
+def set_display_hardware(bundle_path, hardware):
+	"""Set the emulated display device of every display in an existing bundle, such as ``virtio-gpu-pci``."""
+
+	def replace_hardware(config):
+		for display in config["Display"]:
+			display["Hardware"] = hardware
+
+	_edit_config(bundle_path, replace_hardware)
+
+
+def detach_drives(bundle_path, image_names):
+	"""Remove the drives that use ``image_names`` from an existing bundle and delete those image files."""
+
+	def remove_drives(config):
+		config["Drive"] = [drive for drive in config["Drive"] if drive.get("ImageName") not in image_names]
+
+	_edit_config(bundle_path, remove_drives)
+	for image_name in image_names:
+		image_path = os.path.join(bundle_path, DATA_DIRECTORY_NAME, image_name)
+		if os.path.exists(image_path):
+			os.remove(image_path)
 
 
 def create_disk_image(path, size_gib, qemu_img_path=DEFAULT_QEMU_IMG_PATH):

@@ -56,12 +56,28 @@ def ip_address(state, arguments):
 		print(address)
 
 
+def file_operation(state, arguments):
+	operation, name, guest_path = arguments
+	files = find_vm(state, name).get("files", {})
+	if operation != "pull" or guest_path not in files:
+		print("Error: cannot open file", file=sys.stderr)
+		sys.exit(1)
+	sys.stdout.write(files[guest_path])
+
+
+def delete(state, arguments):
+	vm = find_vm(state, arguments[0])
+	state["vms"].remove(vm)
+
+
 COMMANDS = {
 	"list": list_vms,
 	"status": show_status,
 	"start": start,
 	"stop": stop,
 	"ip-address": ip_address,
+	"file": file_operation,
+	"delete": delete,
 }
 
 

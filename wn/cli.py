@@ -1,9 +1,9 @@
 """Command line interface for wn."""
 
 import argparse
+import getpass
 import json
 import os
-import random
 import shlex
 import shutil
 import sys
@@ -12,10 +12,13 @@ from wn import __version__, keygrab, mouse
 from wn.attach import attach
 from wn.backend import create_backend
 from wn.config import load_config
+from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
 from wn.qmp import qmp_client_for
+from wn.setup import SOFTWARE_CHOICES, Installer, SetupOptions
 from wn.text_input import text_to_combos
+from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
 from wn.utm_config import (
 	AUDIO_COREAUDIO,
 	AUDIO_MODES,
@@ -24,6 +27,7 @@ from wn.utm_config import (
 	DEFAULT_OPTIONS,
 	DEFAULT_QEMU_IMG_PATH,
 	create_disk_image,
+	random_mac_address,
 	update_additional_arguments,
 	write_bundle,
 )
@@ -34,11 +38,12 @@ DEFAULT_BUNDLE_DIRECTORY = os.path.join("~", "Library", "Containers", "com.utmap
 DEFAULT_DISK_GIB = 64
 DEFAULT_CPU_COUNT = 8
 DEFAULT_MEMORY_MIB = 8192
-QEMU_MAC_PREFIX = "52:54:00"
-MAC_SUFFIX_OCTET_COUNT = 3
-OCTET_VALUES = 256
 DEFAULT_SCROLL_COUNT = 1
 STOPPED_STATE = "stopped"
+DEFAULT_SETUP_VM_NAME = "Windows"
+NO_SOFTWARE_ANSWERS = ("0", "none")
+YES_ANSWERS = ("y", "yes")
+NO_ANSWERS = ("n", "no")
 
 
 def build_parser():
@@ -76,7 +81,24 @@ def build_parser():
 	subcommands.add_parser("net", help="show or change VM networking")
 	_add_init_vm_parser(subcommands)
 	_add_update_vm_args_parser(subcommands)
+	_add_setup_parser(subcommands)
 	return parser
+
+
+def _add_setup_parser(subcommands):
+	setup = subcommands.add_parser("setup", help="create a Windows 11 VM in UTM and install it with no further input")
+	setup.add_argument("--yes", action="store_true", help="do not ask questions. Use the flags and the defaults")
+	setup.add_argument("--name", default=DEFAULT_SETUP_VM_NAME, help="VM name in UTM (default: %(default)s)")
+	setup.add_argument("--username", help="Windows user name (default: your Mac user name)")
+	setup.add_argument("--password", default="", help="Windows password (default: none)")
+	setup.add_argument("--cpus", type=int, default=DEFAULT_CPU_COUNT, help="number of CPU cores (default: %(default)s)")
+	setup.add_argument("--memory-mib", type=int, default=DEFAULT_MEMORY_MIB, help="memory in MiB (default: %(default)s)")
+	setup.add_argument("--disk-gib", type=int, default=DEFAULT_DISK_GIB, help="disk size in GiB (default: %(default)s)")
+	setup.add_argument("--headless", action="store_true", help="create the VM without a display window")
+	setup.add_argument("--software", default=",".join(name for name, _ in SOFTWARE_CHOICES), help="comma separated software to install, or none (default: %(default)s)")
+	setup.add_argument("--edition", default=DEFAULT_EDITION, help="Windows 11 edition (default: %(default)s)")
+	setup.add_argument("--downloads-dir", default=DEFAULT_DOWNLOADS_DIR, metavar="DIR", help="where to keep the downloaded ISOs and installers (default: %(default)s)")
+	setup.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
 
 
 def _add_mouse_parser(subcommands):
@@ -140,10 +162,11 @@ def _add_key_options(parser):
 
 
 class CommandContext:
-	def __init__(self, arguments, config, backend_factory, qmp_client_factory, stdout):
+	def __init__(self, arguments, config, backend_factory, qmp_client_factory, stdout, stdin=None):
 		self.arguments = arguments
 		self.config = config
 		self.stdout = stdout
+		self.stdin = stdin
 		self._backend_factory = backend_factory
 		self._qmp_client_factory = qmp_client_factory
 		self._backend = None
@@ -274,11 +297,6 @@ def run_attach(context):
 		attach(client, context.config.key_delay_ms)
 
 
-def random_mac_address():
-	suffix = ["{:02x}".format(random.randrange(OCTET_VALUES)) for _ in range(MAC_SUFFIX_OCTET_COUNT)]
-	return ":".join([QEMU_MAC_PREFIX] + suffix)
-
-
 def _fill_bundle(bundle, output, options, arguments):
 	data_directory = os.path.join(bundle, DATA_DIRECTORY_NAME)
 	os.makedirs(data_directory)
@@ -343,6 +361,122 @@ def run_update_vm_args(context):
 	context.print("Next: quit UTM and open it again so it reads the new arguments, then run wn start")
 
 
+def _parse_software(text):
+	if text.strip().lower() in NO_SOFTWARE_ANSWERS or not text.strip():
+		return ()
+	known = [name for name, _ in SOFTWARE_CHOICES]
+	chosen = []
+	for item in (part.strip().lower() for part in text.split(",")):
+		if item.isdigit() and 1 <= int(item) <= len(known):
+			item = known[int(item) - 1]
+		if item not in known:
+			raise WnError("unknown software '{}'. Choose from: {}".format(item, ", ".join(known)))
+		if item not in chosen:
+			chosen.append(item)
+	return tuple(chosen)
+
+
+def _check_edition(edition):
+	if edition not in GENERIC_PRODUCT_KEYS:
+		raise WnError("unknown edition '{}'. Choose from: {}".format(edition, ", ".join(GENERIC_PRODUCT_KEYS)))
+	return edition
+
+
+class Prompter:
+	"""Asks the setup questions on stdout and reads the answers from stdin. An empty answer keeps the default."""
+
+	def __init__(self, stdin, stdout):
+		self.stdin = stdin
+		self.stdout = stdout
+
+	def _read(self, question, default_text, secret=False):
+		prompt = "{} [{}]: ".format(question, default_text)
+		if secret and self.stdin.isatty():
+			return getpass.getpass(prompt)
+		self.stdout.write(prompt)
+		self.stdout.flush()
+		line = self.stdin.readline()
+		if not line:
+			self.stdout.write("\n")
+		return line.strip()
+
+	def ask(self, question, default, convert=str, secret=False, default_text=None):
+		while True:
+			answer = self._read(question, default if default_text is None else default_text, secret)
+			if not answer:
+				return default
+			try:
+				return convert(answer)
+			except (ValueError, WnError) as error:
+				self.stdout.write("{}\n".format(error))
+
+
+def _whole_number(text):
+	try:
+		return int(text)
+	except ValueError:
+		raise ValueError("Enter a whole number") from None
+
+
+def _yes_or_no(text):
+	answer = text.lower()
+	if answer in YES_ANSWERS:
+		return True
+	if answer in NO_ANSWERS:
+		return False
+	raise ValueError("Answer yes or no")
+
+
+def _software_menu():
+	return "".join("  {}. {}\n".format(number, label) for number, (_, label) in enumerate(SOFTWARE_CHOICES, start=1))
+
+
+def _numbers_for(software):
+	names = [name for name, _ in SOFTWARE_CHOICES]
+	return ",".join(str(names.index(name) + 1) for name in software) or "0"
+
+
+def _setup_answers(arguments, stdin, stdout):
+	answers = {
+		"name": arguments.name,
+		"username": arguments.username or getpass.getuser(),
+		"password": arguments.password,
+		"cpus": arguments.cpus,
+		"memory_mib": arguments.memory_mib,
+		"disk_gib": arguments.disk_gib,
+		"headless": arguments.headless,
+		"software": _parse_software(arguments.software),
+		"edition": _check_edition(arguments.edition),
+	}
+	if arguments.yes:
+		return answers
+	prompter = Prompter(stdin, stdout)
+	answers["name"] = prompter.ask("VM name", answers["name"])
+	answers["username"] = prompter.ask("Windows user name", answers["username"])
+	answers["password"] = prompter.ask("Windows password", answers["password"], secret=True, default_text="none" if not answers["password"] else "as given")
+	answers["cpus"] = prompter.ask("CPU cores", answers["cpus"], _whole_number)
+	answers["memory_mib"] = prompter.ask("Memory in MiB", answers["memory_mib"], _whole_number)
+	answers["disk_gib"] = prompter.ask("Disk size in GiB", answers["disk_gib"], _whole_number)
+	answers["headless"] = prompter.ask("Run without a display window (yes or no)", answers["headless"], _yes_or_no, default_text="yes" if answers["headless"] else "no")
+	stdout.write("Software to install:\n" + _software_menu())
+	answers["software"] = prompter.ask("Numbers separated by commas, 0 for none", answers["software"], _parse_software, default_text=_numbers_for(answers["software"]))
+	answers["edition"] = prompter.ask("Windows 11 edition", answers["edition"], _check_edition)
+	return answers
+
+
+def run_setup(context):
+	arguments = context.arguments
+	answers = _setup_answers(arguments, context.stdin, context.stdout)
+	options = SetupOptions(
+		bundle_dir=arguments.output,
+		downloads_dir=arguments.downloads_dir,
+		qmp_port=context.config.qmp_port,
+		qmp_session_port=context.config.qmp_session_port,
+		**answers
+	)
+	Installer(options, context.stdout).run()
+
+
 COMMANDS = {
 	"start": run_start,
 	"stop": run_stop,
@@ -357,15 +491,16 @@ COMMANDS = {
 	"net": run_net,
 	"init-vm": run_init_vm,
 	"update-vm-args": run_update_vm_args,
+	"setup": run_setup,
 }
 
 
-def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_client_for, stdout=None, stderr=None):
+def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_client_for, stdout=None, stderr=None, stdin=None):
 	stdout = stdout or sys.stdout
 	stderr = stderr or sys.stderr
 	arguments = build_parser().parse_args(argv)
 	try:
-		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout)
+		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin)
 		COMMANDS[arguments.command](context)
 	except (WnError, NotImplementedError) as error:
 		stderr.write("wn: error: {}\n".format(error))

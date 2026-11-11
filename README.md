@@ -6,13 +6,72 @@ mouse input to the guest through QEMU's QMP socket.
 
 `wn` needs only the Python 3.9 standard library.
 
-## Install
+## Quick start
 
-Run `wn` from the repository root:
+1. Install [UTM](https://mac.getutm.app) in `/Applications`.
+2. From the repository root, run:
+
+   ```sh
+   python3 -m wn setup
+   ```
+
+3. Answer the questions. Press Return to keep the default shown in brackets.
+4. Wait. `wn` downloads Windows 11 ARM64 and the drivers, builds the VM, and
+   installs Windows with no further input. It prints a progress line with
+   the elapsed time while it works. The whole install takes about 25 minutes
+   after the downloads.
+
+When it finishes, the VM is running at the Windows desktop and `wn` prints
+its IP address. Use the VM in its UTM window. In that window, Command acts
+as the Windows key. To drive it from the terminal, see [Commands](#commands).
+
+## Set up a VM
+
+`wn setup` asks these questions. Each flag sets the answer, and `--yes`
+skips the questions and uses the flags and defaults.
+
+| Question | Flag | Default |
+|---|---|---|
+| VM name | `--name NAME` | `Windows` |
+| Windows user name | `--username NAME` | your Mac user name |
+| Windows password | `--password TEXT` | none |
+| CPU cores | `--cpus N` | `8` |
+| Memory in MiB | `--memory-mib N` | `8192` |
+| Disk size in GiB | `--disk-gib N` | `64` |
+| Run without a display window | `--headless` | no |
+| Software to install (1 is NVDA) | `--software nvda` or `--software none` | NVDA |
+| Windows 11 edition | `--edition NAME` | `Pro` |
+
+Other flags: `--downloads-dir DIR` (default
+`~/Library/Application Support/wn/downloads`) and `--output DIR` (default UTM's
+documents folder).
+
+For example:
 
 ```sh
-python3 -m wn status
+python3 -m wn setup --yes --name Windows --username carter --software nvda
 ```
+
+`wn setup` does these steps:
+
+1. Downloads and checks the Windows 11 ARM64 ISO from Microsoft, the
+   virtio-win ARM64 drivers, the UTM guest tools, and NVDA. Each file is
+   checked against its published SHA256 hash. Files that are already there
+   and verified are not downloaded again.
+2. Builds a setup disc with `autounattend.xml`, the drivers, and the
+   installers, and creates the UTM bundle with the Windows ISO and that disc.
+3. Restarts UTM so that it finds the new VM, and starts the VM. UTM must
+   not be running other VMs.
+4. Waits while Windows Setup installs Windows. At the first sign-in, the
+   answer file installs the virtio drivers, the UTM guest tools, and NVDA,
+   then restarts Windows once.
+5. Shuts the VM down, removes the install discs, switches the display to
+   `virtio-gpu-pci`, and starts the VM again. If the screen stays blank, it
+   goes back to `virtio-ramfb`.
+6. Writes `~/.config/wn/config.json` if it does not exist.
+
+Windows is installed with Microsoft's generic key for the edition. It is not
+activated. To activate it, enter your own product key in Settings.
 
 ## Configuration
 
@@ -242,7 +301,18 @@ Use `wn grab` or `wn key` for any of these, for example `wn key win+r`.
 Attach mode is the fallback for when you cannot use `grab`, for example over
 SSH.
 
+### Shared folders and networking
+
+`wn share <host-path>` and `wn net` are placeholders. They report that the
+backend does not support them yet.
+
+## Advanced
+
 ### Grab the keyboard
+
+The UTM window already maps Command to the Windows key, and it is the
+normal way to type in the VM. Use `wn grab` when you want the terminal to
+send the keys instead.
 
 `wn grab` sends every key press on the Mac keyboard to the guest as a real
 key down and key up. This is the mode that delivers what attach mode cannot:
@@ -277,11 +347,6 @@ Security > Accessibility for your terminal app, and for
 turn its entry off and on again. See `keygrab/README.md` for details.
 
 Grab mode only works in a local session on the Mac. Over SSH, use `attach`.
-
-### Shared folders and networking
-
-`wn share <host-path>` and `wn net` are placeholders. They report that the
-backend does not support them yet.
 
 ## Run the tests
 

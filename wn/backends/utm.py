@@ -97,6 +97,20 @@ class UTMBackend(Backend):
 				return str(address)
 		raise UTMCtlError("utmctl reported no IPv4 address for '{}'. Is the QEMU guest agent running?".format(self.vm_name))
 
+	def machines(self):
+		"""Return ``(uuid, utm_state, name)`` for every VM UTM knows."""
+		return self._list()
+
+	def exists(self):
+		return any(self.vm_name in (name, uuid) for uuid, _, name in self._list())
+
+	def delete(self):
+		self._run_for_vm("delete", self.vm_name)
+
+	def pull_file(self, guest_path):
+		"""Return the text of a file in the guest. Needs the guest agent."""
+		return self._run_for_vm("file", "pull", self.vm_name, guest_path)
+
 	def qmp_socket_path(self, session=False):
 		port = self.qmp_session_port if session else self.qmp_port
 		return "{}{}:{}".format(TCP_ADDRESS_PREFIX, QMP_HOST, port)
