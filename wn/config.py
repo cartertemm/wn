@@ -5,6 +5,7 @@ import json
 import os
 from typing import Optional
 
+from wn.agent import DEFAULT_AGENT_PORT
 from wn.backends.utm import DEFAULT_QMP_PORT, DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
 from wn.errors import WnError
 from wn.text_input import DEFAULT_KEY_DELAY_MS
@@ -29,6 +30,8 @@ class Config:
 	keygrab_keycodes: Optional[str] = None
 	keygrab_send_repeats: bool = True
 	screen_size: Optional[str] = None
+	agent_bind: Optional[str] = None
+	agent_port: int = DEFAULT_AGENT_PORT
 
 
 FIELD_TYPES = {
@@ -43,6 +46,8 @@ FIELD_TYPES = {
 	"keygrab_keycodes": (str, type(None)),
 	"keygrab_send_repeats": (bool,),
 	"screen_size": (str, type(None)),
+	"agent_bind": (str, type(None)),
+	"agent_port": (int,),
 }
 PATH_FIELDS = ("utmctl_path", "qmp_socket", "keygrab_binary", "keygrab_keycodes")
 

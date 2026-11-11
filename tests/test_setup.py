@@ -18,6 +18,7 @@ from wn.setup import (
 	PAYLOAD_IMAGE,
 	SETUP_DISPLAY,
 	WINDOWS_ISO_IMAGE,
+	WN_TOOLS_SOURCE,
 	Installer,
 	SetupError,
 	SetupOptions,
@@ -135,6 +136,7 @@ class InstallerTestCase(unittest.TestCase):
 		self.qmp_log = []
 		self.restarts = []
 		self.payload_calls = []
+		self.wn_tools_sources = []
 		self.fetch_calls = []
 		self.output = io.StringIO()
 		isdir_patch = mock.patch("wn.setup.os.path.isdir", side_effect=lambda path: path == "/Applications/UTM.app" or os.path.exists(path))
@@ -148,8 +150,9 @@ class InstallerTestCase(unittest.TestCase):
 		self.fetch_calls.append((downloads_dir, include_nvda))
 		return Downloads(windows_iso=self.windows_iso, virtio_iso="virtio.iso", guest_tools_iso="tools.iso", nvda_installer="nvda.exe" if include_nvda else None)
 
-	def build_payload(self, image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer):
+	def build_payload(self, image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer, wn_tools_source=None):
 		self.payload_calls.append((unattend_options, virtio_iso, guest_tools_iso, nvda_installer))
+		self.wn_tools_sources.append(wn_tools_source)
 		with open(image_path, "wb") as image:
 			image.write(b"payload")
 
@@ -224,6 +227,17 @@ class RunTests(InstallerTestCase):
 		self.assertEqual(self.fetch_calls, [("/dl", False)])
 		self.assertIsNone(self.payload_calls[0][3])
 
+	def test_wn_tools_is_on_by_default(self):
+		self.installer().run()
+		self.assertEqual(self.wn_tools_sources, [WN_TOOLS_SOURCE])
+		self.assertTrue(os.path.isfile(os.path.join(WN_TOOLS_SOURCE, "install.cmd")))
+		self.assertIn("python3 -m wn agent --install", self.output.getvalue())
+
+	def test_without_wn_tools(self):
+		self.installer(software=("nvda",)).run()
+		self.assertEqual(self.wn_tools_sources, [None])
+		self.assertNotIn("wn agent", self.output.getvalue())
+
 	def test_writes_config_when_absent(self):
 		self.installer(name="Windows", qmp_port=4444).run()
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
@@ -283,7 +297,7 @@ class FailureTests(InstallerTestCase):
 		self.assertIn("stopped", str(context.exception))
 
 	def test_bundle_removed_when_payload_fails(self):
-		def broken_payload(*arguments):
+		def broken_payload(*arguments, wn_tools_source=None):
 			raise OSError("disk full")
 		installer = self.installer()
 		installer.build_payload = broken_payload

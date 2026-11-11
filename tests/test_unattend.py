@@ -264,6 +264,22 @@ class SetupCommandTests(unittest.TestCase):
 	def test_commands_fit_unattend_limit(self):
 		build_unattend(options(first_logon_commands=tuple(self.commands)))
 
+	def test_without_wn_tools(self):
+		self.assertNotIn("wn-tools", "\n".join(self.commands))
+
+	def test_wn_tools_build_and_install_before_reboot(self):
+		commands = setup_commands("utm-guest-tools-0.1.271.exe", "nvda_2026.3.1.exe", wn_tools=True)
+		joined = "\n".join(commands)
+		copy = joined.index('xcopy /e /i /q /y %d:\\tools\\wn-tools "%TEMP%\\wn-tools"')
+		build = joined.index('cmd /c call "%TEMP%\\wn-tools\\build.cmd" >> C:\\wn-setup.log 2>&1')
+		install = joined.index('cmd /c call "%TEMP%\\wn-tools\\install.cmd" >> C:\\wn-setup.log 2>&1')
+		self.assertLess(joined.index("nvda_nvda_v1"), copy)
+		self.assertLess(copy, build)
+		self.assertLess(build, install)
+		self.assertTrue(commands[-1].endswith("shutdown /r /t 5"))
+		self.assertIn(PAYLOAD_TAG, [command for command in commands if "xcopy" in command][0])
+		build_unattend(options(first_logon_commands=tuple(commands)))
+
 	def test_setup_drivers_exclude_display(self):
 		self.assertNotIn("viogpudo", SETUP_DRIVERS)
 		self.assertIn("NetKVM", SETUP_DRIVERS)

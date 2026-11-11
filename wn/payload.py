@@ -3,6 +3,7 @@
 import contextlib
 import dataclasses
 import fnmatch
+import glob
 import os
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from wn.unattend import (
 	TOOLS_FOLDER,
 	VIRTIO_FOLDER,
 	WINPE_DRIVER_FOLDER,
+	WN_TOOLS_FOLDER,
 	build_unattend,
 	setup_commands,
 )
@@ -24,6 +26,9 @@ from wn.unattend import (
 VOLUME_NAME = "WNSETUP"
 ANSWER_FILE_NAME = "autounattend.xml"
 GUEST_TOOLS_PATTERN = "utm-guest-tools-*.exe"
+WN_TOOLS_SCRIPTS = ("build.cmd", "install.cmd")
+WN_TOOLS_SOURCE_FOLDER = "src"
+WN_TOOLS_SOURCE_PATTERN = "*.cs"
 
 
 class PayloadError(WnError):
@@ -80,6 +85,16 @@ def _stage_guest_tools(tools_folder, guest_tools_mount):
 	return installer
 
 
+def stage_wn_tools(staging, source):
+	"""Copy the wn-tools sources and scripts, but not a local build, so the guest compiles its own exe."""
+	destination = os.path.join(staging, TOOLS_FOLDER, WN_TOOLS_FOLDER)
+	os.makedirs(os.path.join(destination, WN_TOOLS_SOURCE_FOLDER), exist_ok=True)
+	for script in WN_TOOLS_SCRIPTS:
+		shutil.copyfile(os.path.join(source, script), os.path.join(destination, script))
+	for path in glob.glob(os.path.join(source, WN_TOOLS_SOURCE_FOLDER, WN_TOOLS_SOURCE_PATTERN)):
+		shutil.copyfile(path, os.path.join(destination, WN_TOOLS_SOURCE_FOLDER, os.path.basename(path)))
+
+
 def stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools=()):
 	"""Fill ``staging`` with the drivers, guest tools, and ``extra_tools``. Return the guest tools installer name.
 
@@ -112,13 +127,15 @@ def write_iso_image(staging, image_path):
 	return image_path
 
 
-def build_payload_iso(image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer=None):
+def build_payload_iso(image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer=None, wn_tools_source=None):
 	"""Write the complete setup disc: drivers, installers, and an answer file whose first-logon steps install them."""
 	with tempfile.TemporaryDirectory(prefix="wn-payload-") as staging:
 		extra_tools = [nvda_installer] if nvda_installer else []
 		guest_tools_name = stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools)
+		if wn_tools_source:
+			stage_wn_tools(staging, wn_tools_source)
 		nvda_name = os.path.basename(nvda_installer) if nvda_installer else None
-		commands = tuple(setup_commands(guest_tools_name, nvda_name))
+		commands = tuple(setup_commands(guest_tools_name, nvda_name, wn_tools=bool(wn_tools_source)))
 		answer_file = build_unattend(dataclasses.replace(unattend_options, first_logon_commands=commands))
 		with open(os.path.join(staging, ANSWER_FILE_NAME), "wb") as output:
 			output.write(answer_file)

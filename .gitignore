@@ -13,3 +13,4 @@ vm/
 .DS_Store
 keygrab/bin/
 latency/bin/
+wn-tools/bin/

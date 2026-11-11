@@ -8,7 +8,7 @@ import shlex
 import shutil
 import sys
 
-from wn import __version__, keygrab, mouse
+from wn import __version__, agent, keygrab, mouse
 from wn.attach import attach
 from wn.backend import create_backend
 from wn.config import load_config
@@ -82,6 +82,7 @@ def build_parser():
 	_add_init_vm_parser(subcommands)
 	_add_update_vm_args_parser(subcommands)
 	_add_setup_parser(subcommands)
+	_add_agent_parser(subcommands)
 	return parser
 
 
@@ -99,6 +100,14 @@ def _add_setup_parser(subcommands):
 	setup.add_argument("--edition", default=DEFAULT_EDITION, help="Windows 11 edition (default: %(default)s)")
 	setup.add_argument("--downloads-dir", default=DEFAULT_DOWNLOADS_DIR, metavar="DIR", help="where to keep the downloaded ISOs and installers (default: %(default)s)")
 	setup.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
+
+
+def _add_agent_parser(subcommands):
+	agent_parser = subcommands.add_parser("agent", help="serve the Mac's battery status to the wn-tools tray app in the guest")
+	modes = agent_parser.add_mutually_exclusive_group()
+	modes.add_argument("--once", action="store_true", help="print the battery status as JSON and exit")
+	modes.add_argument("--install", action="store_true", help="start the agent at every login with a launchd agent in ~/Library/LaunchAgents")
+	modes.add_argument("--uninstall", action="store_true", help="remove the launchd agent")
 
 
 def _add_mouse_parser(subcommands):
@@ -464,6 +473,10 @@ def _setup_answers(arguments, stdin, stdout):
 	return answers
 
 
+def run_agent(context):
+	agent.run_agent_command(context.arguments, context.config, context.stdout)
+
+
 def run_setup(context):
 	arguments = context.arguments
 	answers = _setup_answers(arguments, context.stdin, context.stdout)
@@ -492,6 +505,7 @@ COMMANDS = {
 	"init-vm": run_init_vm,
 	"update-vm-args": run_update_vm_args,
 	"setup": run_setup,
+	"agent": run_agent,
 }
 
 
