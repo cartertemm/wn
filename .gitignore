@@ -1,0 +1,12 @@
+docs/research/
+STRATEGY.md
+docs/superpowers/
+__pycache__/
+*.pyc
+.venv/
+vm/
+*.iso
+*.img
+*.raw
+*.qcow2
+*.fd
