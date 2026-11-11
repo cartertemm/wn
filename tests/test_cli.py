@@ -323,6 +323,12 @@ class InitVMTests(CLITestCase):
 		arguments = self.read_plist(os.path.join(self.output, "Windows.utm"))["QEMU"]["AdditionalArguments"]
 		self.assertEqual(arguments[4:], ["-audiodev", "coreaudio,id=ca0", "-device", "usb-audio,audiodev=ca0"])
 
+	def test_extra_args(self):
+		exit_code, _, stderr = self.init_vm("--extra-args", "-device virtio-keyboard-pci,id=vkbd")
+		self.assertEqual(exit_code, 0, stderr)
+		arguments = self.read_plist(os.path.join(self.output, "Windows.utm"))["QEMU"]["AdditionalArguments"]
+		self.assertEqual(arguments[-2:], ["-device", "virtio-keyboard-pci,id=vkbd"])
+
 	def test_options(self):
 		exit_code, _, stderr = self.init_vm(
 			"--name", "Win 11", "--disk-gib", "128", "--cpus", "4", "--memory-mib", "4096",
@@ -517,6 +523,12 @@ class UpdateVMArgsTests(CLITestCase):
 		arguments = self.read_plist()["QEMU"]["AdditionalArguments"]
 		self.assertEqual(arguments[4:], audio_args.split())
 		self.assertIn("timer-period=2500", stdout)
+
+	def test_extra_args_follow_audio_args(self):
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--audio-args", "-device intel-hda", "--extra-args", "-device virtio-keyboard-pci,id=vkbd")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"][4:], ["-device", "intel-hda", "-device", "virtio-keyboard-pci,id=vkbd"])
+		self.assertIn("vkbd", stdout)
 
 	def test_audio_args_with_spice_is_error(self):
 		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--audio", "spice", "--audio-args", "-device intel-hda")

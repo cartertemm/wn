@@ -110,6 +110,7 @@ adds it to its list.
 | `--headless` | off | Create the VM without a display window. |
 | `--audio MODE` | `coreaudio` | `coreaudio` plays straight to macOS with low latency. `spice` uses UTM's audio path. |
 | `--audio-args ARGS` | none | QEMU arguments that replace the default coreaudio block (`-audiodev`, `intel-hda`, and `hda-output`). Use it to tune buffers or try another sound device. Needs `--audio coreaudio`. |
+| `--extra-args ARGS` | none | More QEMU arguments, added after everything else. For example `-device virtio-keyboard-pci,id=vkbd`. |
 | `--mac ADDRESS` | random `52:54:00:xx:xx:xx` | MAC address of the network card. |
 | `--output DIR` | UTM's documents folder | Where to write the bundle. |
 | `--qemu-img PATH` | `/opt/homebrew/bin/qemu-img` | The `qemu-img` tool. Install it with `brew install qemu`. |
@@ -136,6 +137,7 @@ Then quit UTM and open it again so it reads the new arguments, and run
 | `--headless` | off | Give this if the VM was created with `--headless`. |
 | `--audio MODE` | `coreaudio` | Give the audio mode the VM was created with. |
 | `--audio-args ARGS` | none | QEMU arguments that replace the default coreaudio block. See `init-vm`. |
+| `--extra-args ARGS` | none | More QEMU arguments, added at the end. See `init-vm`. |
 
 ### Press keys
 

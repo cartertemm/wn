@@ -12,3 +12,4 @@ vm/
 *.fd
 .DS_Store
 keygrab/bin/
+latency/bin/

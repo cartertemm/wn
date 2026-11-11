@@ -113,6 +113,7 @@ def _add_update_vm_args_parser(subcommands):
 
 def _add_audio_args_option(parser):
 	parser.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the default coreaudio block, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\". Needs --audio coreaudio")
+	parser.add_argument("--extra-args", metavar="ARGS", help="more QEMU arguments to add at the end, such as \"-device virtio-keyboard-pci,id=vkbd\"")
 
 
 def _add_init_vm_parser(subcommands):
@@ -307,6 +308,7 @@ def run_init_vm(context):
 		"headless": arguments.headless,
 		"audio": arguments.audio,
 		"audio_args": arguments.audio_args,
+		"extra_args": arguments.extra_args,
 		"qmp_port": context.config.qmp_port,
 		"qmp_session_port": context.config.qmp_session_port,
 	}
@@ -334,6 +336,7 @@ def run_update_vm_args(context):
 		"headless": arguments.headless,
 		"audio": arguments.audio,
 		"audio_args": arguments.audio_args,
+		"extra_args": arguments.extra_args,
 	})
 	context.print("Updated {}".format(os.path.join(bundle, "config.plist")))
 	context.print("AdditionalArguments: {}".format(" ".join(shlex.quote(argument) for argument in new_arguments)))

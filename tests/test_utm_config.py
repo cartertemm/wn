@@ -213,6 +213,14 @@ class ConfigContentTests(unittest.TestCase):
 		arguments = arguments_of(build_config(options(headless=True, audio="coreaudio", audio_args="-device intel-hda")))
 		self.assertEqual(arguments[4:], ["-device", "ramfb", "-device", "intel-hda"])
 
+	def test_extra_args_come_last(self):
+		arguments = arguments_of(build_config(options(audio="coreaudio", audio_args="-device intel-hda", extra_args="-device virtio-keyboard-pci,id=vkbd")))
+		self.assertEqual(arguments[4:], ["-device", "intel-hda", "-device", "virtio-keyboard-pci,id=vkbd"])
+
+	def test_extra_args_with_default_audio(self):
+		arguments = arguments_of(build_config(options(extra_args="-device virtio-keyboard-pci")))
+		self.assertEqual(arguments[-2:], ["-device", "virtio-keyboard-pci"])
+
 	def test_qmp_comes_first_in_arguments(self):
 		arguments = arguments_of(build_config(options(headless=True, audio="coreaudio")))
 		self.assertEqual(arguments[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
@@ -233,6 +241,11 @@ class ConfigValidationTests(unittest.TestCase):
 		with self.assertRaises(UTMConfigError) as context:
 			build_config(options(audio="coreaudio", audio_args="-device 'intel-hda"))
 		self.assertIn("audio_args", str(context.exception))
+
+	def test_unbalanced_quote_in_extra_args(self):
+		with self.assertRaises(UTMConfigError) as context:
+			build_config(options(extra_args="-device 'virtio-keyboard-pci"))
+		self.assertIn("extra_args", str(context.exception))
 
 	def test_unknown_audio_mode(self):
 		with self.assertRaises(UTMConfigError) as context:
@@ -317,6 +330,11 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 	def test_audio_args(self):
 		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "audio_args": "-audiodev coreaudio,id=ca0 -device intel-hda"})
 		self.assertEqual(new_arguments[4:], ["-audiodev", "coreaudio,id=ca0", "-device", "intel-hda"])
+		self.assertEqual(arguments_of(self.read_config()), new_arguments)
+
+	def test_extra_args(self):
+		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "extra_args": "-device virtio-keyboard-pci,id=vkbd"})
+		self.assertEqual(new_arguments[-2:], ["-device", "virtio-keyboard-pci,id=vkbd"])
 		self.assertEqual(arguments_of(self.read_config()), new_arguments)
 
 	def test_missing_bundle(self):

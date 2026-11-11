@@ -36,6 +36,7 @@ DEFAULT_OPTIONS = {
 	"audio": AUDIO_SPICE,
 	"audio_buffer_length_us": 20000,
 	"audio_args": None,
+	"extra_args": None,
 	"tpm": True,
 	"uefi": True,
 }
@@ -68,6 +69,11 @@ def _resolve_argument_options(options):
 			shlex.split(resolved["audio_args"])
 		except ValueError as error:
 			raise UTMConfigError("cannot parse audio_args: {}".format(error)) from None
+	if resolved["extra_args"]:
+		try:
+			shlex.split(resolved["extra_args"])
+		except ValueError as error:
+			raise UTMConfigError("cannot parse extra_args: {}".format(error)) from None
 	resolved["qmp_session_port"] = session_port(resolved["qmp_port"], resolved["qmp_session_port"])
 	if resolved["qmp_session_port"] == resolved["qmp_port"]:
 		raise UTMConfigError("qmp_session_port must differ from qmp_port {}".format(resolved["qmp_port"]))
@@ -97,6 +103,8 @@ def _additional_arguments(options):
 			"-device", "intel-hda",
 			"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
 		]
+	if options["extra_args"]:
+		arguments += shlex.split(options["extra_args"])
 	return arguments
 
 
@@ -231,7 +239,7 @@ def update_additional_arguments(bundle_path, options):
 	"""Replace the AdditionalArguments of an existing bundle's config.plist and return the new list.
 
 	``options`` takes the same argument options as ``build_config``, such as
-	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, and ``audio_args``. Nothing
+	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, and ``extra_args``. Nothing
 	else in config.plist changes.
 	"""
 	arguments = _additional_arguments(_resolve_argument_options(options))
