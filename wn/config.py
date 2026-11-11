@@ -21,6 +21,9 @@ class Config:
 	backend: str = "utm"
 	qmp_socket: Optional[str] = None
 	key_delay_ms: int = DEFAULT_KEY_DELAY_MS
+	keygrab_binary: Optional[str] = None
+	keygrab_keycodes: Optional[str] = None
+	keygrab_send_repeats: bool = True
 
 
 FIELD_TYPES = {
@@ -28,7 +31,11 @@ FIELD_TYPES = {
 	"backend": (str,),
 	"qmp_socket": (str, type(None)),
 	"key_delay_ms": (int,),
+	"keygrab_binary": (str, type(None)),
+	"keygrab_keycodes": (str, type(None)),
+	"keygrab_send_repeats": (bool,),
 }
+PATH_FIELDS = ("qmp_socket", "keygrab_binary", "keygrab_keycodes")
 
 
 def config_path():
@@ -51,7 +58,8 @@ def _validate(path, values):
 	for key, value in values.items():
 		if key not in FIELD_TYPES:
 			raise ConfigError("{}: unknown setting '{}'. Known settings: {}".format(path, key, ", ".join(FIELD_TYPES)))
-		if not isinstance(value, FIELD_TYPES[key]) or isinstance(value, bool):
+		allowed_types = FIELD_TYPES[key]
+		if not isinstance(value, allowed_types) or (isinstance(value, bool) and bool not in allowed_types):
 			raise ConfigError("{}: setting '{}' has the wrong type".format(path, key))
 
 
@@ -62,6 +70,7 @@ def load_config(path=None):
 		return Config()
 	values = _read_json(path)
 	_validate(path, values)
-	if values.get("qmp_socket"):
-		values["qmp_socket"] = os.path.expanduser(values["qmp_socket"])
+	for field in PATH_FIELDS:
+		if values.get(field):
+			values[field] = os.path.expanduser(values[field])
 	return Config(**values)

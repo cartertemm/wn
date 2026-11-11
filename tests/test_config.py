@@ -62,6 +62,34 @@ class ConfigTests(unittest.TestCase):
 			load_config()
 		self.assertIn("key_delay_ms", str(context.exception))
 
+	def test_bool_is_not_an_int(self):
+		self.write_config(json.dumps({"key_delay_ms": True}))
+		with self.assertRaises(ConfigError):
+			load_config()
+
+	def test_keygrab_defaults(self):
+		config = load_config()
+		self.assertIsNone(config.keygrab_binary)
+		self.assertIsNone(config.keygrab_keycodes)
+		self.assertTrue(config.keygrab_send_repeats)
+
+	def test_keygrab_settings_are_loaded(self):
+		self.write_config(json.dumps({
+			"keygrab_binary": "~/bin/wn-keygrab",
+			"keygrab_keycodes": "~/keycodes.json",
+			"keygrab_send_repeats": False,
+		}))
+		config = load_config()
+		self.assertEqual(config.keygrab_binary, os.path.join(self.home.name, "bin", "wn-keygrab"))
+		self.assertEqual(config.keygrab_keycodes, os.path.join(self.home.name, "keycodes.json"))
+		self.assertFalse(config.keygrab_send_repeats)
+
+	def test_send_repeats_must_be_bool(self):
+		self.write_config(json.dumps({"keygrab_send_repeats": 1}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn("keygrab_send_repeats", str(context.exception))
+
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")
 		with self.assertRaises(ConfigError):

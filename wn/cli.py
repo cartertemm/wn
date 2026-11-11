@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 
-from wn import __version__
+from wn import __version__, keygrab
 from wn.attach import attach
 from wn.backend import create_backend
 from wn.config import load_config
@@ -37,7 +37,14 @@ def build_parser():
 	type_text.add_argument("text")
 	_add_key_options(type_text)
 
-	subcommands.add_parser("attach", help="send terminal keystrokes to the guest. Press ctrl+] twice to detach")
+	attach_parser = subcommands.add_parser("attach", help="send terminal keystrokes to the guest. Press ctrl+] twice to detach")
+	attach_parser.add_argument("--grab", action="store_true", help="use grab mode instead, the same as wn grab")
+	attach_parser.set_defaults(start_released=False, release_hotkey=keygrab.DEFAULT_RELEASE_HOTKEY, dry_run=False)
+
+	grab = subcommands.add_parser("grab", help="send every key press on the Mac keyboard to the guest, including the Windows key")
+	grab.add_argument("--start-released", action="store_true", help="start with the keyboard released, not grabbed")
+	grab.add_argument("--release-hotkey", default=keygrab.DEFAULT_RELEASE_HOTKEY, metavar="MODIFIERS", help="comma separated modifiers that release and grab the keyboard (default: %(default)s)")
+	grab.add_argument("--dry-run", action="store_true", help="print the QMP commands as JSON instead of sending them")
 	share = subcommands.add_parser("share", help="share a host folder with the guest")
 	share.add_argument("host_path")
 	subcommands.add_parser("net", help="show or change VM networking")
@@ -121,7 +128,41 @@ def run_type(context):
 	_send_or_print_combos(context, text_to_combos(context.arguments.text))
 
 
+class DryRunQMPClient:
+	def __init__(self, print_line):
+		self._print_line = print_line
+
+	def execute(self, command, arguments=None):
+		self._print_line(json.dumps({"execute": command, "arguments": arguments}))
+
+
+def _grab_with(context, client):
+	config = context.config
+	arguments = context.arguments
+	keycode_table = keygrab.load_keycode_table(config.keygrab_keycodes or keygrab.default_keycodes_path())
+	keygrab.run_grab(
+		client,
+		config.keygrab_binary or keygrab.default_helper_path(),
+		keycode_table,
+		arguments.release_hotkey,
+		arguments.start_released,
+		context.stdout,
+		send_repeats=config.keygrab_send_repeats,
+	)
+
+
+def run_grab(context):
+	if context.arguments.dry_run:
+		_grab_with(context, DryRunQMPClient(context.print))
+		return
+	with context.connect_qmp() as client:
+		_grab_with(context, client)
+
+
 def run_attach(context):
+	if context.arguments.grab:
+		run_grab(context)
+		return
 	with context.connect_qmp() as client:
 		attach(client, context.config.key_delay_ms)
 
@@ -134,6 +175,7 @@ COMMANDS = {
 	"key": run_key,
 	"type": run_type,
 	"attach": run_attach,
+	"grab": run_grab,
 	"share": run_share,
 	"net": run_net,
 }

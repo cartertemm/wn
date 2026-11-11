@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from fake_keygrab_helper import read_log, write_fake_helper
 from fakes import FakeBackend, RecordingQMPClient
 from wn.cli import main
 from wn.keys import combo_to_send_key_arguments
@@ -145,6 +146,79 @@ class AttachCommandTests(CLITestCase):
 			self.assertEqual(self.run_cli("attach")[0], 0)
 		self.assertEqual(self.qmp_log[0], ("connect", "/fake/qmp.sock"))
 		attach.assert_called_once()
+
+
+
+GRAB_LINES = [
+	{"type": "grab", "active": True},
+	{"type": "down", "keycode": 55, "flags": 0, "ts": 1.0},
+	{"type": "up", "keycode": 55, "flags": 0, "ts": 1.0},
+]
+META_DOWN = {"events": [{"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "meta_l"}}}]}
+META_UP = {"events": [{"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "meta_l"}}}]}
+
+
+class GrabCommandTests(CLITestCase):
+	def setUp(self):
+		super().setUp()
+		self.helper_path, self.helper_log = write_fake_helper(self.home.name, GRAB_LINES)
+		self.write_config({"keygrab_binary": self.helper_path})
+
+	def write_config(self, values):
+		config_directory = os.path.join(self.home.name, ".config", "wn")
+		os.makedirs(config_directory, exist_ok=True)
+		with open(os.path.join(config_directory, "config.json"), "w") as config_file:
+			json.dump(values, config_file)
+
+	def test_grab_sends_input_events(self):
+		exit_code, stdout, stderr = self.run_cli("grab")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.qmp_log, [
+			("connect", "/fake/qmp.sock"),
+			("input-send-event", META_DOWN),
+			("input-send-event", META_UP),
+			("close",),
+		])
+		self.assertIn("grab on", stdout)
+
+	def test_dry_run_prints_commands_without_connecting(self):
+		exit_code, stdout, _ = self.run_cli("grab", "--dry-run")
+		self.assertEqual(exit_code, 0)
+		commands = [json.loads(line) for line in stdout.splitlines() if line.startswith("{")]
+		self.assertEqual(commands, [
+			{"execute": "input-send-event", "arguments": META_DOWN},
+			{"execute": "input-send-event", "arguments": META_UP},
+		])
+		self.assertEqual(self.qmp_log, [])
+		self.assertEqual(self.backend.calls, [])
+
+	def test_options_reach_helper(self):
+		self.run_cli("grab", "--start-released", "--release-hotkey", "control,shift", "--dry-run")
+		self.assertEqual(read_log(self.helper_log)[0], ["--release-hotkey", "control,shift", "--start-released"])
+
+	def test_default_release_hotkey(self):
+		self.run_cli("grab", "--dry-run")
+		self.assertEqual(read_log(self.helper_log)[0], ["--release-hotkey", "control,option,command"])
+
+	def test_attach_grab_uses_grab_mode(self):
+		exit_code, _, stderr = self.run_cli("attach", "--grab")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual([entry[0] for entry in self.qmp_log], ["connect", "input-send-event", "input-send-event", "close"])
+		self.assertEqual(read_log(self.helper_log)[0], ["--release-hotkey", "control,option,command"])
+
+	def test_missing_helper_is_reported(self):
+		self.write_config({"keygrab_binary": "/no/such/wn-keygrab"})
+		exit_code, _, stderr = self.run_cli("grab", "--dry-run")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("build.sh", stderr)
+
+	def test_keycodes_override(self):
+		keycodes_path = os.path.join(self.home.name, "keycodes.json")
+		with open(keycodes_path, "w") as keycodes_file:
+			json.dump({"keycodes": {"55": "meta_r"}}, keycodes_file)
+		self.write_config({"keygrab_binary": self.helper_path, "keygrab_keycodes": keycodes_path})
+		_, stdout, _ = self.run_cli("grab", "--dry-run")
+		self.assertIn('"meta_r"', stdout)
 
 
 if __name__ == "__main__":

@@ -33,10 +33,13 @@ python3 -m wn status
 | `backend` | `utm` | Which backend drives the VM. |
 | `qmp_socket` | none | Path of the QMP Unix socket. When unset, `wn` asks the backend. |
 | `key_delay_ms` | `20` | Pause after each key press for `key`, `type`, and `attach`. |
+| `keygrab_binary` | `keygrab/bin/wn-keygrab` | Path of the key grab helper for `grab`. |
+| `keygrab_keycodes` | `keygrab/keycodes.json` | Table that maps macOS keycodes to QEMU key names. |
+| `keygrab_send_repeats` | `true` | Send auto-repeat key presses to the guest in `grab` mode. |
 
 The UTM and QEMU backends are not written yet, so commands that need a
-backend report that it is not available. `key`, `type`, and `attach` work
-without a backend when `qmp_socket` is set.
+backend report that it is not available. `key`, `type`, `attach`, and
+`grab` work without a backend when `qmp_socket` is set.
 
 ## Commands
 
@@ -114,7 +117,45 @@ every key:
 A lone `esc` reaches the guest after a short wait, because `esc` also starts
 the sequences for arrow and function keys.
 
-Use `wn key` for any of these, for example `wn key win+r`.
+Use `wn grab` or `wn key` for any of these, for example `wn key win+r`.
+Attach mode is the fallback for when you cannot use `grab`, for example over
+SSH.
+
+### Grab the keyboard
+
+`wn grab` sends every key press on the Mac keyboard to the guest as a real
+key down and key up. This is the mode that delivers what attach mode cannot:
+
+- The Windows key. Command maps to it, so Command+R in grab mode is `win+r`
+  in Windows.
+- `ctrl+alt+del` and every other combo.
+- Keys held down, for example a held Shift or a held arrow key.
+
+```sh
+python3 -m wn grab
+python3 -m wn attach --grab   # the same as wn grab
+```
+
+While the grab is on, macOS and other apps do not see the keyboard. Press
+Control+Option+Command together and release them to give the keyboard back to
+macOS. Press them again to grab it again. When the grab turns off, `wn` releases
+every key the guest still holds, so no key stays stuck. Press `ctrl+c` while
+the grab is off to stop `wn grab`.
+
+| Option | Meaning |
+|---|---|
+| `--start-released` | Start with the keyboard released. |
+| `--release-hotkey MODIFIERS` | Use other modifiers to release and grab, for example `control,shift`. Names are `control`, `option`, `command`, `shift`, `capslock`, and `fn`. |
+| `--dry-run` | Print each QMP command as JSON instead of sending it. The keyboard is still grabbed. |
+
+Grab mode runs the `wn-keygrab` helper in `keygrab/`. Build it once with
+`keygrab/build.sh`. The helper reads the keyboard through a macOS event tap,
+so it needs Accessibility permission. Turn it on in System Settings > Privacy &
+Security > Accessibility for your terminal app, and for
+`keygrab/bin/wn-keygrab` if it is in the list. After you rebuild the helper,
+turn its entry off and on again. See `keygrab/README.md` for details.
+
+Grab mode only works in a local session on the Mac. Over SSH, use `attach`.
 
 ### Shared folders and networking
 
