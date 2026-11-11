@@ -8,7 +8,7 @@ from unittest import mock
 
 from wn.attach import DETACH_WINDOW_SECONDS, ESCAPE_TIMEOUT_SECONDS, TerminalTranslator, attach, run_attach_loop
 from wn.errors import WnError
-from wn.keys import combo_to_send_key_arguments
+from wn.keys import combo_to_input_events
 
 DETACH_BYTE = b"\x1d"
 LOCAL_FLAGS_INDEX = 3
@@ -140,10 +140,7 @@ class AttachTerminalTests(unittest.TestCase):
 		client = RecordingClient()
 		with mock.patch("sys.stderr", io.StringIO()), mock.patch("wn.attach.tty.setraw", setraw_then_type):
 			attach(client, delay_ms=0, file_descriptor=terminal)
-		self.assertEqual(client.commands, [
-			("send-key", combo_to_send_key_arguments("o")),
-			("send-key", combo_to_send_key_arguments("k")),
-		])
+		self.assertEqual(client.commands, [("input-send-event", arguments) for arguments in combo_to_input_events("o") + combo_to_input_events("k")])
 		restored_local_flags = termios.tcgetattr(terminal)[LOCAL_FLAGS_INDEX]
 		self.assertEqual(restored_local_flags & CANONICAL_ECHO_FLAGS, original_attributes[LOCAL_FLAGS_INDEX] & CANONICAL_ECHO_FLAGS)
 

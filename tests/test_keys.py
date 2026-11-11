@@ -1,6 +1,14 @@
 import unittest
 
-from wn.keys import KeyNameError, combo_to_send_key_arguments, parse_combo, send_combos
+from wn.keys import (
+	DEFAULT_HOLD_MS,
+	KeyNameError,
+	combo_to_input_events,
+	combos_to_input_steps,
+	key_event,
+	parse_combo,
+	send_combos,
+)
 
 
 class ParseComboTests(unittest.TestCase):
@@ -69,22 +77,30 @@ class ParseComboTests(unittest.TestCase):
 			parse_combo("ctrl+control+a")
 
 
-class SendKeyArgumentsTests(unittest.TestCase):
-	def test_arguments_without_hold_time(self):
-		self.assertEqual(
-			combo_to_send_key_arguments("ctrl+alt+del"),
-			{"keys": [
-				{"type": "qcode", "data": "ctrl"},
-				{"type": "qcode", "data": "alt"},
-				{"type": "qcode", "data": "delete"},
-			]},
-		)
+def press(*qcodes):
+	return {"events": [key_event(qcode, True) for qcode in qcodes]}
 
-	def test_arguments_with_hold_time(self):
-		self.assertEqual(
-			combo_to_send_key_arguments("enter", hold_ms=150),
-			{"keys": [{"type": "qcode", "data": "ret"}], "hold-time": 150},
-		)
+
+def release(*qcodes):
+	return {"events": [key_event(qcode, False) for qcode in qcodes]}
+
+
+class InputEventTests(unittest.TestCase):
+	def test_key_event(self):
+		self.assertEqual(key_event("ret", True), {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "ret"}}})
+
+	def test_combo_presses_in_order_and_releases_in_reverse(self):
+		self.assertEqual(combo_to_input_events("ctrl+alt+del"), (press("ctrl", "alt", "delete"), release("delete", "alt", "ctrl")))
+
+	def test_steps_hold_then_delay(self):
+		self.assertEqual(combos_to_input_steps(["enter"], delay_ms=20, hold_ms=150), [(press("ret"), 150), (release("ret"), 20)])
+
+	def test_default_hold(self):
+		self.assertEqual(combos_to_input_steps(["a"], delay_ms=20)[0], (press("a"), DEFAULT_HOLD_MS))
+
+	def test_repeated_combo_gives_separate_presses(self):
+		steps = combos_to_input_steps(["down", "down"], delay_ms=20, hold_ms=50)
+		self.assertEqual([arguments for arguments, _ in steps], [press("down"), release("down"), press("down"), release("down")])
 
 
 class RecordingClient:
@@ -97,13 +113,17 @@ class RecordingClient:
 
 
 class SendCombosTests(unittest.TestCase):
-	def test_sends_each_combo_and_sleeps_between(self):
+	def test_sends_input_events_and_sleeps_for_hold_and_delay(self):
 		client = RecordingClient()
 		sleeps = []
-		send_combos(client, ["a", "shift+b"], delay_ms=30, hold_ms=None, sleep=sleeps.append)
-		self.assertEqual([command for command, _ in client.commands], ["send-key", "send-key"])
-		self.assertEqual(client.commands[1][1], combo_to_send_key_arguments("shift+b"))
-		self.assertEqual(sleeps, [0.03, 0.03])
+		send_combos(client, ["a", "shift+b"], delay_ms=30, hold_ms=40, sleep=sleeps.append)
+		self.assertEqual(client.commands, [
+			("input-send-event", press("a")),
+			("input-send-event", release("a")),
+			("input-send-event", press("shift", "b")),
+			("input-send-event", release("b", "shift")),
+		])
+		self.assertEqual(sleeps, [0.04, 0.03, 0.04, 0.03])
 
 	def test_validates_all_combos_before_sending(self):
 		client = RecordingClient()

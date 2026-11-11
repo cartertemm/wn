@@ -16,6 +16,7 @@ import signal
 import subprocess
 
 from wn.errors import WnError
+from wn.keys import key_event
 
 PACKAGE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 KEYGRAB_DIRECTORY = os.path.join(os.path.dirname(PACKAGE_DIRECTORY), "keygrab")
@@ -52,10 +53,6 @@ def load_keycode_table(path):
 		raise WnError("{} is not a keycode table like keygrab/keycodes.json".format(path)) from None
 
 
-def _key_event(qcode, down):
-	return {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": qcode}}}
-
-
 class KeyEventTranslator:
 	"""Turns helper JSON lines into ``input-send-event`` arguments.
 
@@ -85,7 +82,7 @@ class KeyEventTranslator:
 		self._held_qcodes.clear()
 		if not qcodes:
 			return []
-		return [{"events": [_key_event(qcode, False) for qcode in qcodes]}]
+		return [{"events": [key_event(qcode, False) for qcode in qcodes]}]
 
 	def _translate_key(self, line, down):
 		qcode = self.keycode_table.get(line.get("keycode"))
@@ -100,7 +97,7 @@ class KeyEventTranslator:
 			return []
 		else:
 			del self._held_qcodes[qcode]
-		return [{"events": [_key_event(qcode, down)]}]
+		return [{"events": [key_event(qcode, down)]}]
 
 
 def _raise_keyboard_interrupt(signal_number, frame):

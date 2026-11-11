@@ -22,11 +22,13 @@ class Config:
 	backend: str = "utm"
 	utmctl_path: str = DEFAULT_UTMCTL_PATH
 	qmp_port: int = DEFAULT_QMP_PORT
+	qmp_session_port: Optional[int] = None
 	qmp_socket: Optional[str] = None
 	key_delay_ms: int = DEFAULT_KEY_DELAY_MS
 	keygrab_binary: Optional[str] = None
 	keygrab_keycodes: Optional[str] = None
 	keygrab_send_repeats: bool = True
+	screen_size: Optional[str] = None
 
 
 FIELD_TYPES = {
@@ -34,11 +36,13 @@ FIELD_TYPES = {
 	"backend": (str,),
 	"utmctl_path": (str,),
 	"qmp_port": (int,),
+	"qmp_session_port": (int, type(None)),
 	"qmp_socket": (str, type(None)),
 	"key_delay_ms": (int,),
 	"keygrab_binary": (str, type(None)),
 	"keygrab_keycodes": (str, type(None)),
 	"keygrab_send_repeats": (bool,),
+	"screen_size": (str, type(None)),
 }
 PATH_FIELDS = ("utmctl_path", "qmp_socket", "keygrab_binary", "keygrab_keycodes")
 

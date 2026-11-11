@@ -4,9 +4,10 @@ from wn.backend import Backend, VMStatus
 
 
 class FakeBackend(Backend):
-	def __init__(self, socket_path="/fake/qmp.sock", ip_address="192.168.64.5", state="running"):
+	def __init__(self, socket_path="/fake/qmp.sock", session_socket_path="/fake/qmp-session.sock", ip_address="192.168.64.5", state="running"):
 		self.calls = []
 		self.socket_path = socket_path
+		self.session_socket_path = session_socket_path
 		self.ip_address = ip_address
 		self.state = state
 
@@ -24,9 +25,9 @@ class FakeBackend(Backend):
 		self.calls.append(("ip",))
 		return self.ip_address
 
-	def qmp_socket_path(self):
-		self.calls.append(("qmp_socket_path",))
-		return self.socket_path
+	def qmp_socket_path(self, session=False):
+		self.calls.append(("qmp_socket_path", session))
+		return self.session_socket_path if session else self.socket_path
 
 
 class RecordingQMPClient:

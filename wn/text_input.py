@@ -1,7 +1,6 @@
 """Turn text into key combos for a US keyboard layout and type it into the guest."""
 
 import string
-import time
 
 from wn.errors import WnError
 from wn.keys import send_combos
@@ -86,6 +85,6 @@ def text_to_combos(text):
 	return [CHAR_COMBOS[char] for char in text]
 
 
-def send_text(client, text, delay_ms=DEFAULT_KEY_DELAY_MS, hold_ms=None, sleep=time.sleep):
-	"""Type ``text`` into the guest through a QMP client with ``send-key``."""
+def send_text(client, text, delay_ms=DEFAULT_KEY_DELAY_MS, hold_ms=None, sleep=None):
+	"""Type ``text`` into the guest through a QMP client."""
 	send_combos(client, text_to_combos(text), delay_ms, hold_ms, sleep)

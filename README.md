@@ -1,8 +1,8 @@
 # wn
 
 `wn` controls a Windows 11 ARM64 VM on macOS from the terminal. It starts and
-stops the VM, reports its state and IP address, and sends keystrokes to the
-guest through QEMU's QMP socket.
+stops the VM, reports its state and IP address, and sends keystrokes and
+mouse input to the guest through QEMU's QMP socket.
 
 `wn` needs only the Python 3.9 standard library.
 
@@ -32,14 +32,16 @@ python3 -m wn status
 | `vm_name` | `Windows` | Name of the VM in the backend. |
 | `backend` | `utm` | Which backend drives the VM. |
 | `utmctl_path` | `/Applications/UTM.app/Contents/MacOS/utmctl` | Path of UTM's `utmctl` tool. |
-| `qmp_port` | `4444` | TCP port of the VM's QMP server on `127.0.0.1`. |
-| `qmp_socket` | none | QMP address: a Unix socket path or `tcp:HOST:PORT`. When unset, `wn` asks the backend. |
-| `key_delay_ms` | `20` | Pause after each key press for `key`, `type`, and `attach`. |
+| `qmp_port` | `4444` | TCP port of the VM's QMP server on `127.0.0.1` for one-shot commands such as `key`, `type`, and `mouse`. |
+| `qmp_session_port` | `qmp_port` + 1 | TCP port of the second QMP server, used by `attach` and `grab`. |
+| `qmp_socket` | none | QMP address: a Unix socket path or `tcp:HOST:PORT`. When unset, `wn` asks the backend. When set, every command uses it. |
+| `key_delay_ms` | `20` | Pause after each key is released for `key`, `type`, and `attach`. |
+| `screen_size` | none | Guest screen size such as `1280x800`. When set, `wn mouse move` takes pixel positions. |
 | `keygrab_binary` | `keygrab/bin/wn-keygrab` | Path of the key grab helper for `grab`. |
 | `keygrab_keycodes` | `keygrab/keycodes.json` | Table that maps macOS keycodes to QEMU key names. |
 | `keygrab_send_repeats` | `true` | Send auto-repeat key presses to the guest in `grab` mode. |
 
-`utm` is the only backend so far. `key`, `type`, `attach`, and `grab` work
+`utm` is the only backend so far. `key`, `type`, `mouse`, `attach`, and `grab` work
 with any QEMU VM when `qmp_socket` is set.
 
 ### Configure for UTM
@@ -56,13 +58,18 @@ QEMU opens on a local TCP port. A typical `~/.config/wn/config.json`:
 ```
 
 `vm_name` must match the VM's name in UTM. The VM's QEMU additional
-arguments must include:
+arguments must include two QMP servers:
 
 ```
 -qmp tcp:127.0.0.1:4444,server=on,wait=off
+-qmp tcp:127.0.0.1:4445,server=on,wait=off
 ```
 
-Use the same port as `qmp_port`. `wn init-vm` adds this argument for you.
+Use `qmp_port` for the first and `qmp_session_port` for the second. Each QMP
+server serves one client at a time, so `attach` and `grab` use the second
+server, and `key`, `type`, and `mouse` still work while they run.
+`wn init-vm` adds both arguments for you. For a VM made by an older `wn`, see
+[Update the QEMU arguments of a VM](#update-the-qemu-arguments-of-a-vm).
 
 ## Commands
 
@@ -106,6 +113,28 @@ adds it to its list.
 | `--output DIR` | UTM's documents folder | Where to write the bundle. |
 | `--qemu-img PATH` | `/opt/homebrew/bin/qemu-img` | The `qemu-img` tool. Install it with `brew install qemu`. |
 
+### Update the QEMU arguments of a VM
+
+`wn update-vm-args` rewrites the QEMU additional arguments of an existing UTM
+bundle, for example to add the second QMP server to a VM made by an older
+`wn`. It changes nothing else in `config.plist`, and it refuses to run while
+the VM is not stopped.
+
+```sh
+python3 -m wn stop
+python3 -m wn status          # wait for "Windows: stopped"
+python3 -m wn update-vm-args
+```
+
+Then quit UTM and open it again so it reads the new arguments, and run
+`wn start`.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--bundle PATH` | `vm_name.utm` in UTM's documents folder | The bundle to update. |
+| `--headless` | off | Give this if the VM was created with `--headless`. |
+| `--audio MODE` | `coreaudio` | Give the audio mode the VM was created with. |
+
 ### Press keys
 
 `wn key` presses one or more key combos in order. Join keys in a combo with `+`.
@@ -142,15 +171,48 @@ python3 -m wn type --delay-ms 50 'slow typing'
 | Option | Meaning |
 |---|---|
 | `--dry-run` | Print each QMP command as JSON instead of sending it. |
-| `--delay-ms N` | Pause N milliseconds after each key press. |
-| `--hold-ms N` | Hold each combo down for N milliseconds. QEMU uses 100 when you omit it. |
+| `--delay-ms N` | Pause N milliseconds after each combo is released. |
+| `--hold-ms N` | Hold each combo down for N milliseconds before it is released. The default is 50. |
 
-For example:
+`wn` sends each combo as one QMP `input-send-event` command that presses its
+keys and a second one that releases them, last key first. A repeated key,
+such as `wn key down down` or the two l's in `wn type hello`, reaches the guest
+as separate presses. For example:
 
 ```sh
-$ python3 -m wn key ctrl+alt+del --dry-run
-{"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": "ctrl"}, {"type": "qcode", "data": "alt"}, {"type": "qcode", "data": "delete"}]}}
+$ python3 -m wn key ctrl+c --dry-run
+{"execute": "input-send-event", "arguments": {"events": [{"type": "key", "data": {"down": true, "key": {"type": "qcode", "data": "ctrl"}}}, {"type": "key", "data": {"down": true, "key": {"type": "qcode", "data": "c"}}}]}}
+{"execute": "input-send-event", "arguments": {"events": [{"type": "key", "data": {"down": false, "key": {"type": "qcode", "data": "c"}}}, {"type": "key", "data": {"down": false, "key": {"type": "qcode", "data": "ctrl"}}}]}}
 ```
+
+### Use the mouse
+
+`wn mouse` moves the guest's pointer, clicks, and scrolls through QEMU's USB
+tablet.
+
+```sh
+python3 -m wn mouse move 16383 16383               # the middle of the screen
+python3 -m wn mouse move 640 400 --screen 1280x800 # the same point, in pixels
+python3 -m wn mouse click                          # left click
+python3 -m wn mouse click right
+python3 -m wn mouse doubleclick
+python3 -m wn mouse down                           # press and keep the left button down
+python3 -m wn mouse up
+python3 -m wn mouse scroll down 3                  # three wheel notches
+```
+
+| Action | Meaning |
+|---|---|
+| `move X Y` | Move the pointer. X and Y go from 0 to 32767 across the screen. With `--screen WxH`, or `screen_size` in the config, they are pixels. |
+| `click [BUTTON]` | Press and release a button. |
+| `doubleclick [BUTTON]` | Click twice. |
+| `down [BUTTON]` | Press a button and keep it down, for example to drag. |
+| `up [BUTTON]` | Release a button. |
+| `scroll up\|down [N]` | Turn the wheel N notches. The default is 1. |
+
+`BUTTON` is `left`, `right`, or `middle`. The default is `left`. Every action
+takes `--dry-run`, which prints the QMP commands as JSON instead of sending
+them. Clicks happen where the pointer is, so move it first.
 
 ### Attach the terminal
 
@@ -171,6 +233,8 @@ A lone `esc` reaches the guest after a short wait, because `esc` also starts
 the sequences for arrow and function keys.
 
 Use `wn grab` or `wn key` for any of these, for example `wn key win+r`.
+`attach` and `grab` connect to the QMP server on `qmp_session_port`, so
+`wn key` works in another terminal while they run.
 Attach mode is the fallback for when you cannot use `grab`, for example over
 SSH.
 

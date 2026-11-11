@@ -1,6 +1,6 @@
 import unittest
 
-from wn.keys import combo_to_send_key_arguments
+from wn.keys import DEFAULT_HOLD_MS, combo_to_input_events
 from wn.text_input import UnsupportedCharacterError, char_to_combo, send_text, text_to_combos
 
 
@@ -41,7 +41,7 @@ class CharToComboTests(unittest.TestCase):
 
 	def test_every_printable_ascii_char_is_supported(self):
 		for code in range(0x20, 0x7f):
-			combo_to_send_key_arguments(char_to_combo(chr(code)))
+			combo_to_input_events(char_to_combo(chr(code)))
 
 	def test_non_ascii_rejected(self):
 		with self.assertRaises(UnsupportedCharacterError) as context:
@@ -69,22 +69,34 @@ class RecordingClient:
 
 
 class SendTextTests(unittest.TestCase):
-	def test_sends_send_key_per_char_with_default_delay(self):
+	def test_sends_press_and_release_per_char_with_default_delay(self):
 		client = RecordingClient()
 		sleeps = []
 		send_text(client, "aB", sleep=sleeps.append)
+		a_press, a_release = combo_to_input_events("a")
+		b_press, b_release = combo_to_input_events("shift+b")
 		self.assertEqual(client.commands, [
-			("send-key", combo_to_send_key_arguments("a")),
-			("send-key", combo_to_send_key_arguments("shift+b")),
+			("input-send-event", a_press),
+			("input-send-event", a_release),
+			("input-send-event", b_press),
+			("input-send-event", b_release),
 		])
-		self.assertEqual(sleeps, [0.02, 0.02])
+		hold_seconds = DEFAULT_HOLD_MS / 1000
+		self.assertEqual(sleeps, [hold_seconds, 0.02, hold_seconds, 0.02])
+
+	def test_repeated_letters_are_pressed_twice(self):
+		client = RecordingClient()
+		send_text(client, "hello", sleep=lambda seconds: None)
+		l_press, l_release = combo_to_input_events("l")
+		arguments = [arguments for _, arguments in client.commands]
+		self.assertEqual(arguments[4:8], [l_press, l_release, l_press, l_release])
+		self.assertEqual(arguments.count(l_press), 2)
 
 	def test_hold_time_and_delay_are_passed_through(self):
 		client = RecordingClient()
 		sleeps = []
 		send_text(client, "x", delay_ms=50, hold_ms=10, sleep=sleeps.append)
-		self.assertEqual(client.commands[0][1]["hold-time"], 10)
-		self.assertEqual(sleeps, [0.05])
+		self.assertEqual(sleeps, [0.01, 0.05])
 
 	def test_nothing_sent_when_text_has_unsupported_char(self):
 		client = RecordingClient()

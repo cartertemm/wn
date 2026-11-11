@@ -12,6 +12,7 @@ from wn.utm_config import (
 	build_config,
 	config_plist_bytes,
 	create_disk_image,
+	update_additional_arguments,
 	write_bundle,
 )
 
@@ -128,8 +129,24 @@ class ConfigContentTests(unittest.TestCase):
 		self.assertIs(qemu["UEFIBoot"], False)
 
 	def test_qmp_server_argument(self):
-		self.assertEqual(arguments_of(build_config(options())), ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off"])
-		self.assertEqual(arguments_of(build_config(options(qmp_port=4500))), ["-qmp", "tcp:127.0.0.1:4500,server=on,wait=off"])
+		self.assertEqual(arguments_of(build_config(options())), [
+			"-qmp", "tcp:127.0.0.1:4444,server=on,wait=off",
+			"-qmp", "tcp:127.0.0.1:4445,server=on,wait=off",
+		])
+		self.assertEqual(arguments_of(build_config(options(qmp_port=4500))), [
+			"-qmp", "tcp:127.0.0.1:4500,server=on,wait=off",
+			"-qmp", "tcp:127.0.0.1:4501,server=on,wait=off",
+		])
+
+	def test_qmp_session_port(self):
+		self.assertEqual(arguments_of(build_config(options(qmp_session_port=5000)))[:4], [
+			"-qmp", "tcp:127.0.0.1:4444,server=on,wait=off",
+			"-qmp", "tcp:127.0.0.1:5000,server=on,wait=off",
+		])
+
+	def test_qmp_ports_must_differ(self):
+		with self.assertRaises(UTMConfigError):
+			build_config(options(qmp_session_port=4444))
 
 	def test_drives(self):
 		cd, disk = build_config(options())["Drive"]
@@ -188,7 +205,7 @@ class ConfigContentTests(unittest.TestCase):
 
 	def test_qmp_comes_first_in_arguments(self):
 		arguments = arguments_of(build_config(options(headless=True, audio="coreaudio")))
-		self.assertEqual(arguments[:2], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off"])
+		self.assertEqual(arguments[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
 
 	def test_each_build_gets_new_uuids(self):
 		first = build_config(options())
@@ -245,6 +262,47 @@ class WriteBundleTests(unittest.TestCase):
 		open(os.path.join(data, "disk.qcow2"), "w").close()
 		write_bundle(self.directory, options())
 		self.assertEqual(os.listdir(data), ["disk.qcow2"])
+
+
+class UpdateAdditionalArgumentsTests(unittest.TestCase):
+	def setUp(self):
+		directory = tempfile.TemporaryDirectory()
+		self.addCleanup(directory.cleanup)
+		self.bundle = write_bundle(directory.name, options(audio="coreaudio"))
+		self.plist_path = os.path.join(self.bundle, "config.plist")
+		with open(self.plist_path, "rb") as plist_file:
+			config = plistlib.load(plist_file)
+		config["QEMU"]["AdditionalArguments"] = ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off"]
+		with open(self.plist_path, "wb") as plist_file:
+			plistlib.dump(config, plist_file)
+		self.original = config
+
+	def read_config(self):
+		with open(self.plist_path, "rb") as plist_file:
+			return plistlib.load(plist_file)
+
+	def test_rewrites_only_additional_arguments(self):
+		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "qmp_port": 4444})
+		config = self.read_config()
+		self.assertEqual(arguments_of(config), new_arguments)
+		self.assertEqual(new_arguments[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
+		self.assertIn("coreaudio,id=ca0,out.buffer-length=20000", new_arguments)
+		config["QEMU"]["AdditionalArguments"] = self.original["QEMU"]["AdditionalArguments"]
+		self.assertEqual(config, self.original)
+
+	def test_matches_a_new_bundle(self):
+		update_additional_arguments(self.bundle, {"audio": "coreaudio"})
+		self.assertEqual(arguments_of(self.read_config()), arguments_of(build_config(options(audio="coreaudio"))))
+
+	def test_missing_bundle(self):
+		with self.assertRaises(UTMConfigError) as context:
+			update_additional_arguments(os.path.join(self.bundle, "missing.utm"), {})
+		self.assertIn("config.plist", str(context.exception))
+
+	def test_unknown_option(self):
+		with self.assertRaises(UTMConfigError):
+			update_additional_arguments(self.bundle, {"colour": "red"})
+		self.assertEqual(self.read_config(), self.original)
 
 
 FAKE_QEMU_IMG_SOURCE = """

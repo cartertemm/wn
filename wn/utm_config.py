@@ -19,6 +19,7 @@ AUDIO_COREAUDIO = "coreaudio"
 AUDIO_MODES = (AUDIO_SPICE, AUDIO_COREAUDIO)
 MAXIMUM_USB_SHARE = 3
 INTERFACE_VERSION = 1
+QMP_SESSION_PORT_OFFSET = 1
 
 REQUIRED_OPTIONS = ("name", "mac_address")
 DEFAULT_OPTIONS = {
@@ -30,6 +31,7 @@ DEFAULT_OPTIONS = {
 	"machine_properties": "kernel-irqchip=off",
 	"headless": False,
 	"qmp_port": 4444,
+	"qmp_session_port": None,
 	"audio": AUDIO_SPICE,
 	"audio_buffer_length_us": 20000,
 	"tpm": True,
@@ -45,21 +47,37 @@ def _new_uuid():
 	return str(uuid.uuid4()).upper()
 
 
-def _resolve_options(options):
+def session_port(qmp_port, qmp_session_port=None):
+	"""Return the QMP port for long-lived clients: ``qmp_session_port``, or the port after ``qmp_port``."""
+	return qmp_port + QMP_SESSION_PORT_OFFSET if qmp_session_port is None else qmp_session_port
+
+
+def _resolve_argument_options(options):
 	unknown = sorted(set(options) - set(REQUIRED_OPTIONS) - set(DEFAULT_OPTIONS))
 	if unknown:
 		raise UTMConfigError("unknown VM options: {}. Known options: {}".format(", ".join(unknown), ", ".join(REQUIRED_OPTIONS + tuple(DEFAULT_OPTIONS))))
-	missing = [key for key in REQUIRED_OPTIONS if not options.get(key)]
-	if missing:
-		raise UTMConfigError("missing VM options: {}".format(", ".join(missing)))
 	resolved = dict(DEFAULT_OPTIONS, **options)
 	if resolved["audio"] not in AUDIO_MODES:
 		raise UTMConfigError("audio mode '{}' is not supported. Use one of: {}".format(resolved["audio"], ", ".join(AUDIO_MODES)))
+	resolved["qmp_session_port"] = session_port(resolved["qmp_port"], resolved["qmp_session_port"])
+	if resolved["qmp_session_port"] == resolved["qmp_port"]:
+		raise UTMConfigError("qmp_session_port must differ from qmp_port {}".format(resolved["qmp_port"]))
 	return resolved
 
 
+def _resolve_options(options):
+	missing = [key for key in REQUIRED_OPTIONS if not options.get(key)]
+	if missing:
+		raise UTMConfigError("missing VM options: {}".format(", ".join(missing)))
+	return _resolve_argument_options(options)
+
+
+def _qmp_server(port):
+	return ["-qmp", "tcp:{}:{},server=on,wait=off".format(QMP_HOST, port)]
+
+
 def _additional_arguments(options):
-	arguments = ["-qmp", "tcp:{}:{},server=on,wait=off".format(QMP_HOST, options["qmp_port"])]
+	arguments = _qmp_server(options["qmp_port"]) + _qmp_server(options["qmp_session_port"])
 	if options["headless"]:
 		arguments += ["-device", "ramfb"]
 	if options["audio"] == AUDIO_COREAUDIO:
@@ -196,6 +214,30 @@ def write_bundle(path, options):
 	except OSError as error:
 		raise UTMConfigError("cannot write UTM bundle {}: {}".format(bundle, error)) from None
 	return bundle
+
+
+def update_additional_arguments(bundle_path, options):
+	"""Replace the AdditionalArguments of an existing bundle's config.plist and return the new list.
+
+	``options`` takes the same argument options as ``build_config``, such as
+	``qmp_port``, ``qmp_session_port``, ``headless``, and ``audio``. Nothing
+	else in config.plist changes.
+	"""
+	arguments = _additional_arguments(_resolve_argument_options(options))
+	config_path = os.path.join(bundle_path, CONFIG_FILE_NAME)
+	try:
+		with open(config_path, "rb") as config_file:
+			config = plistlib.load(config_file)
+		config["QEMU"]["AdditionalArguments"] = arguments
+		temporary_path = config_path + ".tmp"
+		with open(temporary_path, "wb") as config_file:
+			config_file.write(config_plist_bytes(config))
+		os.replace(temporary_path, config_path)
+	except OSError as error:
+		raise UTMConfigError("cannot update {}: {}".format(config_path, error)) from None
+	except (plistlib.InvalidFileException, KeyError, TypeError):
+		raise UTMConfigError("{} is not a UTM QEMU configuration".format(config_path)) from None
+	return arguments
 
 
 def create_disk_image(path, size_gib, qemu_img_path=DEFAULT_QEMU_IMG_PATH):

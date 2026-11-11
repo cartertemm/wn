@@ -5,6 +5,7 @@ import subprocess
 
 from wn.backend import Backend, BackendError, VMStatus
 from wn.qmp import TCP_ADDRESS_PREFIX
+from wn.utm_config import session_port
 
 DEFAULT_VM_NAME = "Windows"
 DEFAULT_UTMCTL_PATH = "/Applications/UTM.app/Contents/MacOS/utmctl"
@@ -62,7 +63,7 @@ def parse_list_output(output):
 
 
 class UTMBackend(Backend):
-	"""Drives one UTM VM through utmctl. Config keys: ``vm_name``, ``utmctl_path``, ``qmp_port``.
+	"""Drives one UTM VM through utmctl. Config keys: ``vm_name``, ``utmctl_path``, ``qmp_port``, ``qmp_session_port``.
 
 	``utmctl_path`` is a path, or a list of arguments that runs utmctl.
 	"""
@@ -71,6 +72,7 @@ class UTMBackend(Backend):
 		self.vm_name = _setting(config, "vm_name", DEFAULT_VM_NAME)
 		self.utmctl_command = _as_command(_setting(config, "utmctl_path", DEFAULT_UTMCTL_PATH))
 		self.qmp_port = _setting(config, "qmp_port", DEFAULT_QMP_PORT)
+		self.qmp_session_port = session_port(self.qmp_port, _setting(config, "qmp_session_port", None))
 
 	def start(self):
 		self._run_for_vm("start", self.vm_name)
@@ -95,8 +97,9 @@ class UTMBackend(Backend):
 				return str(address)
 		raise UTMCtlError("utmctl reported no IPv4 address for '{}'. Is the QEMU guest agent running?".format(self.vm_name))
 
-	def qmp_socket_path(self):
-		return "{}{}:{}".format(TCP_ADDRESS_PREFIX, QMP_HOST, self.qmp_port)
+	def qmp_socket_path(self, session=False):
+		port = self.qmp_session_port if session else self.qmp_port
+		return "{}{}:{}".format(TCP_ADDRESS_PREFIX, QMP_HOST, port)
 
 	@staticmethod
 	def _map_state(utm_state):

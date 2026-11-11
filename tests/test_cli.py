@@ -12,7 +12,7 @@ from fake_keygrab_helper import read_log, write_fake_helper
 from fake_qmp_server import TCPFakeQMPServer, reply
 from fakes import FakeBackend, RecordingQMPClient
 from wn.cli import main
-from wn.keys import combo_to_send_key_arguments
+from wn.keys import combo_to_input_events
 
 
 class CLITestCase(unittest.TestCase):
@@ -97,35 +97,47 @@ class LifecycleCommandTests(CLITestCase):
 		self.assertEqual(context.exception.code, 2)
 
 
+def input_commands(*combos):
+	return [{"execute": "input-send-event", "arguments": arguments} for combo in combos for arguments in combo_to_input_events(combo)]
+
+
+def printed_commands(stdout):
+	return [json.loads(line) for line in stdout.splitlines()]
+
+
 class KeyCommandTests(CLITestCase):
-	def test_dry_run_prints_command_without_connecting(self):
+	def test_dry_run_prints_commands_without_connecting(self):
 		exit_code, stdout, _ = self.run_cli("key", "ctrl+alt+del", "--dry-run")
 		self.assertEqual(exit_code, 0)
-		self.assertEqual(json.loads(stdout), {"execute": "send-key", "arguments": combo_to_send_key_arguments("ctrl+alt+del")})
+		self.assertEqual(printed_commands(stdout), input_commands("ctrl+alt+del"))
 		self.assertEqual(self.qmp_log, [])
 		self.assertEqual(self.backend.calls, [])
 
-	def test_dry_run_with_several_combos_and_hold_time(self):
+	def test_dry_run_with_several_combos(self):
 		_, stdout, _ = self.run_cli("key", "win+r", "enter", "--hold-ms", "100", "--dry-run")
-		commands = [json.loads(line) for line in stdout.splitlines()]
-		self.assertEqual([command["arguments"] for command in commands], [
-			combo_to_send_key_arguments("win+r", 100),
-			combo_to_send_key_arguments("enter", 100),
-		])
+		self.assertEqual(printed_commands(stdout), input_commands("win+r", "enter"))
+
+	def test_repeated_key_is_pressed_twice(self):
+		_, stdout, _ = self.run_cli("key", "down", "down", "--dry-run")
+		self.assertEqual(printed_commands(stdout), input_commands("down", "down"))
 
 	def test_sends_through_backend_socket(self):
 		self.assertEqual(self.run_cli("key", "win+r")[0], 0)
+		press, release = combo_to_input_events("win+r")
 		self.assertEqual(self.qmp_log, [
 			("connect", "/fake/qmp.sock"),
-			("send-key", combo_to_send_key_arguments("win+r")),
+			("input-send-event", press),
+			("input-send-event", release),
 			("close",),
 		])
 
+	def test_hold_and_delay_set_the_pauses(self):
+		with mock.patch("wn.keys.time.sleep") as sleep:
+			self.run_cli("key", "a", "--hold-ms", "70", "--delay-ms", "30")
+		self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.07, 0.03])
+
 	def test_config_socket_overrides_backend(self):
-		config_directory = os.path.join(self.home.name, ".config", "wn")
-		os.makedirs(config_directory)
-		with open(os.path.join(config_directory, "config.json"), "w") as config_file:
-			json.dump({"qmp_socket": "/configured/qmp.sock"}, config_file)
+		self.write_config({"qmp_socket": "/configured/qmp.sock"})
 		self.run_cli("key", "a")
 		self.assertEqual(self.qmp_log[0], ("connect", "/configured/qmp.sock"))
 		self.assertEqual(self.backend.calls, [])
@@ -140,15 +152,15 @@ class KeyCommandTests(CLITestCase):
 class TypeCommandTests(CLITestCase):
 	def test_dry_run(self):
 		_, stdout, _ = self.run_cli("type", "Hi", "--dry-run")
-		commands = [json.loads(line) for line in stdout.splitlines()]
-		self.assertEqual([command["arguments"] for command in commands], [
-			combo_to_send_key_arguments("shift+h"),
-			combo_to_send_key_arguments("i"),
-		])
+		self.assertEqual(printed_commands(stdout), input_commands("shift+h", "i"))
+
+	def test_repeated_letters_are_pressed_twice(self):
+		_, stdout, _ = self.run_cli("type", "hello", "--dry-run")
+		self.assertEqual(printed_commands(stdout), input_commands("h", "e", "l", "l", "o"))
 
 	def test_sends_text(self):
 		self.run_cli("type", "ok")
-		self.assertEqual([entry[0] for entry in self.qmp_log], ["connect", "send-key", "send-key", "close"])
+		self.assertEqual([entry[0] for entry in self.qmp_log], ["connect"] + ["input-send-event"] * 4 + ["close"])
 
 	def test_unsupported_character(self):
 		exit_code, _, stderr = self.run_cli("type", "café", "--dry-run")
@@ -156,24 +168,95 @@ class TypeCommandTests(CLITestCase):
 		self.assertIn("U+00E9", stderr)
 
 
+def abs_move(x, y):
+	return {"events": [{"type": "abs", "data": {"axis": "x", "value": x}}, {"type": "abs", "data": {"axis": "y", "value": y}}]}
+
+
+def button(name, down):
+	return {"events": [{"type": "btn", "data": {"down": down, "button": name}}]}
+
+
+class MouseCommandTests(CLITestCase):
+	def mouse_dry_run(self, *argv):
+		exit_code, stdout, stderr = self.run_cli("mouse", *argv, "--dry-run")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.qmp_log, [])
+		return [command["arguments"] for command in printed_commands(stdout)]
+
+	def test_move_absolute(self):
+		self.assertEqual(self.mouse_dry_run("move", "16384", "100"), [abs_move(16384, 100)])
+
+	def test_move_with_screen_size(self):
+		self.assertEqual(self.mouse_dry_run("move", "640", "360", "--screen", "1280x720"), [abs_move(16383, 16383)])
+
+	def test_move_uses_config_screen_size(self):
+		self.write_config({"screen_size": "1920x1080"})
+		self.assertEqual(self.mouse_dry_run("move", "960", "540"), [abs_move(16383, 16383)])
+
+	def test_move_out_of_range(self):
+		exit_code, _, stderr = self.run_cli("mouse", "move", "40000", "0", "--dry-run")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("32767", stderr)
+
+	def test_move_outside_screen(self):
+		exit_code, _, stderr = self.run_cli("mouse", "move", "1280", "0", "--screen", "1280x720", "--dry-run")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("1280x720", stderr)
+
+	def test_bad_screen_size(self):
+		exit_code, _, stderr = self.run_cli("mouse", "move", "1", "1", "--screen", "big", "--dry-run")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("WIDTHxHEIGHT", stderr)
+
+	def test_click_defaults_to_left(self):
+		self.assertEqual(self.mouse_dry_run("click"), [button("left", True), button("left", False)])
+
+	def test_click_right(self):
+		self.assertEqual(self.mouse_dry_run("click", "right"), [button("right", True), button("right", False)])
+
+	def test_doubleclick(self):
+		self.assertEqual(self.mouse_dry_run("doubleclick"), [button("left", True), button("left", False)] * 2)
+
+	def test_down_and_up(self):
+		self.assertEqual(self.mouse_dry_run("down", "middle"), [button("middle", True)])
+		self.assertEqual(self.mouse_dry_run("up"), [button("left", False)])
+
+	def test_scroll(self):
+		self.assertEqual(self.mouse_dry_run("scroll", "down", "2"), [button("wheel-down", True), button("wheel-down", False)] * 2)
+		self.assertEqual(self.mouse_dry_run("scroll", "up"), [button("wheel-up", True), button("wheel-up", False)])
+
+	def test_bad_button_is_usage_error(self):
+		with mock.patch("sys.stderr", io.StringIO()):
+			with self.assertRaises(SystemExit):
+				self.run_cli("mouse", "click", "side")
+
+	def test_sends_through_one_shot_socket(self):
+		self.assertEqual(self.run_cli("mouse", "click")[0], 0)
+		self.assertEqual(self.qmp_log, [
+			("connect", "/fake/qmp.sock"),
+			("input-send-event", button("left", True)),
+			("input-send-event", button("left", False)),
+			("close",),
+		])
+
+
 class AttachCommandTests(CLITestCase):
-	def test_attach_connects_and_runs_attach(self):
+	def test_attach_connects_to_session_socket(self):
 		with mock.patch("wn.cli.attach") as attach:
 			self.assertEqual(self.run_cli("attach")[0], 0)
-		self.assertEqual(self.qmp_log[0], ("connect", "/fake/qmp.sock"))
+		self.assertEqual(self.qmp_log[0], ("connect", "/fake/qmp-session.sock"))
 		attach.assert_called_once()
-
 
 
 class UTMWiringTests(CLITestCase):
 	def test_key_reaches_utm_qmp_server_over_tcp(self):
-		handlers = {"send-key": lambda request: [reply(request, {})]}
+		handlers = {"input-send-event": lambda request: [reply(request, {})]}
 		with TCPFakeQMPServer(handlers) as server:
 			self.write_config({"backend": "utm", "qmp_port": server.port})
 			exit_code, _, stderr = self.run_real_cli("key", "win+r")
 		self.assertEqual(exit_code, 0, stderr)
-		self.assertEqual([request["execute"] for request in server.received], ["qmp_capabilities", "send-key"])
-		self.assertEqual(server.received[1]["arguments"], combo_to_send_key_arguments("win+r"))
+		self.assertEqual([request["execute"] for request in server.received], ["qmp_capabilities", "input-send-event", "input-send-event"])
+		self.assertEqual([request["arguments"] for request in server.received[1:]], list(combo_to_input_events("win+r")))
 
 	def test_status_reports_missing_utmctl(self):
 		self.write_config({"utmctl_path": "/no/such/utmctl"})
@@ -228,6 +311,7 @@ class InitVMTests(CLITestCase):
 		self.assertEqual(config["Sound"], [])
 		self.assertIn("coreaudio,id=ca0,out.buffer-length=20000", config["QEMU"]["AdditionalArguments"])
 		self.assertIn("tcp:127.0.0.1:4444,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
+		self.assertIn("tcp:127.0.0.1:4445,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
 		self.assertEqual([drive["ImageType"] for drive in config["Drive"]], ["Disk"])
 		self.assertEqual(config["QEMU"]["MachinePropertyOverride"], "kernel-irqchip=off")
 		with open(os.path.join(bundle, "Data", "disk.qcow2")) as image:
@@ -272,10 +356,11 @@ class InitVMTests(CLITestCase):
 			self.assertEqual(iso_copy.read(), b"fake drivers")
 
 	def test_name_defaults_to_config_vm_name(self):
-		self.write_config({"vm_name": "Configured", "qmp_port": 4500})
+		self.write_config({"vm_name": "Configured", "qmp_port": 4500, "qmp_session_port": 4600})
 		self.assertEqual(self.init_vm()[0], 0)
 		config = self.read_plist(os.path.join(self.output, "Configured.utm"))
 		self.assertIn("tcp:127.0.0.1:4500,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
+		self.assertIn("tcp:127.0.0.1:4600,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
 
 	def test_iso_is_copied_with_copyfile(self):
 		with mock.patch("wn.cli.shutil.copyfile") as copyfile:
@@ -347,7 +432,7 @@ class GrabCommandTests(CLITestCase):
 		exit_code, stdout, stderr = self.run_cli("grab")
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual(self.qmp_log, [
-			("connect", "/fake/qmp.sock"),
+			("connect", "/fake/qmp-session.sock"),
 			("input-send-event", META_DOWN),
 			("input-send-event", META_UP),
 			("close",),
@@ -392,6 +477,45 @@ class GrabCommandTests(CLITestCase):
 		self.write_config({"keygrab_binary": self.helper_path, "keygrab_keycodes": keycodes_path})
 		_, stdout, _ = self.run_cli("grab", "--dry-run")
 		self.assertIn('"meta_r"', stdout)
+
+
+OLD_ARGUMENTS = ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-audiodev", "coreaudio,id=ca0,out.buffer-length=20000", "-device", "intel-hda", "-device", "hda-output,audiodev=ca0"]
+
+
+class UpdateVMArgsTests(CLITestCase):
+	def setUp(self):
+		super().setUp()
+		self.bundle = os.path.join(self.home.name, "Windows.utm")
+		os.makedirs(self.bundle)
+		self.plist_path = os.path.join(self.bundle, "config.plist")
+		with open(self.plist_path, "wb") as plist_file:
+			plistlib.dump({"Information": {"Name": "Windows"}, "QEMU": {"AdditionalArguments": OLD_ARGUMENTS, "UEFIBoot": True}}, plist_file)
+		self.backend.state = "stopped"
+
+	def read_plist(self):
+		with open(self.plist_path, "rb") as plist_file:
+			return plistlib.load(plist_file)
+
+	def test_adds_session_qmp_server(self):
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle)
+		self.assertEqual(exit_code, 0, stderr)
+		config = self.read_plist()
+		self.assertEqual(config["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS[:2] + ["-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"] + OLD_ARGUMENTS[2:])
+		self.assertTrue(config["QEMU"]["UEFIBoot"])
+		self.assertIn("4445", stdout)
+
+	def test_default_bundle_path_uses_vm_name(self):
+		with mock.patch("wn.cli.update_additional_arguments", return_value=[]) as update:
+			self.assertEqual(self.run_cli("update-vm-args")[0], 0)
+		expected = os.path.join(self.home.name, "Library", "Containers", "com.utmapp.UTM", "Data", "Documents", "Windows.utm")
+		self.assertEqual(update.call_args.args[0], expected)
+
+	def test_refuses_running_vm(self):
+		self.backend.state = "running"
+		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle)
+		self.assertEqual(exit_code, 1)
+		self.assertIn("stop", stderr)
+		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS)
 
 
 if __name__ == "__main__":

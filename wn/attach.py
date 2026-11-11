@@ -2,7 +2,7 @@
 
 ``wn attach`` puts the terminal in raw mode, reads the bytes the terminal sends
 for each key press, turns them into key combos, and sends them to the guest
-with QMP ``send-key``.
+with QMP ``input-send-event``.
 
 To detach, press ctrl+] twice within one second. A single ctrl+] is passed to
 the guest once that second has gone by or another key is pressed.

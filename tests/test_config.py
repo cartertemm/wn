@@ -102,6 +102,17 @@ class ConfigTests(unittest.TestCase):
 		self.assertEqual(config.utmctl_path, os.path.join(self.home.name, "bin", "utmctl"))
 		self.assertEqual(config.qmp_port, 4500)
 
+	def test_session_port_and_screen_size_default_to_none(self):
+		config = load_config()
+		self.assertIsNone(config.qmp_session_port)
+		self.assertIsNone(config.screen_size)
+
+	def test_session_port_and_screen_size_are_loaded(self):
+		self.write_config(json.dumps({"qmp_session_port": 4600, "screen_size": "1920x1080"}))
+		config = load_config()
+		self.assertEqual(config.qmp_session_port, 4600)
+		self.assertEqual(config.screen_size, "1920x1080")
+
 	def test_qmp_port_must_be_int(self):
 		for value in ("4444", True, 4444.0):
 			with self.subTest(value=value):

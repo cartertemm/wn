@@ -8,12 +8,12 @@ import shlex
 import shutil
 import sys
 
-from wn import __version__, keygrab
+from wn import __version__, keygrab, mouse
 from wn.attach import attach
 from wn.backend import create_backend
 from wn.config import load_config
 from wn.errors import WnError
-from wn.keys import send_combos, validate_combos
+from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
 from wn.qmp import qmp_client_for
 from wn.text_input import text_to_combos
 from wn.utm_config import (
@@ -24,6 +24,7 @@ from wn.utm_config import (
 	DEFAULT_OPTIONS,
 	DEFAULT_QEMU_IMG_PATH,
 	create_disk_image,
+	update_additional_arguments,
 	write_bundle,
 )
 
@@ -36,6 +37,8 @@ DEFAULT_MEMORY_MIB = 8192
 QEMU_MAC_PREFIX = "52:54:00"
 MAC_SUFFIX_OCTET_COUNT = 3
 OCTET_VALUES = 256
+DEFAULT_SCROLL_COUNT = 1
+STOPPED_STATE = "stopped"
 
 
 def build_parser():
@@ -58,6 +61,8 @@ def build_parser():
 	type_text.add_argument("text")
 	_add_key_options(type_text)
 
+	_add_mouse_parser(subcommands)
+
 	attach_parser = subcommands.add_parser("attach", help="send terminal keystrokes to the guest. Press ctrl+] twice to detach")
 	attach_parser.add_argument("--grab", action="store_true", help="use grab mode instead, the same as wn grab")
 	attach_parser.set_defaults(start_released=False, release_hotkey=keygrab.DEFAULT_RELEASE_HOTKEY, dry_run=False)
@@ -70,7 +75,39 @@ def build_parser():
 	share.add_argument("host_path")
 	subcommands.add_parser("net", help="show or change VM networking")
 	_add_init_vm_parser(subcommands)
+	_add_update_vm_args_parser(subcommands)
 	return parser
+
+
+def _add_mouse_parser(subcommands):
+	mouse_parser = subcommands.add_parser("mouse", help="move the pointer, click, or scroll")
+	actions = mouse_parser.add_subparsers(dest="mouse_action", metavar="action")
+	actions.required = True
+	dry_run = argparse.ArgumentParser(add_help=False)
+	dry_run.add_argument("--dry-run", action="store_true", help="print the QMP commands as JSON instead of sending them")
+
+	move = actions.add_parser("move", parents=[dry_run], help="move the pointer to an absolute position")
+	move.add_argument("x", type=int)
+	move.add_argument("y", type=int)
+	move.add_argument("--screen", metavar="WxH", help="treat X and Y as pixels on a screen of this size (default: screen_size from the config, else X and Y are 0..32767)")
+	for action, help_text in (
+		("click", "press and release a button"),
+		("doubleclick", "click a button twice"),
+		("down", "press a button and keep it down"),
+		("up", "release a button"),
+	):
+		button_parser = actions.add_parser(action, parents=[dry_run], help=help_text)
+		button_parser.add_argument("button", nargs="?", choices=mouse.BUTTONS, default=mouse.DEFAULT_BUTTON)
+	scroll = actions.add_parser("scroll", parents=[dry_run], help="turn the scroll wheel")
+	scroll.add_argument("direction", choices=tuple(mouse.WHEEL_BUTTONS))
+	scroll.add_argument("count", type=int, nargs="?", default=DEFAULT_SCROLL_COUNT, help="number of wheel notches (default: %(default)s)")
+
+
+def _add_update_vm_args_parser(subcommands):
+	update = subcommands.add_parser("update-vm-args", help="rewrite the QEMU additional arguments of an existing UTM bundle. Stop the VM first")
+	update.add_argument("--bundle", metavar="PATH", help="the .utm bundle (default: vm_name.utm in UTM's documents folder)")
+	update.add_argument("--headless", action="store_true", help="the VM has no display window")
+	update.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output the bundle was created with (default: %(default)s)")
 
 
 def _add_init_vm_parser(subcommands):
@@ -91,7 +128,7 @@ def _add_init_vm_parser(subcommands):
 
 def _add_key_options(parser):
 	parser.add_argument("--delay-ms", type=int, help="pause after each key press (default: key_delay_ms from the config)")
-	parser.add_argument("--hold-ms", type=int, help="how long QEMU holds the keys down (QEMU default: 100)")
+	parser.add_argument("--hold-ms", type=int, help="how long each combo stays down before it is released (default: {})".format(DEFAULT_HOLD_MS))
 	parser.add_argument("--dry-run", action="store_true", help="print the QMP commands as JSON instead of sending them")
 
 
@@ -110,8 +147,8 @@ class CommandContext:
 			self._backend = self._backend_factory(self.config)
 		return self._backend
 
-	def connect_qmp(self):
-		socket_path = self.config.qmp_socket or self.backend.qmp_socket_path()
+	def connect_qmp(self, session=False):
+		socket_path = self.config.qmp_socket or self.backend.qmp_socket_path(session=session)
 		return self._qmp_client_factory(socket_path)
 
 	def print(self, text):
@@ -146,16 +183,19 @@ def run_net(context):
 	context.backend.net()
 
 
+def _send_or_print_steps(context, steps):
+	if context.arguments.dry_run:
+		for arguments, _ in steps:
+			context.print(json.dumps({"execute": INPUT_SEND_EVENT, "arguments": arguments}))
+		return
+	with context.connect_qmp() as client:
+		send_input_steps(client, steps)
+
+
 def _send_or_print_combos(context, combos):
 	arguments = context.arguments
-	if arguments.dry_run:
-		for send_key_arguments in validate_combos(combos, arguments.hold_ms):
-			context.print(json.dumps({"execute": "send-key", "arguments": send_key_arguments}))
-		return
 	delay_ms = context.config.key_delay_ms if arguments.delay_ms is None else arguments.delay_ms
-	validate_combos(combos)
-	with context.connect_qmp() as client:
-		send_combos(client, combos, delay_ms, arguments.hold_ms)
+	_send_or_print_steps(context, combos_to_input_steps(combos, delay_ms, arguments.hold_ms))
 
 
 def run_key(context):
@@ -164,6 +204,28 @@ def run_key(context):
 
 def run_type(context):
 	_send_or_print_combos(context, text_to_combos(context.arguments.text))
+
+
+MOUSE_BUTTON_STEPS = {
+	"click": mouse.click_steps,
+	"doubleclick": mouse.double_click_steps,
+	"down": mouse.press_steps,
+	"up": mouse.release_steps,
+}
+
+
+def _mouse_steps(context):
+	arguments = context.arguments
+	if arguments.mouse_action == "move":
+		screen_size = arguments.screen or context.config.screen_size
+		return mouse.move_steps(*mouse.position_to_abs(arguments.x, arguments.y, screen_size))
+	if arguments.mouse_action == "scroll":
+		return mouse.scroll_steps(arguments.direction, arguments.count)
+	return MOUSE_BUTTON_STEPS[arguments.mouse_action](arguments.button)
+
+
+def run_mouse(context):
+	_send_or_print_steps(context, _mouse_steps(context))
 
 
 class DryRunQMPClient:
@@ -193,7 +255,7 @@ def run_grab(context):
 	if context.arguments.dry_run:
 		_grab_with(context, DryRunQMPClient(context.print))
 		return
-	with context.connect_qmp() as client:
+	with context.connect_qmp(session=True) as client:
 		_grab_with(context, client)
 
 
@@ -201,7 +263,7 @@ def run_attach(context):
 	if context.arguments.grab:
 		run_grab(context)
 		return
-	with context.connect_qmp() as client:
+	with context.connect_qmp(session=True) as client:
 		attach(client, context.config.key_delay_ms)
 
 
@@ -239,6 +301,7 @@ def run_init_vm(context):
 		"headless": arguments.headless,
 		"audio": arguments.audio,
 		"qmp_port": context.config.qmp_port,
+		"qmp_session_port": context.config.qmp_session_port,
 	}
 	try:
 		_fill_bundle(bundle, output, options, arguments)
@@ -251,6 +314,24 @@ def run_init_vm(context):
 	context.print("Next: open the bundle once in UTM, or run: open {}".format(shlex.quote(bundle)))
 
 
+def run_update_vm_args(context):
+	arguments = context.arguments
+	config = context.config
+	bundle = arguments.bundle or os.path.join(os.path.expanduser(DEFAULT_BUNDLE_DIRECTORY), config.vm_name + BUNDLE_SUFFIX)
+	status = context.backend.status()
+	if status.state != STOPPED_STATE:
+		raise WnError("VM '{}' is {}. Run wn stop, wait for wn status to say stopped, then run update-vm-args again".format(status.name, status.state))
+	new_arguments = update_additional_arguments(bundle, {
+		"qmp_port": config.qmp_port,
+		"qmp_session_port": config.qmp_session_port,
+		"headless": arguments.headless,
+		"audio": arguments.audio,
+	})
+	context.print("Updated {}".format(os.path.join(bundle, "config.plist")))
+	context.print("AdditionalArguments: {}".format(" ".join(shlex.quote(argument) for argument in new_arguments)))
+	context.print("Next: quit UTM and open it again so it reads the new arguments, then run wn start")
+
+
 COMMANDS = {
 	"start": run_start,
 	"stop": run_stop,
@@ -258,11 +339,13 @@ COMMANDS = {
 	"ip": run_ip,
 	"key": run_key,
 	"type": run_type,
+	"mouse": run_mouse,
 	"attach": run_attach,
 	"grab": run_grab,
 	"share": run_share,
 	"net": run_net,
 	"init-vm": run_init_vm,
+	"update-vm-args": run_update_vm_args,
 }
 
 

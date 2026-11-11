@@ -8,6 +8,8 @@ from wn.errors import WnError
 COMBO_SEPARATOR = "+"
 MAX_CLOSE_MATCHES = 3
 MILLISECONDS_PER_SECOND = 1000
+DEFAULT_HOLD_MS = 50
+INPUT_SEND_EVENT = "input-send-event"
 
 MODIFIER_QCODES = ("ctrl", "ctrl_r", "shift", "shift_r", "alt", "alt_r", "meta_l", "meta_r")
 
@@ -112,26 +114,40 @@ def parse_combo(combo):
 	return modifiers + others
 
 
-def combo_to_send_key_arguments(combo, hold_ms=None):
-	"""Return the arguments for a QMP ``send-key`` command that presses ``combo``."""
-	arguments = {"keys": [{"type": "qcode", "data": qcode} for qcode in parse_combo(combo)]}
-	if hold_ms is not None:
-		arguments["hold-time"] = hold_ms
-	return arguments
+def key_event(qcode, down):
+	"""Return one ``input-send-event`` key event."""
+	return {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": qcode}}}
 
 
-def validate_combos(combos, hold_ms=None):
-	"""Return the ``send-key`` arguments for every combo, raising ``KeyNameError`` on the first bad one."""
-	return [combo_to_send_key_arguments(combo, hold_ms) for combo in combos]
+def combo_to_input_events(combo):
+	"""Return the ``input-send-event`` arguments that press ``combo`` and then release it, last key first."""
+	qcodes = parse_combo(combo)
+	press = {"events": [key_event(qcode, True) for qcode in qcodes]}
+	release = {"events": [key_event(qcode, False) for qcode in reversed(qcodes)]}
+	return press, release
 
 
-def send_combos(client, combos, delay_ms, hold_ms=None, sleep=time.sleep):
-	"""Press each combo in turn through ``client``, waiting ``delay_ms`` after each one.
+def combos_to_input_steps(combos, delay_ms, hold_ms=None):
+	"""Return ``(arguments, pause_ms)`` steps that press each combo, hold it ``hold_ms``, release it, and wait ``delay_ms``.
 
-	All combos are checked before the first one is sent, so a typo never leaves
-	a half-typed sequence in the guest.
+	Every combo is parsed first, so a typo never leaves a half-typed sequence in the guest.
 	"""
-	all_arguments = validate_combos(combos, hold_ms)
-	for arguments in all_arguments:
-		client.execute("send-key", arguments)
-		sleep(delay_ms / MILLISECONDS_PER_SECOND)
+	hold_ms = DEFAULT_HOLD_MS if hold_ms is None else hold_ms
+	steps = []
+	for combo in combos:
+		press, release = combo_to_input_events(combo)
+		steps += [(press, hold_ms), (release, delay_ms)]
+	return steps
+
+
+def send_input_steps(client, steps, sleep=None):
+	"""Send each step with ``input-send-event`` and pause after it."""
+	sleep = sleep or time.sleep
+	for arguments, pause_ms in steps:
+		client.execute(INPUT_SEND_EVENT, arguments)
+		sleep(pause_ms / MILLISECONDS_PER_SECOND)
+
+
+def send_combos(client, combos, delay_ms, hold_ms=None, sleep=None):
+	"""Press and release each combo in turn through ``client``."""
+	send_input_steps(client, combos_to_input_steps(combos, delay_ms, hold_ms), sleep)

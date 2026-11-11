@@ -36,8 +36,8 @@ class Backend(abc.ABC):
 		"""Return the guest IP address as a string, or None when it is not known."""
 
 	@abc.abstractmethod
-	def qmp_socket_path(self):
-		"""Return the path of the VM's QMP Unix socket."""
+	def qmp_socket_path(self, session=False):
+		"""Return the VM's QMP address. With ``session``, return the one for long-lived clients such as attach and grab."""
 
 	def share(self, host_path):
 		raise NotImplementedError("share is not implemented by the {} backend yet".format(type(self).__name__))

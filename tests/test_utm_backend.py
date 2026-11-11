@@ -231,6 +231,15 @@ class UTMBackendConfigTests(unittest.TestCase):
 		self.assertEqual(UTMBackend({}).qmp_socket_path(), "tcp:127.0.0.1:4444")
 		self.assertEqual(UTMBackend({"qmp_port": 4500}).qmp_socket_path(), "tcp:127.0.0.1:4500")
 
+	def test_session_socket_defaults_to_next_port(self):
+		self.assertEqual(UTMBackend({}).qmp_socket_path(session=True), "tcp:127.0.0.1:4445")
+		self.assertEqual(UTMBackend({"qmp_port": 4500}).qmp_socket_path(session=True), "tcp:127.0.0.1:4501")
+
+	def test_session_port_from_config(self):
+		backend = UTMBackend(Config(qmp_port=4500, qmp_session_port=4600))
+		self.assertEqual(backend.qmp_socket_path(session=True), "tcp:127.0.0.1:4600")
+		self.assertEqual(backend.qmp_socket_path(), "tcp:127.0.0.1:4500")
+
 
 if __name__ == "__main__":
 	unittest.main()
