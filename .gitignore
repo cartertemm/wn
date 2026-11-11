@@ -11,3 +11,4 @@ vm/
 *.qcow2
 *.fd
 .DS_Store
+keygrab/bin/
