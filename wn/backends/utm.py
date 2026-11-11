@@ -1,19 +1,18 @@
 """Control a UTM 5 QEMU virtual machine with utmctl, and reach its extra QMP server over TCP."""
 
 import ipaddress
-import socket
 import subprocess
 
 from wn.backend import Backend, BackendError, VMStatus
-from wn.qmp import DEFAULT_TIMEOUT_SECONDS, QMPClient, QMPConnectionError
+from wn.qmp import TCP_ADDRESS_PREFIX
 
 DEFAULT_VM_NAME = "Windows"
 DEFAULT_UTMCTL_PATH = "/Applications/UTM.app/Contents/MacOS/utmctl"
 DEFAULT_QMP_PORT = 4444
 QMP_HOST = "127.0.0.1"
-TCP_ADDRESS_PREFIX = "tcp:"
 LIST_HEADER_PREFIX = "UUID"
 LIST_COLUMN_COUNT = 3
+VM_NOT_FOUND_MESSAGE = "Error: Virtual machine not found."
 UTM_STATES = {
 	"stopped": "stopped",
 	"starting": "starting",
@@ -60,41 +59,6 @@ def parse_list_output(output):
 			raise UTMCtlError("cannot parse utmctl list line: {!r}".format(line))
 		machines.append(tuple(fields))
 	return machines
-
-
-def _parse_tcp_address(address):
-	host, separator, port = address[len(TCP_ADDRESS_PREFIX):].rpartition(":")
-	if not separator or not host or not port.isdigit():
-		raise QMPConnectionError("bad QMP address {!r}. Use tcp:HOST:PORT".format(address))
-	return host, int(port)
-
-
-class TCPQMPClient(QMPClient):
-	"""A QMPClient that connects to a ``tcp:HOST:PORT`` address instead of a Unix socket."""
-
-	def __init__(self, address, timeout=DEFAULT_TIMEOUT_SECONDS):
-		super().__init__(address, timeout)
-		self.host, self.port = _parse_tcp_address(address)
-
-	def connect(self):
-		try:
-			self._socket = socket.create_connection((self.host, self.port), self.timeout)
-		except OSError as error:
-			self.close()
-			raise QMPConnectionError("cannot connect to QMP server {}: {}".format(self.socket_path, error)) from None
-		self._stream = self._socket.makefile("rwb")
-		self.greeting = self._read_message()
-		if "QMP" not in self.greeting:
-			raise QMPConnectionError("{} did not send a QMP greeting".format(self.socket_path))
-		self.execute("qmp_capabilities")
-
-
-def open_qmp(address, timeout=DEFAULT_TIMEOUT_SECONDS):
-	"""Return a connected QMP client for a Unix socket path or a ``tcp:HOST:PORT`` address."""
-	client_class = TCPQMPClient if address.startswith(TCP_ADDRESS_PREFIX) else QMPClient
-	client = client_class(address, timeout)
-	client.connect()
-	return client
 
 
 class UTMBackend(Backend):
@@ -160,7 +124,7 @@ class UTMBackend(Backend):
 				machines = self._list()
 			except UTMCtlError:
 				raise error from None
-			if not any(self.vm_name in (name, uuid) for uuid, _, name in machines):
+			if isinstance(error, UnknownVMError) or not any(self.vm_name in (name, uuid) for uuid, _, name in machines):
 				raise self._unknown_vm_error(machines) from None
 			raise
 
@@ -172,5 +136,7 @@ class UTMBackend(Backend):
 			raise UTMCtlMissingError("cannot run utmctl at {}: {}. Install UTM or set utmctl_path".format(self.utmctl_command[0], error)) from None
 		if result.returncode != 0:
 			detail = result.stderr.strip() or result.stdout.strip() or "no output"
+			if detail == VM_NOT_FOUND_MESSAGE:
+				raise UnknownVMError("UTM has no VM named '{}'".format(self.vm_name))
 			raise UTMCtlError("utmctl {} failed with exit code {}: {}".format(arguments[0], result.returncode, detail))
 		return result.stdout

@@ -2,6 +2,10 @@
 
 import argparse
 import json
+import os
+import random
+import shlex
+import shutil
 import sys
 
 from wn import __version__, keygrab
@@ -10,11 +14,28 @@ from wn.backend import create_backend
 from wn.config import load_config
 from wn.errors import WnError
 from wn.keys import send_combos, validate_combos
-from wn.qmp import QMPClient
+from wn.qmp import qmp_client_for
 from wn.text_input import text_to_combos
+from wn.utm_config import (
+	AUDIO_COREAUDIO,
+	AUDIO_MODES,
+	BUNDLE_SUFFIX,
+	DATA_DIRECTORY_NAME,
+	DEFAULT_OPTIONS,
+	DEFAULT_QEMU_IMG_PATH,
+	create_disk_image,
+	write_bundle,
+)
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
+DEFAULT_BUNDLE_DIRECTORY = os.path.join("~", "Library", "Containers", "com.utmapp.UTM", "Data", "Documents")
+DEFAULT_DISK_GIB = 64
+DEFAULT_CPU_COUNT = 8
+DEFAULT_MEMORY_MIB = 8192
+QEMU_MAC_PREFIX = "52:54:00"
+MAC_SUFFIX_OCTET_COUNT = 3
+OCTET_VALUES = 256
 
 
 def build_parser():
@@ -48,7 +69,22 @@ def build_parser():
 	share = subcommands.add_parser("share", help="share a host folder with the guest")
 	share.add_argument("host_path")
 	subcommands.add_parser("net", help="show or change VM networking")
+	_add_init_vm_parser(subcommands)
 	return parser
+
+
+def _add_init_vm_parser(subcommands):
+	init_vm = subcommands.add_parser("init-vm", help="create a UTM bundle for a new Windows 11 ARM64 VM")
+	init_vm.add_argument("--name", help="VM name (default: vm_name from the config)")
+	init_vm.add_argument("--disk-gib", type=int, default=DEFAULT_DISK_GIB, help="disk size in GiB (default: %(default)s)")
+	init_vm.add_argument("--cpus", type=int, default=DEFAULT_CPU_COUNT, help="number of CPU cores (default: %(default)s)")
+	init_vm.add_argument("--memory-mib", type=int, default=DEFAULT_MEMORY_MIB, help="memory in MiB (default: %(default)s)")
+	init_vm.add_argument("--iso", metavar="PATH", help="Windows installer ISO to copy into the bundle")
+	init_vm.add_argument("--headless", action="store_true", help="create the VM without a display window")
+	init_vm.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output. coreaudio has the lowest latency (default: %(default)s)")
+	init_vm.add_argument("--mac", help="MAC address (default: a random 52:54:00:xx:xx:xx address)")
+	init_vm.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
+	init_vm.add_argument("--qemu-img", metavar="PATH", default=DEFAULT_QEMU_IMG_PATH, help="qemu-img executable (default: %(default)s)")
 
 
 def _add_key_options(parser):
@@ -167,6 +203,49 @@ def run_attach(context):
 		attach(client, context.config.key_delay_ms)
 
 
+def random_mac_address():
+	suffix = ["{:02x}".format(random.randrange(OCTET_VALUES)) for _ in range(MAC_SUFFIX_OCTET_COUNT)]
+	return ":".join([QEMU_MAC_PREFIX] + suffix)
+
+
+def _fill_bundle(bundle, output, options, arguments):
+	data_directory = os.path.join(bundle, DATA_DIRECTORY_NAME)
+	os.makedirs(data_directory)
+	create_disk_image(os.path.join(data_directory, options["disk_image"]), arguments.disk_gib, arguments.qemu_img)
+	if arguments.iso:
+		shutil.copyfile(arguments.iso, os.path.join(data_directory, options["iso_image"]))
+	write_bundle(output, options)
+
+
+def run_init_vm(context):
+	arguments = context.arguments
+	name = arguments.name or context.config.vm_name
+	output = os.path.expanduser(arguments.output)
+	bundle = os.path.join(output, name + BUNDLE_SUFFIX)
+	if os.path.exists(bundle):
+		raise WnError("{} already exists. Remove it first or pick another --name".format(bundle))
+	options = {
+		"name": name,
+		"mac_address": arguments.mac or random_mac_address(),
+		"cpu_count": arguments.cpus,
+		"memory_mib": arguments.memory_mib,
+		"disk_image": DEFAULT_OPTIONS["disk_image"],
+		"iso_image": os.path.basename(arguments.iso) if arguments.iso else None,
+		"headless": arguments.headless,
+		"audio": arguments.audio,
+		"qmp_port": context.config.qmp_port,
+	}
+	try:
+		_fill_bundle(bundle, output, options, arguments)
+	except BaseException as error:
+		shutil.rmtree(bundle, ignore_errors=True)
+		if isinstance(error, OSError):
+			raise WnError("cannot create {}: {}".format(bundle, error)) from None
+		raise
+	context.print("Created {}".format(bundle))
+	context.print("Next: open the bundle once in UTM, or run: open {}".format(shlex.quote(bundle)))
+
+
 COMMANDS = {
 	"start": run_start,
 	"stop": run_stop,
@@ -178,10 +257,11 @@ COMMANDS = {
 	"grab": run_grab,
 	"share": run_share,
 	"net": run_net,
+	"init-vm": run_init_vm,
 }
 
 
-def main(argv=None, backend_factory=create_backend, qmp_client_factory=QMPClient, stdout=None, stderr=None):
+def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_client_for, stdout=None, stderr=None):
 	stdout = stdout or sys.stdout
 	stderr = stderr or sys.stderr
 	arguments = build_parser().parse_args(argv)

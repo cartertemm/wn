@@ -1,4 +1,4 @@
-"""A minimal QEMU Machine Protocol (QMP) client over a Unix socket."""
+"""A minimal QEMU Machine Protocol (QMP) client over a Unix socket or TCP."""
 
 import json
 import socket
@@ -6,6 +6,7 @@ import socket
 from wn.errors import WnError
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
+TCP_ADDRESS_PREFIX = "tcp:"
 
 
 class QMPConnectionError(WnError):
@@ -44,14 +45,24 @@ class QMPClient:
 		self.close()
 
 	def connect(self):
-		self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-		self._socket.settimeout(self.timeout)
 		try:
-			self._socket.connect(self.socket_path)
+			self._socket = self._create_socket()
 		except OSError as error:
-			self.close()
 			raise QMPConnectionError("cannot connect to QMP socket {}: {}".format(self.socket_path, error)) from None
 		self._stream = self._socket.makefile("rwb")
+		self._handshake()
+
+	def _create_socket(self):
+		unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		unix_socket.settimeout(self.timeout)
+		try:
+			unix_socket.connect(self.socket_path)
+		except OSError:
+			unix_socket.close()
+			raise
+		return unix_socket
+
+	def _handshake(self):
 		self.greeting = self._read_message()
 		if "QMP" not in self.greeting:
 			raise QMPConnectionError("{} did not send a QMP greeting".format(self.socket_path))
@@ -103,3 +114,27 @@ class QMPClient:
 		if not line:
 			raise QMPConnectionError("QMP socket {} closed the connection".format(self.socket_path))
 		return json.loads(line)
+
+
+def _parse_tcp_address(address):
+	host, separator, port = address[len(TCP_ADDRESS_PREFIX):].rpartition(":")
+	if not separator or not host or not port.isdigit():
+		raise QMPConnectionError("bad QMP address {!r}. Use tcp:HOST:PORT".format(address))
+	return host, int(port)
+
+
+class TCPQMPClient(QMPClient):
+	"""A QMPClient that connects to a ``tcp:HOST:PORT`` address instead of a Unix socket."""
+
+	def __init__(self, address, timeout=DEFAULT_TIMEOUT_SECONDS):
+		super().__init__(address, timeout)
+		self.host, self.port = _parse_tcp_address(address)
+
+	def _create_socket(self):
+		return socket.create_connection((self.host, self.port), self.timeout)
+
+
+def qmp_client_for(address, timeout=DEFAULT_TIMEOUT_SECONDS):
+	"""Return an unconnected client for a Unix socket path or a ``tcp:HOST:PORT`` address."""
+	client_class = TCPQMPClient if address.startswith(TCP_ADDRESS_PREFIX) else QMPClient
+	return client_class(address, timeout)

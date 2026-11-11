@@ -31,15 +31,38 @@ python3 -m wn status
 |---|---|---|
 | `vm_name` | `Windows` | Name of the VM in the backend. |
 | `backend` | `utm` | Which backend drives the VM. |
-| `qmp_socket` | none | Path of the QMP Unix socket. When unset, `wn` asks the backend. |
+| `utmctl_path` | `/Applications/UTM.app/Contents/MacOS/utmctl` | Path of UTM's `utmctl` tool. |
+| `qmp_port` | `4444` | TCP port of the VM's QMP server on `127.0.0.1`. |
+| `qmp_socket` | none | QMP address: a Unix socket path or `tcp:HOST:PORT`. When unset, `wn` asks the backend. |
 | `key_delay_ms` | `20` | Pause after each key press for `key`, `type`, and `attach`. |
 | `keygrab_binary` | `keygrab/bin/wn-keygrab` | Path of the key grab helper for `grab`. |
 | `keygrab_keycodes` | `keygrab/keycodes.json` | Table that maps macOS keycodes to QEMU key names. |
 | `keygrab_send_repeats` | `true` | Send auto-repeat key presses to the guest in `grab` mode. |
 
-The UTM and QEMU backends are not written yet, so commands that need a
-backend report that it is not available. `key`, `type`, `attach`, and
-`grab` work without a backend when `qmp_socket` is set.
+`utm` is the only backend so far. `key`, `type`, `attach`, and `grab` work
+with any QEMU VM when `qmp_socket` is set.
+
+### Configure for UTM
+
+`wn` drives UTM 5 through `utmctl` and sends keys through a QMP server that
+QEMU opens on a local TCP port. A typical `~/.config/wn/config.json`:
+
+```json
+{
+	"backend": "utm",
+	"vm_name": "Windows",
+	"qmp_port": 4444
+}
+```
+
+`vm_name` must match the VM's name in UTM. The VM's QEMU additional
+arguments must include:
+
+```
+-qmp tcp:127.0.0.1:4444,server=on,wait=off
+```
+
+Use the same port as `qmp_port`. `wn init-vm` adds this argument for you.
 
 ## Commands
 
@@ -52,6 +75,34 @@ python3 -m wn stop --force   # power off at once
 python3 -m wn status         # prints "Windows: running"
 python3 -m wn ip             # prints the guest IP address
 ```
+
+### Create a UTM VM
+
+`wn init-vm` writes a UTM bundle for a Windows 11 ARM64 VM. It creates an
+empty qcow2 disk with `qemu-img`, copies the installer ISO into the bundle,
+and writes `config.plist`.
+
+```sh
+python3 -m wn init-vm --iso ~/Downloads/Win11_ARM64.iso
+```
+
+The bundle goes in `~/Library/Containers/com.utmapp.UTM/Data/Documents`,
+named after `vm_name`. `wn` does not overwrite an existing bundle. Open the
+new bundle once in UTM, or run `open` on the path that `wn` prints, so UTM
+adds it to its list.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--name NAME` | `vm_name` | VM name in UTM. |
+| `--disk-gib N` | `64` | Disk size in GiB. |
+| `--cpus N` | `8` | CPU cores. |
+| `--memory-mib N` | `8192` | Memory in MiB. |
+| `--iso PATH` | none | Installer ISO to copy into the bundle. |
+| `--headless` | off | Create the VM without a display window. |
+| `--audio MODE` | `coreaudio` | `coreaudio` plays straight to macOS with low latency. `spice` uses UTM's audio path. |
+| `--mac ADDRESS` | random `52:54:00:xx:xx:xx` | MAC address of the network card. |
+| `--output DIR` | UTM's documents folder | Where to write the bundle. |
+| `--qemu-img PATH` | `/opt/homebrew/bin/qemu-img` | The `qemu-img` tool. Install it with `brew install qemu`. |
 
 ### Press keys
 

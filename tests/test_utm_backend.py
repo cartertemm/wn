@@ -1,40 +1,23 @@
 import json
 import os
-import socket
 import sys
 import tempfile
 import unittest
 
-from fake_qmp_server import ACCEPT_TIMEOUT_SECONDS, FakeQMPServer, reply
 from wn.backend import Backend, VMStatus
 from wn.backends.utm import (
 	DEFAULT_QMP_PORT,
 	DEFAULT_UTMCTL_PATH,
-	TCPQMPClient,
 	UnknownVMError,
 	UTMBackend,
 	UTMCtlError,
 	UTMCtlMissingError,
-	open_qmp,
 )
-from wn.qmp import QMPClient, QMPConnectionError
+from wn.config import Config
 
 FAKE_UTMCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_utmctl.py")
 VM_UUID = "9E1A6F38-2D0B-4C41-8F7E-3B5A1C2D0001"
 OTHER_UUID = "9E1A6F38-2D0B-4C41-8F7E-3B5A1C2D0002"
-
-
-class TCPFakeQMPServer(FakeQMPServer):
-	"""The shared fake QMP server, listening on 127.0.0.1 instead of a Unix socket."""
-
-	def __init__(self, handlers=None):
-		super().__init__(handlers)
-		self._listener.close()
-		self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		self._listener.bind(("127.0.0.1", 0))
-		self._listener.listen(1)
-		self._listener.settimeout(ACCEPT_TIMEOUT_SECONDS)
-		self.port = self._listener.getsockname()[1]
 
 
 class FakeUTMCtlTestCase(unittest.TestCase):
@@ -174,6 +157,18 @@ class UTMBackendErrorTests(FakeUTMCtlTestCase):
 		self.assertIn("errAEEventNotPermitted", str(context.exception))
 		self.assertIn("start", str(context.exception))
 
+	def test_not_found_stderr_is_unknown_vm(self):
+		self.fail_command("start", "Error: Virtual machine not found.")
+		with self.assertRaises(UnknownVMError) as context:
+			self.backend().start()
+		self.assertIn("Windows 11", str(context.exception))
+
+	def test_not_found_stderr_is_unknown_vm_when_list_fails(self):
+		self.fail_command("ip-address", "Error: Virtual machine not found.")
+		self.fail_command("list", "Error: UTM is not running")
+		with self.assertRaises(UnknownVMError):
+			self.backend().ip()
+
 	def test_list_failure_includes_stderr(self):
 		self.fail_command("list", "Error: UTM is not running")
 		with self.assertRaises(UTMCtlError) as context:
@@ -220,49 +215,21 @@ class UTMBackendConfigTests(unittest.TestCase):
 		self.assertEqual(backend.qmp_port, 5555)
 		self.assertEqual(backend.utmctl_command, [DEFAULT_UTMCTL_PATH])
 
+	def test_reads_wn_config(self):
+		backend = UTMBackend(Config(vm_name="Win11", utmctl_path="/opt/utmctl", qmp_port=4500))
+		self.assertEqual(backend.vm_name, "Win11")
+		self.assertEqual(backend.utmctl_command, ["/opt/utmctl"])
+		self.assertEqual(backend.qmp_port, 4500)
+
+	def test_wn_config_defaults_match_backend_defaults(self):
+		backend = UTMBackend(Config())
+		self.assertEqual(backend.vm_name, "Windows")
+		self.assertEqual(backend.utmctl_command, [DEFAULT_UTMCTL_PATH])
+		self.assertEqual(backend.qmp_socket_path(), "tcp:127.0.0.1:4444")
+
 	def test_qmp_socket_path_is_tcp_address(self):
 		self.assertEqual(UTMBackend({}).qmp_socket_path(), "tcp:127.0.0.1:4444")
 		self.assertEqual(UTMBackend({"qmp_port": 4500}).qmp_socket_path(), "tcp:127.0.0.1:4500")
-
-
-class OpenQMPTests(unittest.TestCase):
-	def test_tcp_address(self):
-		handlers = {"query-status": lambda request: [reply(request, {"status": "running"})]}
-		with TCPFakeQMPServer(handlers) as server:
-			client = open_qmp("tcp:127.0.0.1:{}".format(server.port))
-			try:
-				self.assertIsInstance(client, TCPQMPClient)
-				self.assertEqual(client.execute("query-status"), {"status": "running"})
-			finally:
-				client.close()
-		self.assertEqual(server.received[0]["execute"], "qmp_capabilities")
-
-	def test_unix_path(self):
-		with FakeQMPServer() as server:
-			client = open_qmp(server.socket_path)
-			try:
-				self.assertIs(type(client), QMPClient)
-				self.assertIsNotNone(client.greeting)
-			finally:
-				client.close()
-
-	def test_tcp_client_as_context_manager(self):
-		with TCPFakeQMPServer() as server:
-			with TCPQMPClient("tcp:127.0.0.1:{}".format(server.port)) as client:
-				self.assertIn("QMP", client.greeting)
-
-	def test_tcp_connection_refused(self):
-		unused = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		unused.bind(("127.0.0.1", 0))
-		port = unused.getsockname()[1]
-		unused.close()
-		with self.assertRaises(QMPConnectionError) as context:
-			open_qmp("tcp:127.0.0.1:{}".format(port))
-		self.assertIn(str(port), str(context.exception))
-
-	def test_bad_tcp_address(self):
-		with self.assertRaises(QMPConnectionError):
-			open_qmp("tcp:127.0.0.1")
 
 
 if __name__ == "__main__":

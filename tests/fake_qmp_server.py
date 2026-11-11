@@ -89,3 +89,17 @@ def reply(request, value):
 
 def error_reply(request, error_class, description):
 	return _with_id(request, {"error": {"class": error_class, "desc": description}})
+
+
+class TCPFakeQMPServer(FakeQMPServer):
+	"""The fake QMP server, listening on 127.0.0.1 instead of a Unix socket."""
+
+	def __init__(self, handlers=None, events_after_greeting=()):
+		super().__init__(handlers, events_after_greeting)
+		self._listener.close()
+		self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self._listener.bind(("127.0.0.1", 0))
+		self._listener.listen(1)
+		self._listener.settimeout(ACCEPT_TIMEOUT_SECONDS)
+		self.port = self._listener.getsockname()[1]
+		self.address = "tcp:127.0.0.1:{}".format(self.port)

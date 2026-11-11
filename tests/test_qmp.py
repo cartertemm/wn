@@ -1,9 +1,10 @@
 import os
+import socket
 import tempfile
 import unittest
 
-from fake_qmp_server import FakeQMPServer, error_reply, event, reply
-from wn.qmp import QMPClient, QMPConnectionError, QMPError
+from fake_qmp_server import FakeQMPServer, TCPFakeQMPServer, error_reply, event, reply
+from wn.qmp import QMPClient, QMPConnectionError, QMPError, TCPQMPClient, qmp_client_for
 
 
 class QMPClientTests(unittest.TestCase):
@@ -70,6 +71,64 @@ class QMPClientTests(unittest.TestCase):
 		with self.assertRaises(QMPConnectionError) as context:
 			QMPClient(missing_path).connect()
 		self.assertIn(missing_path, str(context.exception))
+
+
+def unused_tcp_port():
+	probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	probe.bind(("127.0.0.1", 0))
+	port = probe.getsockname()[1]
+	probe.close()
+	return port
+
+
+class TCPQMPClientTests(unittest.TestCase):
+	def test_handshake_and_execute(self):
+		handlers = {"query-status": lambda request: [reply(request, {"status": "running"})]}
+		with TCPFakeQMPServer(handlers) as server:
+			with TCPQMPClient(server.address) as client:
+				self.assertIn("QMP", client.greeting)
+				self.assertEqual(client.execute("query-status"), {"status": "running"})
+		self.assertEqual(server.received[0]["execute"], "qmp_capabilities")
+
+	def test_host_and_port_are_parsed(self):
+		client = TCPQMPClient("tcp:127.0.0.1:4444")
+		self.assertEqual((client.host, client.port), ("127.0.0.1", 4444))
+
+	def test_connection_refused(self):
+		port = unused_tcp_port()
+		with self.assertRaises(QMPConnectionError) as context:
+			TCPQMPClient("tcp:127.0.0.1:{}".format(port)).connect()
+		self.assertIn(str(port), str(context.exception))
+
+	def test_bad_address(self):
+		for address in ("tcp:127.0.0.1", "tcp::4444", "tcp:127.0.0.1:port"):
+			with self.subTest(address=address):
+				with self.assertRaises(QMPConnectionError):
+					TCPQMPClient(address)
+
+
+class QMPClientForTests(unittest.TestCase):
+	def test_tcp_address_gives_tcp_client(self):
+		client = qmp_client_for("tcp:127.0.0.1:4444")
+		self.assertIsInstance(client, TCPQMPClient)
+		self.assertEqual(client.port, 4444)
+
+	def test_path_gives_unix_client(self):
+		client = qmp_client_for("/tmp/qmp.sock")
+		self.assertIs(type(client), QMPClient)
+		self.assertEqual(client.socket_path, "/tmp/qmp.sock")
+
+	def test_client_is_not_connected_until_entered(self):
+		with TCPFakeQMPServer() as server:
+			client = qmp_client_for(server.address)
+			self.assertIsNone(client.greeting)
+			with client:
+				self.assertIn("QMP", client.greeting)
+
+	def test_unix_client_connects(self):
+		with FakeQMPServer() as server:
+			with qmp_client_for(server.socket_path) as client:
+				self.assertIsNotNone(client.greeting)
 
 
 if __name__ == "__main__":

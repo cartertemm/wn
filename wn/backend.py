@@ -46,7 +46,14 @@ class Backend(abc.ABC):
 		raise NotImplementedError("net is not implemented by the {} backend yet".format(type(self).__name__))
 
 
-BACKENDS = {}
+def _create_utm_backend(config):
+	from wn.backends.utm import UTMBackend
+	return UTMBackend(config)
+
+
+BACKENDS = {
+	"utm": _create_utm_backend,
+}
 
 
 def create_backend(config, registry=None):

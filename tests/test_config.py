@@ -17,7 +17,7 @@ class ConfigTests(unittest.TestCase):
 
 	def write_config(self, content):
 		path = os.path.join(self.home.name, ".config", "wn", "config.json")
-		os.makedirs(os.path.dirname(path))
+		os.makedirs(os.path.dirname(path), exist_ok=True)
 		with open(path, "w") as config_file:
 			config_file.write(content)
 
@@ -89,6 +89,32 @@ class ConfigTests(unittest.TestCase):
 		with self.assertRaises(ConfigError) as context:
 			load_config()
 		self.assertIn("keygrab_send_repeats", str(context.exception))
+
+	def test_utm_defaults(self):
+		config = load_config()
+		self.assertEqual(config.vm_name, "Windows")
+		self.assertEqual(config.utmctl_path, "/Applications/UTM.app/Contents/MacOS/utmctl")
+		self.assertEqual(config.qmp_port, 4444)
+
+	def test_utm_settings_are_loaded(self):
+		self.write_config(json.dumps({"utmctl_path": "~/bin/utmctl", "qmp_port": 4500}))
+		config = load_config()
+		self.assertEqual(config.utmctl_path, os.path.join(self.home.name, "bin", "utmctl"))
+		self.assertEqual(config.qmp_port, 4500)
+
+	def test_qmp_port_must_be_int(self):
+		for value in ("4444", True, 4444.0):
+			with self.subTest(value=value):
+				self.write_config(json.dumps({"qmp_port": value}))
+				with self.assertRaises(ConfigError) as context:
+					load_config()
+				self.assertIn("qmp_port", str(context.exception))
+
+	def test_utmctl_path_must_be_string(self):
+		self.write_config(json.dumps({"utmctl_path": None}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn("utmctl_path", str(context.exception))
 
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")
