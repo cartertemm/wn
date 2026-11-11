@@ -203,6 +203,16 @@ class ConfigContentTests(unittest.TestCase):
 		arguments = arguments_of(build_config(options(audio="coreaudio", audio_buffer_length_us=10000)))
 		self.assertIn("coreaudio,id=ca0,out.buffer-length=10000", arguments)
 
+	def test_audio_args_replace_coreaudio_block(self):
+		config = build_config(options(audio="coreaudio", audio_args="-audiodev coreaudio,id=ca0,timer-period=2500 -device usb-audio,audiodev=ca0"))
+		arguments = arguments_of(config)
+		self.assertEqual(config["Sound"], [])
+		self.assertEqual(arguments[4:], ["-audiodev", "coreaudio,id=ca0,timer-period=2500", "-device", "usb-audio,audiodev=ca0"])
+
+	def test_audio_args_follow_ramfb(self):
+		arguments = arguments_of(build_config(options(headless=True, audio="coreaudio", audio_args="-device intel-hda")))
+		self.assertEqual(arguments[4:], ["-device", "ramfb", "-device", "intel-hda"])
+
 	def test_qmp_comes_first_in_arguments(self):
 		arguments = arguments_of(build_config(options(headless=True, audio="coreaudio")))
 		self.assertEqual(arguments[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
@@ -214,6 +224,16 @@ class ConfigContentTests(unittest.TestCase):
 
 
 class ConfigValidationTests(unittest.TestCase):
+	def test_audio_args_need_coreaudio(self):
+		with self.assertRaises(UTMConfigError) as context:
+			build_config(options(audio="spice", audio_args="-device intel-hda"))
+		self.assertIn("audio_args", str(context.exception))
+
+	def test_unbalanced_quote_in_audio_args(self):
+		with self.assertRaises(UTMConfigError) as context:
+			build_config(options(audio="coreaudio", audio_args="-device 'intel-hda"))
+		self.assertIn("audio_args", str(context.exception))
+
 	def test_unknown_audio_mode(self):
 		with self.assertRaises(UTMConfigError) as context:
 			build_config(options(audio="pulse"))
@@ -293,6 +313,11 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 	def test_matches_a_new_bundle(self):
 		update_additional_arguments(self.bundle, {"audio": "coreaudio"})
 		self.assertEqual(arguments_of(self.read_config()), arguments_of(build_config(options(audio="coreaudio"))))
+
+	def test_audio_args(self):
+		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "audio_args": "-audiodev coreaudio,id=ca0 -device intel-hda"})
+		self.assertEqual(new_arguments[4:], ["-audiodev", "coreaudio,id=ca0", "-device", "intel-hda"])
+		self.assertEqual(arguments_of(self.read_config()), new_arguments)
 
 	def test_missing_bundle(self):
 		with self.assertRaises(UTMConfigError) as context:

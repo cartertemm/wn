@@ -108,6 +108,11 @@ def _add_update_vm_args_parser(subcommands):
 	update.add_argument("--bundle", metavar="PATH", help="the .utm bundle (default: vm_name.utm in UTM's documents folder)")
 	update.add_argument("--headless", action="store_true", help="the VM has no display window")
 	update.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output the bundle was created with (default: %(default)s)")
+	_add_audio_args_option(update)
+
+
+def _add_audio_args_option(parser):
+	parser.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the default coreaudio block, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\". Needs --audio coreaudio")
 
 
 def _add_init_vm_parser(subcommands):
@@ -121,6 +126,7 @@ def _add_init_vm_parser(subcommands):
 	init_vm.add_argument("--machine-properties", default=DEFAULT_OPTIONS["machine_properties"], metavar="PROPERTIES", help="QEMU machine properties for UTM. An empty string keeps UTM's defaults (default: %(default)s)")
 	init_vm.add_argument("--headless", action="store_true", help="create the VM without a display window")
 	init_vm.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output. coreaudio has the lowest latency (default: %(default)s)")
+	_add_audio_args_option(init_vm)
 	init_vm.add_argument("--mac", help="MAC address (default: a random 52:54:00:xx:xx:xx address)")
 	init_vm.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
 	init_vm.add_argument("--qemu-img", metavar="PATH", default=DEFAULT_QEMU_IMG_PATH, help="qemu-img executable (default: %(default)s)")
@@ -300,6 +306,7 @@ def run_init_vm(context):
 		"machine_properties": arguments.machine_properties,
 		"headless": arguments.headless,
 		"audio": arguments.audio,
+		"audio_args": arguments.audio_args,
 		"qmp_port": context.config.qmp_port,
 		"qmp_session_port": context.config.qmp_session_port,
 	}
@@ -326,6 +333,7 @@ def run_update_vm_args(context):
 		"qmp_session_port": config.qmp_session_port,
 		"headless": arguments.headless,
 		"audio": arguments.audio,
+		"audio_args": arguments.audio_args,
 	})
 	context.print("Updated {}".format(os.path.join(bundle, "config.plist")))
 	context.print("AdditionalArguments: {}".format(" ".join(shlex.quote(argument) for argument in new_arguments)))

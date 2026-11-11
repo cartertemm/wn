@@ -317,6 +317,12 @@ class InitVMTests(CLITestCase):
 		with open(os.path.join(bundle, "Data", "disk.qcow2")) as image:
 			self.assertEqual(image.read(), "create -f qcow2 {} 64G".format(os.path.join(bundle, "Data", "disk.qcow2")))
 
+	def test_audio_args(self):
+		exit_code, _, stderr = self.init_vm("--audio-args", "-audiodev coreaudio,id=ca0 -device usb-audio,audiodev=ca0")
+		self.assertEqual(exit_code, 0, stderr)
+		arguments = self.read_plist(os.path.join(self.output, "Windows.utm"))["QEMU"]["AdditionalArguments"]
+		self.assertEqual(arguments[4:], ["-audiodev", "coreaudio,id=ca0", "-device", "usb-audio,audiodev=ca0"])
+
 	def test_options(self):
 		exit_code, _, stderr = self.init_vm(
 			"--name", "Win 11", "--disk-gib", "128", "--cpus", "4", "--memory-mib", "4096",
@@ -503,6 +509,20 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertEqual(config["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS[:2] + ["-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"] + OLD_ARGUMENTS[2:])
 		self.assertTrue(config["QEMU"]["UEFIBoot"])
 		self.assertIn("4445", stdout)
+
+	def test_audio_args_replace_audio_block(self):
+		audio_args = "-audiodev coreaudio,id=ca0,timer-period=2500 -device intel-hda -device hda-output,audiodev=ca0"
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--audio-args", audio_args)
+		self.assertEqual(exit_code, 0, stderr)
+		arguments = self.read_plist()["QEMU"]["AdditionalArguments"]
+		self.assertEqual(arguments[4:], audio_args.split())
+		self.assertIn("timer-period=2500", stdout)
+
+	def test_audio_args_with_spice_is_error(self):
+		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--audio", "spice", "--audio-args", "-device intel-hda")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("audio_args", stderr)
+		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS)
 
 	def test_default_bundle_path_uses_vm_name(self):
 		with mock.patch("wn.cli.update_additional_arguments", return_value=[]) as update:

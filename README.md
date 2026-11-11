@@ -109,6 +109,7 @@ adds it to its list.
 | `--machine-properties PROPS` | `kernel-irqchip=off` | QEMU machine properties (UTM's `MachinePropertyOverride`). The default avoids the UTM 5.0.8 reboot hang with 2 or more vCPUs (UTM issue 8009). An empty string keeps UTM's defaults. |
 | `--headless` | off | Create the VM without a display window. |
 | `--audio MODE` | `coreaudio` | `coreaudio` plays straight to macOS with low latency. `spice` uses UTM's audio path. |
+| `--audio-args ARGS` | none | QEMU arguments that replace the default coreaudio block (`-audiodev`, `intel-hda`, and `hda-output`). Use it to tune buffers or try another sound device. Needs `--audio coreaudio`. |
 | `--mac ADDRESS` | random `52:54:00:xx:xx:xx` | MAC address of the network card. |
 | `--output DIR` | UTM's documents folder | Where to write the bundle. |
 | `--qemu-img PATH` | `/opt/homebrew/bin/qemu-img` | The `qemu-img` tool. Install it with `brew install qemu`. |
@@ -134,6 +135,7 @@ Then quit UTM and open it again so it reads the new arguments, and run
 | `--bundle PATH` | `vm_name.utm` in UTM's documents folder | The bundle to update. |
 | `--headless` | off | Give this if the VM was created with `--headless`. |
 | `--audio MODE` | `coreaudio` | Give the audio mode the VM was created with. |
+| `--audio-args ARGS` | none | QEMU arguments that replace the default coreaudio block. See `init-vm`. |
 
 ### Press keys
 

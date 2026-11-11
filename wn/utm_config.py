@@ -2,6 +2,7 @@
 
 import os
 import plistlib
+import shlex
 import subprocess
 import uuid
 
@@ -34,6 +35,7 @@ DEFAULT_OPTIONS = {
 	"qmp_session_port": None,
 	"audio": AUDIO_SPICE,
 	"audio_buffer_length_us": 20000,
+	"audio_args": None,
 	"tpm": True,
 	"uefi": True,
 }
@@ -59,6 +61,13 @@ def _resolve_argument_options(options):
 	resolved = dict(DEFAULT_OPTIONS, **options)
 	if resolved["audio"] not in AUDIO_MODES:
 		raise UTMConfigError("audio mode '{}' is not supported. Use one of: {}".format(resolved["audio"], ", ".join(AUDIO_MODES)))
+	if resolved["audio_args"]:
+		if resolved["audio"] != AUDIO_COREAUDIO:
+			raise UTMConfigError("audio_args needs audio mode '{}'".format(AUDIO_COREAUDIO))
+		try:
+			shlex.split(resolved["audio_args"])
+		except ValueError as error:
+			raise UTMConfigError("cannot parse audio_args: {}".format(error)) from None
 	resolved["qmp_session_port"] = session_port(resolved["qmp_port"], resolved["qmp_session_port"])
 	if resolved["qmp_session_port"] == resolved["qmp_port"]:
 		raise UTMConfigError("qmp_session_port must differ from qmp_port {}".format(resolved["qmp_port"]))
@@ -80,7 +89,9 @@ def _additional_arguments(options):
 	arguments = _qmp_server(options["qmp_port"]) + _qmp_server(options["qmp_session_port"])
 	if options["headless"]:
 		arguments += ["-device", "ramfb"]
-	if options["audio"] == AUDIO_COREAUDIO:
+	if options["audio_args"]:
+		arguments += shlex.split(options["audio_args"])
+	elif options["audio"] == AUDIO_COREAUDIO:
 		arguments += [
 			"-audiodev", "coreaudio,id={},out.buffer-length={}".format(AUDIODEV_ID, options["audio_buffer_length_us"]),
 			"-device", "intel-hda",
@@ -220,7 +231,7 @@ def update_additional_arguments(bundle_path, options):
 	"""Replace the AdditionalArguments of an existing bundle's config.plist and return the new list.
 
 	``options`` takes the same argument options as ``build_config``, such as
-	``qmp_port``, ``qmp_session_port``, ``headless``, and ``audio``. Nothing
+	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, and ``audio_args``. Nothing
 	else in config.plist changes.
 	"""
 	arguments = _additional_arguments(_resolve_argument_options(options))
