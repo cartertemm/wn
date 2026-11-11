@@ -80,6 +80,8 @@ def _add_init_vm_parser(subcommands):
 	init_vm.add_argument("--cpus", type=int, default=DEFAULT_CPU_COUNT, help="number of CPU cores (default: %(default)s)")
 	init_vm.add_argument("--memory-mib", type=int, default=DEFAULT_MEMORY_MIB, help="memory in MiB (default: %(default)s)")
 	init_vm.add_argument("--iso", metavar="PATH", help="Windows installer ISO to copy into the bundle")
+	init_vm.add_argument("--driver-iso", metavar="PATH", help="driver ISO, such as virtio-win, to copy into the bundle as a second CD")
+	init_vm.add_argument("--machine-properties", default=DEFAULT_OPTIONS["machine_properties"], metavar="PROPERTIES", help="QEMU machine properties for UTM. An empty string keeps UTM's defaults (default: %(default)s)")
 	init_vm.add_argument("--headless", action="store_true", help="create the VM without a display window")
 	init_vm.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output. coreaudio has the lowest latency (default: %(default)s)")
 	init_vm.add_argument("--mac", help="MAC address (default: a random 52:54:00:xx:xx:xx address)")
@@ -212,8 +214,9 @@ def _fill_bundle(bundle, output, options, arguments):
 	data_directory = os.path.join(bundle, DATA_DIRECTORY_NAME)
 	os.makedirs(data_directory)
 	create_disk_image(os.path.join(data_directory, options["disk_image"]), arguments.disk_gib, arguments.qemu_img)
-	if arguments.iso:
-		shutil.copyfile(arguments.iso, os.path.join(data_directory, options["iso_image"]))
+	for source, image in ((arguments.iso, options["iso_image"]), (arguments.driver_iso, options["driver_iso_image"])):
+		if source:
+			shutil.copyfile(source, os.path.join(data_directory, image))
 	write_bundle(output, options)
 
 
@@ -231,6 +234,8 @@ def run_init_vm(context):
 		"memory_mib": arguments.memory_mib,
 		"disk_image": DEFAULT_OPTIONS["disk_image"],
 		"iso_image": os.path.basename(arguments.iso) if arguments.iso else None,
+		"driver_iso_image": os.path.basename(arguments.driver_iso) if arguments.driver_iso else None,
+		"machine_properties": arguments.machine_properties,
 		"headless": arguments.headless,
 		"audio": arguments.audio,
 		"qmp_port": context.config.qmp_port,

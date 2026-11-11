@@ -26,6 +26,8 @@ DEFAULT_OPTIONS = {
 	"memory_mib": 8192,
 	"disk_image": "disk.qcow2",
 	"iso_image": None,
+	"driver_iso_image": None,
+	"machine_properties": "kernel-irqchip=off",
 	"headless": False,
 	"qmp_port": 4444,
 	"audio": AUDIO_SPICE,
@@ -82,8 +84,9 @@ def _drive(image_name, image_type, interface, read_only):
 
 def _drives(options):
 	drives = []
-	if options["iso_image"]:
-		drives.append(_drive(options["iso_image"], "CD", "USB", True))
+	for image in (options["iso_image"], options["driver_iso_image"]):
+		if image:
+			drives.append(_drive(image, "CD", "USB", True))
 	drives.append(_drive(options["disk_image"], "Disk", "NVMe", False))
 	return drives
 
@@ -92,7 +95,7 @@ def _displays(options):
 	if options["headless"]:
 		return []
 	return [{
-		"Hardware": "virtio-gpu-pci",
+		"Hardware": "virtio-ramfb",
 		"DynamicResolution": True,
 		"NativeResolution": False,
 		"UpscalingFilter": "Linear",
@@ -104,6 +107,24 @@ def _sounds(options):
 	if options["audio"] == AUDIO_COREAUDIO:
 		return []
 	return [{"Hardware": "intel-hda"}]
+
+
+def _qemu(options):
+	qemu = {
+		"DebugLog": True,
+		"UEFIBoot": options["uefi"],
+		"RNGDevice": True,
+		"BalloonDevice": False,
+		"TPMDevice": options["tpm"],
+		"Hypervisor": True,
+		"TSO": False,
+		"RTCLocalTime": True,
+		"PS2Controller": False,
+		"AdditionalArguments": _additional_arguments(options),
+	}
+	if options["machine_properties"]:
+		qemu["MachinePropertyOverride"] = options["machine_properties"]
+	return qemu
 
 
 def build_config(options):
@@ -129,18 +150,7 @@ def build_config(options):
 			"MemorySize": options["memory_mib"],
 			"JITCacheSize": 0,
 		},
-		"QEMU": {
-			"DebugLog": True,
-			"UEFIBoot": options["uefi"],
-			"RNGDevice": True,
-			"BalloonDevice": False,
-			"TPMDevice": options["tpm"],
-			"Hypervisor": True,
-			"TSO": False,
-			"RTCLocalTime": True,
-			"PS2Controller": False,
-			"AdditionalArguments": _additional_arguments(options),
-		},
+		"QEMU": _qemu(options),
 		"Input": {
 			"UsbBusSupport": "3.0",
 			"UsbSharing": True,

@@ -113,6 +113,15 @@ class ConfigContentTests(unittest.TestCase):
 		self.assertIs(qemu["RTCLocalTime"], True)
 		self.assertIs(qemu["PS2Controller"], False)
 
+	def test_machine_properties_default_turns_off_kernel_irqchip(self):
+		self.assertEqual(build_config(options())["QEMU"]["MachinePropertyOverride"], "kernel-irqchip=off")
+
+	def test_machine_properties(self):
+		self.assertEqual(build_config(options(machine_properties="highmem=on"))["QEMU"]["MachinePropertyOverride"], "highmem=on")
+
+	def test_empty_machine_properties_omits_key(self):
+		self.assertNotIn("MachinePropertyOverride", build_config(options(machine_properties=""))["QEMU"])
+
 	def test_tpm_and_uefi_off(self):
 		qemu = build_config(options(tpm=False, uefi=False))["QEMU"]
 		self.assertIs(qemu["TPMDevice"], False)
@@ -129,6 +138,14 @@ class ConfigContentTests(unittest.TestCase):
 		self.assertEqual(cd["InterfaceVersion"], 1)
 		self.assertNotEqual(cd["Identifier"], disk["Identifier"])
 
+	def test_driver_iso_is_second_cd(self):
+		drives = build_config(options(driver_iso_image="virtio-win.iso"))["Drive"]
+		self.assertEqual([(drive["ImageName"], drive["ImageType"], drive["Interface"], drive["ReadOnly"]) for drive in drives], [
+			("win11-arm64.iso", "CD", "USB", True),
+			("virtio-win.iso", "CD", "USB", True),
+			("disk.qcow2", "Disk", "NVMe", False),
+		])
+
 	def test_no_iso_means_disk_only(self):
 		drives = build_config(options(iso_image=None))["Drive"]
 		self.assertEqual([drive["ImageType"] for drive in drives], ["Disk"])
@@ -144,7 +161,7 @@ class ConfigContentTests(unittest.TestCase):
 
 	def test_display_when_not_headless(self):
 		config = build_config(options())
-		self.assertEqual([display["Hardware"] for display in config["Display"]], ["virtio-gpu-pci"])
+		self.assertEqual([display["Hardware"] for display in config["Display"]], ["virtio-ramfb"])
 		self.assertNotIn("ramfb", arguments_of(config))
 
 	def test_headless(self):

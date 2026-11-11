@@ -98,6 +98,8 @@ adds it to its list.
 | `--cpus N` | `8` | CPU cores. |
 | `--memory-mib N` | `8192` | Memory in MiB. |
 | `--iso PATH` | none | Installer ISO to copy into the bundle. |
+| `--driver-iso PATH` | none | Driver ISO, such as virtio-win, to copy into the bundle as a second CD. |
+| `--machine-properties PROPS` | `kernel-irqchip=off` | QEMU machine properties (UTM's `MachinePropertyOverride`). The default avoids the UTM 5.0.8 reboot hang with 2 or more vCPUs (UTM issue 8009). An empty string keeps UTM's defaults. |
 | `--headless` | off | Create the VM without a display window. |
 | `--audio MODE` | `coreaudio` | `coreaudio` plays straight to macOS with low latency. `spice` uses UTM's audio path. |
 | `--mac ADDRESS` | random `52:54:00:xx:xx:xx` | MAC address of the network card. |

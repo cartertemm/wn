@@ -229,6 +229,7 @@ class InitVMTests(CLITestCase):
 		self.assertIn("coreaudio,id=ca0,out.buffer-length=20000", config["QEMU"]["AdditionalArguments"])
 		self.assertIn("tcp:127.0.0.1:4444,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
 		self.assertEqual([drive["ImageType"] for drive in config["Drive"]], ["Disk"])
+		self.assertEqual(config["QEMU"]["MachinePropertyOverride"], "kernel-irqchip=off")
 		with open(os.path.join(bundle, "Data", "disk.qcow2")) as image:
 			self.assertEqual(image.read(), "create -f qcow2 {} 64G".format(os.path.join(bundle, "Data", "disk.qcow2")))
 
@@ -250,6 +251,25 @@ class InitVMTests(CLITestCase):
 			self.assertEqual(iso_copy.read(), b"fake iso contents")
 		with open(os.path.join(bundle, "Data", "disk.qcow2")) as image:
 			self.assertTrue(image.read().endswith(" 128G"))
+
+	def test_machine_properties(self):
+		self.assertEqual(self.init_vm("--machine-properties", "highmem=on")[0], 0)
+		self.assertEqual(self.read_plist(os.path.join(self.output, "Windows.utm"))["QEMU"]["MachinePropertyOverride"], "highmem=on")
+
+	def test_empty_machine_properties_omits_key(self):
+		self.assertEqual(self.init_vm("--machine-properties", "")[0], 0)
+		self.assertNotIn("MachinePropertyOverride", self.read_plist(os.path.join(self.output, "Windows.utm"))["QEMU"])
+
+	def test_driver_iso_is_copied_as_second_cd(self):
+		driver_iso = os.path.join(self.home.name, "virtio-win.iso")
+		with open(driver_iso, "wb") as iso_file:
+			iso_file.write(b"fake drivers")
+		self.assertEqual(self.init_vm("--iso", self.iso, "--driver-iso", driver_iso)[0], 0)
+		bundle = os.path.join(self.output, "Windows.utm")
+		config = self.read_plist(bundle)
+		self.assertEqual([(drive["ImageType"], drive["ImageName"]) for drive in config["Drive"]], [("CD", "win11-arm64.iso"), ("CD", "virtio-win.iso"), ("Disk", "disk.qcow2")])
+		with open(os.path.join(bundle, "Data", "virtio-win.iso"), "rb") as iso_copy:
+			self.assertEqual(iso_copy.read(), b"fake drivers")
 
 	def test_name_defaults_to_config_vm_name(self):
 		self.write_config({"vm_name": "Configured", "qmp_port": 4500})
