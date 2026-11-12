@@ -23,8 +23,6 @@ from wn.setup import SOFTWARE_CHOICES, Installer, SetupOptions
 from wn.text_input import text_to_combos
 from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
 from wn.utm_config import (
-	AUDIO_COREAUDIO,
-	AUDIO_MODES,
 	BLOCK_AUDIO,
 	BLOCK_BATTERY,
 	BLOCK_EXTRA,
@@ -171,7 +169,6 @@ def _add_update_vm_args_parser(subcommands):
 	update.add_argument("--bundle", metavar="PATH", help="the .utm bundle (default: vm_name.utm in UTM's documents folder)")
 	update.add_argument("--qmp", action="store_true", help="write the QMP servers again from qmp_port and qmp_session_port in the config")
 	update.add_argument("--headless", action="store_true", help="add the ramfb display that a VM with no display window needs")
-	update.add_argument("--audio", choices=AUDIO_MODES, help="replace the audio arguments: spice removes them, coreaudio writes the default coreaudio block")
 	battery = update.add_mutually_exclusive_group()
 	battery.add_argument("--battery", action="store_true", help="map the battery file into the guest as an NVDIMM, for the wn-acpi firmware driver")
 	battery.add_argument("--no-battery", action="store_true", help="remove the battery NVDIMM")
@@ -180,7 +177,7 @@ def _add_update_vm_args_parser(subcommands):
 
 
 def _add_audio_args_option(parser):
-	parser.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the default coreaudio block, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\". Needs --audio coreaudio")
+	parser.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the default coreaudio block, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\"")
 	parser.add_argument("--extra-args", metavar="ARGS", help="more QEMU arguments to add at the end, such as \"-device virtio-keyboard-pci,id=vkbd\"")
 
 
@@ -194,7 +191,6 @@ def _add_init_vm_parser(subcommands):
 	init_vm.add_argument("--driver-iso", metavar="PATH", help="driver ISO, such as virtio-win, to copy into the bundle as a second CD")
 	init_vm.add_argument("--machine-properties", default=DEFAULT_OPTIONS["machine_properties"], metavar="PROPERTIES", help="QEMU machine properties for UTM. An empty string keeps UTM's defaults (default: %(default)s)")
 	init_vm.add_argument("--headless", action="store_true", help="create the VM without a display window")
-	init_vm.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output. coreaudio has the lowest latency (default: %(default)s)")
 	_add_audio_args_option(init_vm)
 	init_vm.add_argument("--mac", help="MAC address (default: a random 52:54:00:xx:xx:xx address)")
 	init_vm.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
@@ -379,7 +375,6 @@ def run_init_vm(context):
 		"driver_iso_image": os.path.basename(arguments.driver_iso) if arguments.driver_iso else None,
 		"machine_properties": arguments.machine_properties,
 		"headless": arguments.headless,
-		"audio": arguments.audio,
 		"audio_args": arguments.audio_args,
 		"extra_args": arguments.extra_args,
 		"qmp_port": context.config.qmp_port,
@@ -406,7 +401,7 @@ def run_update_vm_args(context):
 	blocks = [block for block, named in (
 		(BLOCK_QMP, arguments.qmp),
 		(BLOCK_RAMFB, arguments.headless),
-		(BLOCK_AUDIO, arguments.audio or arguments.audio_args is not None),
+		(BLOCK_AUDIO, arguments.audio_args is not None),
 		(BLOCK_BATTERY, arguments.battery or arguments.no_battery),
 		(BLOCK_EXTRA, arguments.extra_args is not None),
 	) if named]
@@ -414,7 +409,6 @@ def run_update_vm_args(context):
 		"qmp_port": config.qmp_port,
 		"qmp_session_port": config.qmp_session_port,
 		"headless": arguments.headless,
-		"audio": arguments.audio or AUDIO_COREAUDIO,
 		"audio_args": arguments.audio_args,
 		"extra_args": arguments.extra_args,
 		"battery": arguments.battery,

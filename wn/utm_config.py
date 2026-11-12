@@ -35,9 +35,6 @@ ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_EXT
 DEFAULT_QEMU_IMG_PATH = "/opt/homebrew/bin/qemu-img"
 QMP_HOST = "127.0.0.1"
 AUDIODEV_ID = "ca0"
-AUDIO_SPICE = "spice"
-AUDIO_COREAUDIO = "coreaudio"
-AUDIO_MODES = (AUDIO_SPICE, AUDIO_COREAUDIO)
 MAXIMUM_USB_SHARE = 3
 INTERFACE_VERSION = 1
 QMP_SESSION_PORT_OFFSET = 1
@@ -57,7 +54,6 @@ DEFAULT_OPTIONS = {
 	"headless": False,
 	"qmp_port": 4444,
 	"qmp_session_port": None,
-	"audio": AUDIO_SPICE,
 	"audio_buffer_length_us": 20000,
 	"audio_args": None,
 	"extra_args": None,
@@ -92,11 +88,7 @@ def _resolve_argument_options(options):
 	if unknown:
 		raise UTMConfigError("unknown VM options: {}. Known options: {}".format(", ".join(unknown), ", ".join(REQUIRED_OPTIONS + tuple(DEFAULT_OPTIONS))))
 	resolved = dict(DEFAULT_OPTIONS, **options)
-	if resolved["audio"] not in AUDIO_MODES:
-		raise UTMConfigError("audio mode '{}' is not supported. Use one of: {}".format(resolved["audio"], ", ".join(AUDIO_MODES)))
 	if resolved["audio_args"]:
-		if resolved["audio"] != AUDIO_COREAUDIO:
-			raise UTMConfigError("audio_args needs audio mode '{}'".format(AUDIO_COREAUDIO))
 		try:
 			shlex.split(resolved["audio_args"])
 		except ValueError as error:
@@ -162,13 +154,11 @@ def _battery_arguments(options):
 def _audio_arguments(options):
 	if options["audio_args"]:
 		return shlex.split(options["audio_args"])
-	if options["audio"] == AUDIO_COREAUDIO:
-		return [
-			"-audiodev", "coreaudio,id={},out.buffer-length={}".format(AUDIODEV_ID, options["audio_buffer_length_us"]),
-			"-device", "intel-hda",
-			"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
-		]
-	return []
+	return [
+		"-audiodev", "coreaudio,id={},out.buffer-length={}".format(AUDIODEV_ID, options["audio_buffer_length_us"]),
+		"-device", "intel-hda",
+		"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
+	]
 
 
 def _argument_blocks(options):
@@ -272,12 +262,6 @@ def _displays(options):
 	}]
 
 
-def _sounds(options):
-	if options["audio"] == AUDIO_COREAUDIO:
-		return []
-	return [{"Hardware": "intel-hda"}]
-
-
 def _qemu(options):
 	qemu = {
 		"DebugLog": True,
@@ -340,7 +324,7 @@ def build_config(options):
 			"PortForward": [],
 		}],
 		"Serial": [],
-		"Sound": _sounds(options),
+		"Sound": [],
 	}
 
 
@@ -409,7 +393,7 @@ def update_additional_arguments(bundle_path, options, blocks):
 	"""Replace the ``blocks`` (names from ARGUMENT_BLOCKS) in an existing bundle's AdditionalArguments.
 
 	``options`` takes the same argument options as ``build_config``, such as
-	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, ``battery``, ``battery_file``, and
+	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio_args``, ``battery``, ``battery_file``, and
 	``extra_args``. Only the named blocks are built from them; every other argument stays as it is, and
 	BLOCK_EXTRA means every argument that is in no other block. With ``battery``, the memory size comes from
 	the bundle, and ``battery_file`` defaults to wn-battery-<name>.bin in the UTM group container. Nothing else

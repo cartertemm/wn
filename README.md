@@ -249,7 +249,7 @@ parts that its flags name. Everything else stays as it is:
 |---|---|
 | `--qmp` | The QMP servers, from `qmp_port` and `qmp_session_port` |
 | `--headless` | Adds `-device ramfb` |
-| `--audio spice`, `--audio coreaudio`, `--audio-args ARGS` | The audio arguments |
+| `--audio-args ARGS` | The audio arguments |
 | `--battery`, `--no-battery` | The battery NVDIMM |
 | `--extra-args ARGS` | Every argument that is not in one of the parts above |
 

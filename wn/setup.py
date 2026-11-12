@@ -22,7 +22,6 @@ from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import looks_drawn, take_screendump
 from wn.unattend import SETUP_DONE_MARKER, SETUP_DONE_TEXT, SETUP_REBOOTING_TEXT, UnattendOptions, computer_name_for, mac_time_zone
 from wn.utm_config import (
-	AUDIO_COREAUDIO,
 	BUNDLE_SUFFIX,
 	DATA_DIRECTORY_NAME,
 	DEFAULT_OPTIONS,
@@ -174,7 +173,6 @@ class Installer:
 			"driver_iso_image": PAYLOAD_IMAGE,
 			"headless": options.headless,
 			"display": SETUP_DISPLAY,
-			"audio": AUDIO_COREAUDIO,
 			"audio_args": FINAL_AUDIO_ARGS,
 			"qmp_port": options.qmp_port,
 			"qmp_session_port": options.qmp_session_port,

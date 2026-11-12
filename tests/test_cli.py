@@ -394,7 +394,7 @@ class InitVMTests(CLITestCase):
 	def test_options(self):
 		exit_code, _, stderr = self.init_vm(
 			"--name", "Win 11", "--disk-gib", "128", "--cpus", "4", "--memory-mib", "4096",
-			"--iso", self.iso, "--headless", "--audio", "spice", "--mac", "52:54:00:12:34:56",
+			"--iso", self.iso, "--headless", "--mac", "52:54:00:12:34:56",
 		)
 		self.assertEqual(exit_code, 0, stderr)
 		bundle = os.path.join(self.output, "Win 11.utm")
@@ -403,7 +403,7 @@ class InitVMTests(CLITestCase):
 		self.assertEqual(config["System"]["MemorySize"], 4096)
 		self.assertEqual(config["Network"][0]["MacAddress"], "52:54:00:12:34:56")
 		self.assertEqual(config["Display"], [])
-		self.assertEqual(config["Sound"], [{"Hardware": "intel-hda"}])
+		self.assertEqual(config["Sound"], [])
 		self.assertEqual([(drive["ImageType"], drive["ImageName"]) for drive in config["Drive"]], [("CD", "win11-arm64.iso"), ("Disk", "disk.qcow2")])
 		with open(os.path.join(bundle, "Data", "win11-arm64.iso"), "rb") as iso_copy:
 			self.assertEqual(iso_copy.read(), b"fake iso contents")
@@ -473,11 +473,6 @@ class InitVMTests(CLITestCase):
 		self.init_vm("--name", "Two")
 		macs = [self.read_plist(os.path.join(self.output, name + ".utm"))["Network"][0]["MacAddress"] for name in ("One", "Two")]
 		self.assertNotEqual(macs[0], macs[1])
-
-	def test_bad_audio_is_usage_error(self):
-		with mock.patch("sys.stderr", io.StringIO()):
-			with self.assertRaises(SystemExit):
-				self.init_vm("--audio", "pulse")
 
 	def test_default_output_is_utm_documents(self):
 		with mock.patch("wn.cli.write_bundle", side_effect=lambda path, options: os.path.join(path, "Windows.utm")), \
@@ -592,12 +587,6 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"][2:], ["-device", "intel-hda", "-device", "virtio-keyboard-pci,id=vkbd"])
 		self.assertIn("vkbd", stdout)
-
-	def test_audio_args_with_spice_is_error(self):
-		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--audio", "spice", "--audio-args", "-device intel-hda")
-		self.assertEqual(exit_code, 1)
-		self.assertIn("audio_args", stderr)
-		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS)
 
 	def test_default_bundle_path_uses_vm_name(self):
 		with mock.patch("wn.cli.update_additional_arguments", return_value=([], [])) as update:
