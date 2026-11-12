@@ -229,7 +229,7 @@ def _battery():
 		string("wn"),
 		string("1"),
 		string("LION"),
-		string("wn-tools"),
+		string("wn"),
 	)
 	state = or_(_flag_bit(FLAG_DISCHARGING, DISCHARGING_SHIFT), _flag_bit(FLAG_CHARGING, CHARGING_SHIFT))
 	pbst = name_string("PBST")

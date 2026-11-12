@@ -41,9 +41,7 @@ WINDOWS_ISO_IMAGE = "windows11-arm64.iso"
 PAYLOAD_IMAGE = "wnsetup.iso"
 DISK_IMAGE = DEFAULT_OPTIONS["disk_image"]
 SOFTWARE_NVDA = "nvda"
-SOFTWARE_WN_TOOLS = "wn-tools"
-SOFTWARE_CHOICES = ((SOFTWARE_NVDA, "NVDA screen reader"), (SOFTWARE_WN_TOOLS, "wn-tools: the Mac battery status in the Windows tray"))
-WN_TOOLS_SOURCE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wn-tools")
+SOFTWARE_CHOICES = ((SOFTWARE_NVDA, "NVDA screen reader"),)
 STOPPED_STATE = "stopped"
 
 UTM_QUIT_TIMEOUT_SECONDS = 30
@@ -78,7 +76,7 @@ class SetupOptions:
 	memory_mib: int = DEFAULT_OPTIONS["memory_mib"]
 	disk_gib: int = 64
 	headless: bool = False
-	software: Tuple[str, ...] = (SOFTWARE_NVDA, SOFTWARE_WN_TOOLS)
+	software: Tuple[str, ...] = (SOFTWARE_NVDA,)
 	edition: str = "Pro"
 	qmp_port: int = DEFAULT_OPTIONS["qmp_port"]
 	qmp_session_port: Optional[int] = None
@@ -172,10 +170,8 @@ class Installer:
 			data = os.path.join(self.bundle, DATA_DIRECTORY_NAME)
 			create_empty_qcow2(os.path.join(data, DISK_IMAGE), options.disk_gib)
 			shutil.copyfile(downloads.windows_iso, os.path.join(data, WINDOWS_ISO_IMAGE))
-			wn_tools = SOFTWARE_WN_TOOLS in options.software
-			self.report("Building the setup disc (answer file, drivers, guest tools{}{})".format(", NVDA" if downloads.nvda_installer else "", ", wn-tools" if wn_tools else ""))
-			self.build_payload(os.path.join(data, PAYLOAD_IMAGE), self.unattend_options(), downloads.virtio_iso, downloads.guest_tools_iso, downloads.nvda_installer,
-				wn_tools_source=WN_TOOLS_SOURCE if wn_tools else None)
+			self.report("Building the setup disc (answer file, drivers, guest tools{})".format(", NVDA" if downloads.nvda_installer else ""))
+			self.build_payload(os.path.join(data, PAYLOAD_IMAGE), self.unattend_options(), downloads.virtio_iso, downloads.guest_tools_iso, downloads.nvda_installer)
 		except BaseException as error:
 			shutil.rmtree(self.bundle, ignore_errors=True)
 			if isinstance(error, OSError):
@@ -361,6 +357,3 @@ class Installer:
 			"The UTM window shows the screen. Command acts as the Windows key there.",
 		):
 			self.output.write(line + "\n")
-		if SOFTWARE_WN_TOOLS in self.options.software:
-			self.output.write("wn-tools shows the Mac battery in Windows. Start the battery agent on the Mac at every login with:\n")
-			self.output.write("  python3 -m wn agent --install\n")

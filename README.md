@@ -48,7 +48,7 @@ python3 -m wn setup
 | Memory in MiB | `--memory-mib N` | `8192` |
 | Disk size in GiB | `--disk-gib N` | `64` |
 | Run without a display window | `--headless` | no |
-| Software to install (1 is NVDA, 2 is wn-tools) | `--software nvda,wn-tools` or `--software none` | NVDA and wn-tools |
+| Software to install (1 is NVDA) | `--software nvda` or `--software none` | NVDA |
 | Windows 11 edition | `--edition NAME` | `Pro` |
 
 Then it works on its own:
@@ -71,7 +71,7 @@ Windows installs. Leave it alone until `wn` prints `Done` and the IP address.
 To run setup from a script, pass `--yes` and the flags you need:
 
 ```sh
-python3 -m wn setup --yes --name Windows --username carter --software nvda,wn-tools
+python3 -m wn setup --yes --name Windows --username carter --software nvda
 ```
 
 ## Use it
@@ -88,7 +88,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda,wn-to
 | `grab` | `python3 -m wn grab` | Sends every Mac key press to the guest. |
 | `init-vm` | `python3 -m wn init-vm --iso ~/Downloads/Win11_ARM64.iso` | Creates a UTM bundle without installing Windows. |
 | `update-vm-args` | `python3 -m wn update-vm-args` | Rewrites the QEMU arguments of a stopped VM. |
-| `agent` | `python3 -m wn agent` | Serves the Mac's battery status to wn-tools in the guest. See [wn-tools](#wn-tools). |
+| `agent` | `python3 -m wn agent` | Writes the Mac's battery status to the native battery in the guest. See [Native battery](#native-battery). |
 | `battery` | `python3 -m wn battery status` | Reads or writes the native battery block in guest memory. See [Native battery](#native-battery). |
 
 `key`, `type`, and `mouse` take `--dry-run` to print the QMP commands as JSON
@@ -105,72 +105,7 @@ Audio is tuned for low latency. On an M4 Pro, the time from a key press to
 NVDA speech was about 115 ms. Most of that time is spent inside the Windows
 audio stack.
 
-## wn-tools
-
-wn-tools is a small tray app for Windows that shows the Mac's battery. It
-reads the battery from `wn agent`, a small web server on the Mac, every 30
-seconds.
-
-- The tray icon is a battery filled to the charge level, with a lightning
-  mark while the Mac charges. Its text reads like "Battery 83%, charging,
-  2 h 10 min left". NVDA reads this text when the icon has focus.
-- Press Ctrl+Alt+B anywhere to hear the status. It shows as a notification,
-  which NVDA reads.
-- To reach the icon with the keyboard, press Windows+B, then Enter to open
-  the hidden icons, then the arrow keys. Press Shift+F10 on the icon for its
-  menu: "Speak battery status" and "Quit".
-- "Battery: host not reachable" means `wn agent` is not running on the Mac.
-  "No battery" means the Mac is a desktop.
-
-`wn setup` builds and installs wn-tools in the guest when you choose it. It
-uses the C# compiler that comes with Windows, so nothing else is installed.
-To add it to an existing VM, copy the `wn-tools` folder into Windows, run
-`build.cmd`, then `install.cmd`.
-
-wn-tools finds the Mac as the default gateway of the network adapter. To use
-another address, put a `wn-tools.ini` file next to `wn-tools.exe`:
-
-```ini
-host=192.168.64.1
-port=47100
-```
-
-The agent listens only on the Mac's address on the UTM shared network
-(`bridge100`, usually `192.168.64.1`), so other computers cannot reach it.
-Run it in a terminal while you test:
-
-```sh
-python3 -m wn agent
-python3 -m wn agent --once
-```
-
-`--once` prints the battery status as JSON and exits.
-
-Two commands turn on autostart. Run this on the Mac. It adds a launch agent
-that starts `wn agent` when you log in:
-
-```sh
-python3 -m wn agent --install
-```
-
-Then run this in Windows. It copies `wn-tools.exe` to
-`%LOCALAPPDATA%\wn-tools`, starts it at every sign-in, and starts it now:
-
-```bat
-install.cmd
-```
-
-`wn setup` already runs `install.cmd` when you choose wn-tools. To turn
-autostart off, run `python3 -m wn agent --uninstall` on the Mac, and
-`reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v wn-tools /f`
-in Windows.
-
-What it does not do. Without the [native battery](#native-battery),
-Windows' own battery icon and battery settings stay absent, because Windows
-shows those only for a battery driver. The battery then shows only through
-the wn-tools icon.
-
-### Native battery
+## Native battery
 
 With the firmware battery driver installed in the VM, Windows shows the Mac's
 battery in its own battery icon, in Settings, in Device Manager under
@@ -268,8 +203,17 @@ you change the VM's memory size in UTM.
 `wn agent` checks the battery every 5 seconds. It writes the file at once
 when the status changes, and every 30 seconds otherwise. Windows sees each
 write within about a second. If the file is missing, the agent logs it and
-tries again. The web server for wn-tools keeps working either way.
-`wn agent --once` also writes the file once.
+tries again. `wn agent --once` prints the battery status as JSON and writes
+the file once.
+
+To start `wn agent` when you log in, run this on the Mac. It adds a launch
+agent:
+
+```sh
+python3 -m wn agent --install
+```
+
+To turn autostart off, run `python3 -m wn agent --uninstall`.
 
 Use `wn battery` to check the block by hand:
 
@@ -308,8 +252,6 @@ To remove the battery, stop the VM and run `wn update-vm-args` without
 | `keygrab_binary` | `keygrab/bin/wn-keygrab` | Path of the key grab helper. |
 | `keygrab_keycodes` | `keygrab/keycodes.json` | Table that maps macOS keycodes to QEMU key names. |
 | `keygrab_send_repeats` | `true` | Send auto-repeat key presses in `grab` mode. |
-| `agent_bind` | none | Address for `wn agent` to listen on. By default it finds the UTM shared network address. |
-| `agent_port` | `47100` | Port for `wn agent`. |
 | `battery_sync` | `true` | Write the Mac's battery status to the native battery block from `wn agent`. |
 | `battery_channel` | `file` | How the agent writes the battery block: `file` (the NVDIMM file) or `gdb` (QEMU's GDB stub, older). |
 | `battery_file` | `~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<vm_name>.bin` | Battery file that QEMU maps into the guest. UTM's QEMU can open it only in that folder. |
@@ -357,8 +299,6 @@ python3 -m unittest discover -s tests
 - `tests/`: unit tests with fake QMP, `utmctl`, and key grab helpers.
 - `keygrab/`: the Swift key grab helper and its keycode table.
 - `latency/`: tools that measure input and audio latency.
-- `wn-tools/`: the C# source of the Windows tray app, with `build.cmd` and
-  `install.cmd`.
 
 ## License
 

@@ -102,7 +102,7 @@ def _add_setup_parser(subcommands):
 
 
 def _add_agent_parser(subcommands):
-	agent_parser = subcommands.add_parser("agent", help="serve the Mac's battery status to the wn-tools tray app in the guest")
+	agent_parser = subcommands.add_parser("agent", help="write the Mac's battery status to the native battery in the guest")
 	modes = agent_parser.add_mutually_exclusive_group()
 	modes.add_argument("--once", action="store_true", help="print the battery status as JSON and exit")
 	modes.add_argument("--install", action="store_true", help="start the agent at every login with a launchd agent in ~/Library/LaunchAgents")

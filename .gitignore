@@ -13,7 +13,6 @@ vm/
 .DS_Store
 keygrab/bin/
 latency/bin/
-wn-tools/bin/
 efi/wn-acpi/target/
 efi/keys/*.key
 efi/wn-acpi/wn-acpi-signed.efi

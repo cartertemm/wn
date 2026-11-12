@@ -55,9 +55,6 @@ class PayloadImageTests(unittest.TestCase):
 		self.nvda = os.path.join(root, "nvda_2026.3.1.exe")
 		write_file(self.nvda, b"nvda")
 		self.staging = os.path.join(root, "staging")
-		self.wn_tools = os.path.join(root, "wn-tools-src")
-		for name in ("build.cmd", "install.cmd", os.path.join("src", "Program.cs"), os.path.join("src", "TrayContext.cs"), os.path.join("bin", "wn-tools.exe"), "notes.txt"):
-			write_file(os.path.join(self.wn_tools, name), name.encode())
 
 	def test_stage_layout(self):
 		guest_tools_name = stage_payload(self.staging, self.virtio_iso, self.guest_tools_iso, [self.nvda])
@@ -110,27 +107,6 @@ class PayloadImageTests(unittest.TestCase):
 		build_payload_iso(image, UnattendOptions(username="carter"), self.virtio_iso, self.guest_tools_iso, None)
 		with mounted(image) as mount_point:
 			self.assertEqual(os.listdir(os.path.join(mount_point, "tools")), ["utm-guest-tools-0.1.271.exe"])
-
-	def test_build_payload_iso_with_wn_tools(self):
-		image = os.path.join(self.directory.name, "wnsetup.iso")
-		build_payload_iso(image, UnattendOptions(username="carter"), self.virtio_iso, self.guest_tools_iso, None, wn_tools_source=self.wn_tools)
-		with mounted(image) as mount_point:
-			folder = os.path.join(mount_point, "tools", "wn-tools")
-			listing = sorted(os.path.relpath(os.path.join(parent, name), folder) for parent, _, names in os.walk(folder) for name in names)
-			with open(os.path.join(folder, "install.cmd"), "rb") as install:
-				self.assertEqual(install.read(), b"install.cmd")
-			with open(os.path.join(mount_point, "autounattend.xml"), "rb") as answer_file:
-				root = ET.fromstring(answer_file.read())
-		self.assertEqual(listing, ["build.cmd", "install.cmd", os.path.join("src", "Program.cs"), os.path.join("src", "TrayContext.cs")])
-		command_lines = [element.text for element in root.iter("{urn:schemas-microsoft-com:unattend}CommandLine")]
-		self.assertTrue(any("wn-tools\\install.cmd" in line for line in command_lines))
-
-	def test_build_payload_iso_without_wn_tools(self):
-		image = os.path.join(self.directory.name, "wnsetup.iso")
-		build_payload_iso(image, UnattendOptions(username="carter"), self.virtio_iso, self.guest_tools_iso, None)
-		with mounted(image) as mount_point:
-			with open(os.path.join(mount_point, "autounattend.xml"), "rb") as answer_file:
-				self.assertNotIn(b"wn-tools", answer_file.read())
 
 	def test_refuses_existing_image(self):
 		image = os.path.join(self.directory.name, "payload.iso")

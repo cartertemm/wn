@@ -5,7 +5,6 @@ import json
 import os
 from typing import Optional
 
-from wn.agent import DEFAULT_AGENT_PORT
 from wn.backends.utm import DEFAULT_QMP_PORT, DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
 from wn.battery_sync import BATTERY_CHANNEL_FILE, BATTERY_CHANNELS, DEFAULT_GDB_PORT
 from wn.errors import WnError
@@ -31,8 +30,6 @@ class Config:
 	keygrab_keycodes: Optional[str] = None
 	keygrab_send_repeats: bool = True
 	screen_size: Optional[str] = None
-	agent_bind: Optional[str] = None
-	agent_port: int = DEFAULT_AGENT_PORT
 	gdb_port: int = DEFAULT_GDB_PORT
 	battery_sync: bool = True
 	battery_channel: str = BATTERY_CHANNEL_FILE
@@ -51,8 +48,6 @@ FIELD_TYPES = {
 	"keygrab_keycodes": (str, type(None)),
 	"keygrab_send_repeats": (bool,),
 	"screen_size": (str, type(None)),
-	"agent_bind": (str, type(None)),
-	"agent_port": (int,),
 	"gdb_port": (int,),
 	"battery_sync": (bool,),
 	"battery_channel": (str,),

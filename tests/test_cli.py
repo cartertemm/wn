@@ -598,7 +598,7 @@ class SetupCommandTests(CLITestCase):
 		self.assertEqual(exit_code, 0)
 		self.assertEqual((options.name, options.username, options.password), ("Windows", "macuser", ""))
 		self.assertEqual((options.cpus, options.memory_mib, options.disk_gib, options.headless), (8, 8192, 64, False))
-		self.assertEqual((options.software, options.edition), (("nvda", "wn-tools"), "Pro"))
+		self.assertEqual((options.software, options.edition), (("nvda",), "Pro"))
 		self.assertEqual(options.downloads_dir, os.path.join("~", "Library", "Application Support", "wn", "downloads"))
 
 	def test_yes_with_flags(self):
@@ -611,11 +611,10 @@ class SetupCommandTests(CLITestCase):
 	def test_prompts_accept_defaults(self):
 		exit_code, options, stdout, _ = self.run_setup(answers="\n" * 9)
 		self.assertEqual(exit_code, 0)
-		self.assertEqual((options.name, options.username, options.software), ("Windows", "macuser", ("nvda", "wn-tools")))
+		self.assertEqual((options.name, options.username, options.software), ("Windows", "macuser", ("nvda",)))
 		self.assertIn("VM name [Windows]: ", stdout)
 		self.assertIn("1. NVDA screen reader", stdout)
-		self.assertIn("2. wn-tools", stdout)
-		self.assertIn("Numbers separated by commas, 0 for none [1,2]: ", stdout)
+		self.assertIn("Numbers separated by commas, 0 for none [1]: ", stdout)
 
 	def test_prompts_take_answers(self):
 		answers = "\n".join(["Work", "carter", "secret", "6", "6144", "100", "yes", "0", "Education"]) + "\n"

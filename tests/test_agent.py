@@ -1,3 +1,4 @@
+import argparse
 import io
 import json
 import os
@@ -5,11 +6,7 @@ import plistlib
 import subprocess
 import tempfile
 import socket
-import threading
-import time
 import unittest
-import urllib.error
-import urllib.request
 from unittest import mock
 
 from fake_gdb_server import FakeGdbServer
@@ -19,12 +16,10 @@ from wn.agent import (
 	LAUNCHD_LABEL,
 	AgentError,
 	battery_status,
-	find_bind_address,
 	install_launch_agent,
 	launch_agent_path,
-	make_server,
 	parse_pmset,
-	start_battery_sync,
+	run_agent_command,
 	uninstall_launch_agent,
 )
 from wn.battery_file import BatteryFile
@@ -66,33 +61,8 @@ DESKTOP_WITH_UPS = (
 	"Now drawing from 'AC Power'\n"
 	" -Back-UPS ES 550 (id=123)\t100%; charged; 0:00 remaining present: true\n"
 )
-IFCONFIG = """lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
-	inet 127.0.0.1 netmask 0xff000000
-en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
-	inet 192.168.1.20 netmask 0xffffff00 broadcast 192.168.1.255
-bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
-	ether 36:86:79:d8:2a:40
-bridge101: flags=8a63<UP,BROADCAST,SMART,RUNNING,ALLMULTI,SIMPLEX,MULTICAST> mtu 1500
-	inet 10.211.55.2 netmask 0xffffff00 broadcast 10.211.55.255
-bridge102: flags=8a63<UP,BROADCAST,SMART,RUNNING,ALLMULTI,SIMPLEX,MULTICAST> mtu 1500
-	inet 192.168.64.1 netmask 0xffffff00 broadcast 192.168.64.255
-	inet6 fe80::842f:57ff:fe72:2864%bridge102 prefixlen 64 scopeid 0x17
-"""
-IFCONFIG_OTHER_SUBNET = """bridge101: flags=8a63<UP> mtu 1500
-	inet 10.211.55.2 netmask 0xffffff00 broadcast 10.211.55.255
-bridge100: flags=8a63<UP> mtu 1500
-	inet 192.168.70.1 netmask 0xffffff00 broadcast 192.168.70.255
-"""
-IFCONFIG_NO_VM = """lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
-	inet 127.0.0.1 netmask 0xff000000
-bridge101: flags=8a63<UP> mtu 1500
-	inet 10.211.55.2 netmask 0xffffff00 broadcast 10.211.55.255
-"""
-
 BLOCK_ADDRESS = 0x50000000
 REGION_SIZE = 0x1000
-THREAD_TIMEOUT_SECONDS = 5
-POLL_INTERVAL_SECONDS = 0.02
 
 
 def completed(stdout="", returncode=0):
@@ -172,60 +142,6 @@ class BatteryStatusTests(unittest.TestCase):
 		run = mock.Mock(return_value=completed("", returncode=1))
 		with self.assertRaises(AgentError):
 			battery_status(run=run)
-
-
-class BindAddressTests(unittest.TestCase):
-	def test_configured_address_wins(self):
-		run = mock.Mock()
-		self.assertEqual(find_bind_address("10.0.0.1", run=run), "10.0.0.1")
-		run.assert_not_called()
-
-	def test_finds_vmnet_subnet_on_any_bridge(self):
-		run = mock.Mock(return_value=completed(IFCONFIG))
-		self.assertEqual(find_bind_address(None, run=run), "192.168.64.1")
-		run.assert_called_once_with(["/sbin/ifconfig"], capture_output=True, text=True)
-
-	def test_falls_back_to_bridge100(self):
-		run = mock.Mock(return_value=completed(IFCONFIG_OTHER_SUBNET))
-		self.assertEqual(find_bind_address(None, run=run), "192.168.70.1")
-
-	def test_none_when_vm_network_is_down(self):
-		run = mock.Mock(return_value=completed(IFCONFIG_NO_VM))
-		self.assertIsNone(find_bind_address(None, run=run))
-
-
-class ServerTests(unittest.TestCase):
-	def setUp(self):
-		self.status = {"present": True, "percent": 83, "charging": True, "on_ac": True, "minutes_remaining": 130, "updated": UPDATED}
-		self.server = make_server("127.0.0.1", 0, lambda: self.status)
-		thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-		thread.start()
-		self.addCleanup(self.server.server_close)
-		self.addCleanup(self.server.shutdown)
-		self.base = "http://127.0.0.1:{}".format(self.server.server_address[1])
-
-	def get(self, path):
-		with urllib.request.urlopen(self.base + path, timeout=5) as response:
-			return response.status, response.headers["Content-Type"], json.loads(response.read().decode("utf-8"))
-
-	def test_battery(self):
-		self.assertEqual(self.get("/battery"), (200, "application/json", self.status))
-
-	def test_ping(self):
-		self.assertEqual(self.get("/ping"), (200, "application/json", {"ok": True}))
-
-	def test_unknown_path(self):
-		with self.assertRaises(urllib.error.HTTPError) as caught:
-			self.get("/other")
-		self.assertEqual(caught.exception.code, 404)
-
-	def test_pmset_error_gives_500(self):
-		def failing():
-			raise AgentError("pmset failed")
-		self.server.read_status = failing
-		with self.assertRaises(urllib.error.HTTPError) as caught:
-			self.get("/battery")
-		self.assertEqual(caught.exception.code, 500)
 
 
 class LaunchAgentTests(unittest.TestCase):
@@ -385,78 +301,66 @@ class AgentCommandTests(unittest.TestCase):
 		with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
 			self.run_cli("--once", "--install")
 
-	def test_serve_binds_to_vm_network_and_port(self):
-		with mock.patch("wn.agent.serve") as serve, mock.patch("wn.agent.start_battery_sync") as start:
+	def test_runs_the_sync_loop_with_the_battery_file(self):
+		with mock.patch("wn.agent.run_sync_loop") as loop:
 			exit_code, _, _ = self.run_cli()
 		self.assertEqual(exit_code, 0)
-		self.assertEqual(serve.call_args.args[:2], (None, 47100))
-		writer = start.call_args.args[0]
+		writer, read_status = loop.call_args.args[:2]
 		self.assertIsInstance(writer, BatteryFile)
 		self.assertEqual(writer.path, os.path.join(self.home.name, "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM", "wn-battery-Windows.bin"))
+		self.assertIs(read_status, battery_status)
 
-	def test_serve_uses_config(self):
-		self.write_config({"agent_bind": "192.168.64.1", "agent_port": 47200, "battery_channel": "gdb", "gdb_port": 4500, "qmp_port": 4600})
-		with mock.patch("wn.agent.serve") as serve, mock.patch("wn.agent.start_battery_sync") as start:
+	def test_uses_the_gdb_channel_from_config(self):
+		self.write_config({"battery_channel": "gdb", "gdb_port": 4500, "qmp_port": 4600})
+		with mock.patch("wn.agent.run_sync_loop") as loop:
 			self.run_cli()
-		self.assertEqual(serve.call_args.args[:2], ("192.168.64.1", 47200))
-		writer = start.call_args.args[0]
+		writer = loop.call_args.args[0]
 		self.assertIsInstance(writer, BatterySync)
 		self.assertEqual((writer.port, writer.qmp_address), (4500, "tcp:127.0.0.1:4600"))
 
-	def test_serve_uses_the_configured_battery_file(self):
+	def test_uses_the_configured_battery_file(self):
 		self.write_config({"battery_file": "/tmp/wn-battery.bin"})
-		with mock.patch("wn.agent.serve"), mock.patch("wn.agent.start_battery_sync") as start:
+		with mock.patch("wn.agent.run_sync_loop") as loop:
 			self.run_cli()
-		self.assertEqual(start.call_args.args[0].path, "/tmp/wn-battery.bin")
+		self.assertEqual(loop.call_args.args[0].path, "/tmp/wn-battery.bin")
 
-	def test_serve_without_battery_sync(self):
+	def test_fails_without_battery_sync(self):
 		self.write_config({"battery_sync": False})
-		with mock.patch("wn.agent.serve") as serve, mock.patch("wn.agent.start_battery_sync") as start:
-			self.run_cli()
-		serve.assert_called_once()
-		start.assert_not_called()
+		with mock.patch("wn.agent.run_sync_loop") as loop:
+			exit_code, _, stderr = self.run_cli()
+		self.assertEqual(exit_code, 1)
+		self.assertIn("battery_sync", stderr)
+		loop.assert_not_called()
+
+	def test_ctrl_c_stops_the_agent(self):
+		with mock.patch("wn.agent.run_sync_loop", side_effect=KeyboardInterrupt):
+			exit_code, _, _ = self.run_cli()
+		self.assertEqual(exit_code, 0)
 
 
-class BatterySyncThreadTests(unittest.TestCase):
-	def test_thread_writes_the_block_and_stops(self):
+class AgentLoopTests(unittest.TestCase):
+	def run_agent(self, config, wait):
 		output = io.StringIO()
+		with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
+			run_agent_command(argparse.Namespace(once=False, install=False, uninstall=False), config, output, wait=wait)
+		return output.getvalue()
+
+	def test_loop_writes_the_block(self):
 		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server, running_qmp_server() as qmp:
 			server.write(BLOCK_ADDRESS, b"WNBT")
-			stop, thread = start_battery_sync(BatterySync(server.port, qmp.address), output, read_status=lambda: parse_pmset(DISCHARGING, UPDATED))
-			deadline = time.monotonic() + THREAD_TIMEOUT_SECONDS
-			while decode_block(server.read(BLOCK_ADDRESS, BLOCK_SIZE))["percent"] != 83 and time.monotonic() < deadline:
-				time.sleep(POLL_INTERVAL_SECONDS)
-			stop.set()
-			thread.join(THREAD_TIMEOUT_SECONDS)
+			self.run_agent(Config(battery_channel="gdb", gdb_port=server.port, qmp_socket=qmp.address), lambda seconds: True)
 			self.assertEqual(decode_block(server.read(BLOCK_ADDRESS, BLOCK_SIZE))["percent"], 83)
-		self.assertFalse(thread.is_alive())
 		self.assertFalse(server.paused)
 
-	def test_http_keeps_working_when_the_stub_is_down(self):
-		output = io.StringIO()
-		qmp = running_qmp_server()
-		qmp.__enter__()
-		self.addCleanup(qmp.__exit__, None, None, None)
-		stop, thread = start_battery_sync(BatterySync(unused_port(), qmp.address), output, read_status=lambda: parse_pmset(DISCHARGING, UPDATED))
-		self.addCleanup(thread.join, THREAD_TIMEOUT_SECONDS)
-		self.addCleanup(stop.set)
-		server = make_server("127.0.0.1", 0, lambda: {"percent": 83})
-		threading.Thread(target=server.serve_forever, daemon=True).start()
-		self.addCleanup(server.server_close)
-		self.addCleanup(server.shutdown)
-		url = "http://127.0.0.1:{}/battery".format(server.server_address[1])
-		with urllib.request.urlopen(url, timeout=5) as response:
-			self.assertEqual(json.loads(response.read().decode("utf-8")), {"percent": 83})
-		deadline = time.monotonic() + THREAD_TIMEOUT_SECONDS
-		while "cannot connect" not in output.getvalue() and time.monotonic() < deadline:
-			time.sleep(POLL_INTERVAL_SECONDS)
-		self.assertIn("battery sync: cannot connect to the GDB stub", output.getvalue())
-		self.assertTrue(thread.is_alive())
-
-
-class ConfigDefaultsTests(unittest.TestCase):
-	def test_agent_defaults(self):
-		self.assertEqual((Config().agent_bind, Config().agent_port), (None, 47100))
+	def test_loop_keeps_going_when_the_stub_is_down(self):
+		waits = []
+		def wait(seconds):
+			waits.append(seconds)
+			return len(waits) > 1
+		with running_qmp_server() as qmp:
+			output = self.run_agent(Config(battery_channel="gdb", gdb_port=unused_port(), qmp_socket=qmp.address), wait)
+		self.assertIn("battery sync: cannot connect to the GDB stub", output)
+		self.assertEqual(len(waits), 2)
 
 
 if __name__ == "__main__":
