@@ -60,7 +60,7 @@ class LifecycleCommandTests(CLITestCase):
 
 	def test_stop(self):
 		self.run_cli("stop")
-		self.assertEqual(self.backend.calls, [("stop", False)])
+		self.assertEqual(self.backend.calls, [("stop", False), ("status",)])
 
 	def test_stop_force(self):
 		self.run_cli("stop", "--force")
@@ -95,6 +95,76 @@ class LifecycleCommandTests(CLITestCase):
 			with self.assertRaises(SystemExit) as context:
 				self.run_cli()
 		self.assertEqual(context.exception.code, 2)
+
+
+FAKE_UTMCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_utmctl.py")
+
+
+class StopCommandTests(CLITestCase):
+	"""``wn stop`` against the fake utmctl, with a fake clock so the waits take no time."""
+
+	def setUp(self):
+		super().setUp()
+		self.state_path = os.path.join(self.home.name, "utmctl.json")
+		self.write_vm(status="started")
+		patcher = mock.patch.dict(os.environ, {"FAKE_UTMCTL_STATE": self.state_path})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		wrapper = os.path.join(self.home.name, "utmctl")
+		with open(wrapper, "w") as wrapper_file:
+			wrapper_file.write("#!/bin/sh\nexec '{}' '{}' \"$@\"\n".format(sys.executable, FAKE_UTMCTL))
+		os.chmod(wrapper, stat.S_IRWXU)
+		self.write_config({"utmctl_path": wrapper})
+		self.now = [0.0]
+		for target, replacement in (("wn.cli.time.monotonic", lambda: self.now[0]), ("wn.cli.time.sleep", self.advance)):
+			patcher = mock.patch(target, side_effect=replacement)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+	def advance(self, seconds):
+		self.now[0] += seconds
+
+	def write_vm(self, **fields):
+		vm = {"uuid": "9E1A6F38-2D0B-4C41-8F7E-3B5A1C2D0001", "name": "Windows", "status": "stopped", "ip_addresses": []}
+		vm.update(fields)
+		with open(self.state_path, "w") as state_file:
+			json.dump({"vms": [vm]}, state_file)
+
+	def vm_state(self):
+		with open(self.state_path) as state_file:
+			return json.load(state_file)["vms"][0]
+
+	def test_waits_until_windows_has_stopped(self):
+		self.write_vm(status="started", request_stop_lists=3)
+		exit_code, stdout, stderr = self.run_real_cli("stop")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(stdout, "Windows: stopped\n")
+		self.assertEqual(self.vm_state()["last_stop_flags"], ["--request"])
+		self.assertEqual(self.now[0], 4.0)
+
+	def test_fails_when_windows_keeps_running(self):
+		self.write_vm(status="started", request_stop_lists=-1)
+		exit_code, stdout, stderr = self.run_real_cli("stop")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("Windows is still running 120 s after the shutdown request", stderr)
+		self.assertIn("wn stop --force", stderr)
+		self.assertEqual(self.vm_state()["status"], "started")
+		self.assertGreaterEqual(self.now[0], 120)
+
+	def test_timeout_option(self):
+		self.write_vm(status="started", request_stop_lists=-1)
+		exit_code, _, stderr = self.run_real_cli("stop", "--timeout", "10")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("10 s", stderr)
+		self.assertEqual(self.now[0], 10.0)
+
+	def test_force_powers_off_without_waiting(self):
+		self.write_vm(status="started", request_stop_lists=-1)
+		exit_code, stdout, stderr = self.run_real_cli("stop", "--force")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(stdout, "")
+		self.assertEqual(self.vm_state()["last_stop_flags"], ["--force"])
+		self.assertEqual(self.now[0], 0.0)
 
 
 def input_commands(*combos):
@@ -480,6 +550,12 @@ class GrabCommandTests(CLITestCase):
 OLD_ARGUMENTS = ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-audiodev", "coreaudio,id=ca0,out.buffer-length=20000", "-device", "intel-hda", "-device", "hda-output,audiodev=ca0"]
 
 
+TUNED_ARGUMENTS = OLD_ARGUMENTS[:2] + ["-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"] + [
+	"-audiodev", "coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on",
+	"-device", "intel-hda", "-device", "hda-output,audiodev=ca0",
+]
+
+
 class UpdateVMArgsTests(CLITestCase):
 	def setUp(self):
 		super().setUp()
@@ -495,7 +571,7 @@ class UpdateVMArgsTests(CLITestCase):
 			return plistlib.load(plist_file)
 
 	def test_adds_session_qmp_server(self):
-		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle)
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--qmp")
 		self.assertEqual(exit_code, 0, stderr)
 		config = self.read_plist()
 		self.assertEqual(config["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS[:2] + ["-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"] + OLD_ARGUMENTS[2:])
@@ -507,13 +583,14 @@ class UpdateVMArgsTests(CLITestCase):
 		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--audio-args", audio_args)
 		self.assertEqual(exit_code, 0, stderr)
 		arguments = self.read_plist()["QEMU"]["AdditionalArguments"]
-		self.assertEqual(arguments[4:], audio_args.split())
-		self.assertIn("timer-period=2500", stdout)
+		self.assertEqual(arguments, OLD_ARGUMENTS[:2] + audio_args.split())
+		self.assertIn("+-audiodev coreaudio,id=ca0,timer-period=2500", stdout)
+		self.assertIn("--audiodev coreaudio,id=ca0,out.buffer-length=20000", stdout)
 
 	def test_extra_args_follow_audio_args(self):
 		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--audio-args", "-device intel-hda", "--extra-args", "-device virtio-keyboard-pci,id=vkbd")
 		self.assertEqual(exit_code, 0, stderr)
-		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"][4:], ["-device", "intel-hda", "-device", "virtio-keyboard-pci,id=vkbd"])
+		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"][2:], ["-device", "intel-hda", "-device", "virtio-keyboard-pci,id=vkbd"])
 		self.assertIn("vkbd", stdout)
 
 	def test_audio_args_with_spice_is_error(self):
@@ -523,7 +600,7 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS)
 
 	def test_default_bundle_path_uses_vm_name(self):
-		with mock.patch("wn.cli.update_additional_arguments", return_value=[]) as update:
+		with mock.patch("wn.cli.update_additional_arguments", return_value=([], [])) as update:
 			self.assertEqual(self.run_cli("update-vm-args")[0], 0)
 		expected = os.path.join(self.home.name, "Library", "Containers", "com.utmapp.UTM", "Data", "Documents", "Windows.utm")
 		self.assertEqual(update.call_args.args[0], expected)
@@ -571,6 +648,41 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertIn("memory-backend-file,id=wnbattery,share=on,mem-path={},size=1M".format(path), self.read_plist()["QEMU"]["AdditionalArguments"])
 		self.assertTrue(os.path.exists(path))
+
+	def write_arguments(self, arguments):
+		config = self.read_plist()
+		config["QEMU"]["AdditionalArguments"] = arguments
+		with open(self.plist_path, "wb") as plist_file:
+			plistlib.dump(config, plist_file)
+
+	def test_no_flags_keeps_custom_audio(self):
+		self.write_arguments(TUNED_ARGUMENTS)
+		with open(self.plist_path, "rb") as plist_file:
+			original = plist_file.read()
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle)
+		self.assertEqual(exit_code, 0, stderr)
+		with open(self.plist_path, "rb") as plist_file:
+			self.assertEqual(plist_file.read(), original)
+		self.assertIn("did not change", stdout)
+
+	def test_battery_keeps_custom_audio_and_prints_a_diff(self):
+		self.add_memory_size(8192)
+		self.write_arguments(TUNED_ARGUMENTS)
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")
+		self.assertEqual(exit_code, 0, stderr)
+		arguments = self.read_plist()["QEMU"]["AdditionalArguments"]
+		self.assertEqual(arguments[:len(TUNED_ARGUMENTS)], TUNED_ARGUMENTS)
+		self.assertIn("+-machine nvdimm=on", stdout)
+		self.assertNotIn("\n-", stdout.split("+++", 1)[1])
+
+	def test_no_battery_removes_the_nvdimm(self):
+		self.add_memory_size(8192)
+		self.write_arguments(TUNED_ARGUMENTS)
+		self.assertEqual(self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")[0], 0)
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--no-battery")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], TUNED_ARGUMENTS)
+		self.assertIn("--machine nvdimm=on", stdout)
 
 	def test_refuses_running_vm(self):
 		self.backend.state = "running"
@@ -643,6 +755,20 @@ class SetupCommandTests(CLITestCase):
 		exit_code, _, _, stderr = self.run_setup("--yes", "--edition", "Ultimate")
 		self.assertEqual(exit_code, 1)
 		self.assertIn("Ultimate", stderr)
+
+	def test_battery_is_on_by_default(self):
+		_, options, _, _ = self.run_setup("--yes")
+		self.assertTrue(options.battery)
+		self.assertIsNone(options.battery_file)
+
+	def test_no_battery(self):
+		_, options, _, _ = self.run_setup("--yes", "--no-battery")
+		self.assertFalse(options.battery)
+
+	def test_battery_file_comes_from_the_config(self):
+		self.write_config({"battery_file": "/tmp/wn-battery.bin"})
+		_, options, _, _ = self.run_setup("--yes")
+		self.assertEqual(options.battery_file, "/tmp/wn-battery.bin")
 
 	def test_end_of_input_uses_defaults(self):
 		exit_code, options, _, _ = self.run_setup(answers="")

@@ -23,6 +23,15 @@ BATTERY_FILE_SIZE_MIB = 1
 BATTERY_MEMDEV_ID = "wnbattery"
 BATTERY_DEVICE_ID = "wnbatterynv"
 BATTERY_FILE_FORBIDDEN = (",", " ", "\t", "\n")
+BATTERY_MACHINE_ARGUMENTS = ("-machine", "nvdimm=on")
+RAMFB_ARGUMENTS = ("-device", "ramfb")
+AUDIO_DEVICES = ("intel-hda", "ich9-intel-hda", "hda-output", "hda-duplex", "hda-micro")
+BLOCK_QMP = "qmp"
+BLOCK_RAMFB = "ramfb"
+BLOCK_AUDIO = "audio"
+BLOCK_BATTERY = "battery"
+BLOCK_EXTRA = "extra"
+ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_EXTRA)
 DEFAULT_QEMU_IMG_PATH = "/opt/homebrew/bin/qemu-img"
 QMP_HOST = "127.0.0.1"
 AUDIODEV_ID = "ca0"
@@ -143,31 +152,92 @@ def _qemu_battery_path(battery_file):
 
 def _battery_arguments(options):
 	"""Map the battery file into the guest as an NVDIMM. The second -machine and -m merge with UTM's own."""
-	return [
-		"-machine", "nvdimm=on",
+	return list(BATTERY_MACHINE_ARGUMENTS) + [
 		"-m", "maxmem={}M,slots=1".format(options["memory_mib"] + BATTERY_FILE_SIZE_MIB),
 		"-object", "memory-backend-file,id={},share=on,mem-path={},size={}M".format(BATTERY_MEMDEV_ID, _qemu_battery_path(options["battery_file"]), BATTERY_FILE_SIZE_MIB),
 		"-device", "nvdimm,id={},memdev={}".format(BATTERY_DEVICE_ID, BATTERY_MEMDEV_ID),
 	]
 
 
-def _additional_arguments(options):
-	arguments = _qmp_server(options["qmp_port"]) + _qmp_server(options["qmp_session_port"])
-	if options["headless"]:
-		arguments += ["-device", "ramfb"]
+def _audio_arguments(options):
 	if options["audio_args"]:
-		arguments += shlex.split(options["audio_args"])
-	elif options["audio"] == AUDIO_COREAUDIO:
-		arguments += [
+		return shlex.split(options["audio_args"])
+	if options["audio"] == AUDIO_COREAUDIO:
+		return [
 			"-audiodev", "coreaudio,id={},out.buffer-length={}".format(AUDIODEV_ID, options["audio_buffer_length_us"]),
 			"-device", "intel-hda",
 			"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
 		]
-	if options["battery"]:
-		arguments += _battery_arguments(options)
-	if options["extra_args"]:
-		arguments += shlex.split(options["extra_args"])
-	return arguments
+	return []
+
+
+def _argument_blocks(options):
+	"""Return the AdditionalArguments as ``{block: arguments}``, one entry for each name in ARGUMENT_BLOCKS."""
+	return {
+		BLOCK_QMP: _qmp_server(options["qmp_port"]) + _qmp_server(options["qmp_session_port"]),
+		BLOCK_RAMFB: list(RAMFB_ARGUMENTS) if options["headless"] else [],
+		BLOCK_AUDIO: _audio_arguments(options),
+		BLOCK_BATTERY: _battery_arguments(options) if options["battery"] else [],
+		BLOCK_EXTRA: shlex.split(options["extra_args"]) if options["extra_args"] else [],
+	}
+
+
+def _additional_arguments(options):
+	blocks = _argument_blocks(options)
+	return [argument for block in ARGUMENT_BLOCKS for argument in blocks[block]]
+
+
+def argument_units(arguments):
+	"""Split QEMU arguments into units of one option and the values that follow it, such as ``["-device", "ramfb"]``."""
+	units = []
+	for argument in arguments:
+		if argument.startswith("-") or not units:
+			units.append([argument])
+		else:
+			units[-1].append(argument)
+	return units
+
+
+def _device_name(value):
+	return value.split(",", 1)[0]
+
+
+def block_of(unit):
+	"""Return the block that wn writes ``unit`` in. Arguments that wn does not write belong to BLOCK_EXTRA."""
+	option, value = unit[0], ",".join(unit[1:])
+	if option == "-qmp":
+		return BLOCK_QMP
+	if unit == list(RAMFB_ARGUMENTS):
+		return BLOCK_RAMFB
+	if option == "-audiodev" or (option == "-device" and _device_name(value) in AUDIO_DEVICES):
+		return BLOCK_AUDIO
+	if (option, value) == BATTERY_MACHINE_ARGUMENTS or (option == "-m" and value.startswith("maxmem=")):
+		return BLOCK_BATTERY
+	if option in ("-object", "-device") and ("id={}".format(BATTERY_MEMDEV_ID) in value.split(",") or "id={}".format(BATTERY_DEVICE_ID) in value.split(",")):
+		return BLOCK_BATTERY
+	return BLOCK_EXTRA
+
+
+def merge_argument_blocks(current, replacements):
+	"""Return ``current`` with the blocks named in ``replacements`` swapped for the new arguments, in place.
+
+	Every other argument stays where it was. A replaced block that was missing goes before the first argument
+	of a later block, in ARGUMENT_BLOCKS order, or at the end.
+	"""
+	segments = []
+	for unit in argument_units(current):
+		block = block_of(unit)
+		if block not in replacements:
+			segments.append((block, unit))
+		elif block not in (name for name, _ in segments if name in replacements):
+			segments.append((block, replacements[block]))
+	for block, arguments in sorted(replacements.items(), key=lambda item: ARGUMENT_BLOCKS.index(item[0])):
+		if any(name == block for name, _ in segments):
+			continue
+		later = ARGUMENT_BLOCKS[ARGUMENT_BLOCKS.index(block) + 1:]
+		position = next((index for index, (name, _) in enumerate(segments) if name in later), len(segments))
+		segments.insert(position, (block, arguments))
+	return [argument for _, arguments in segments for argument in arguments]
 
 
 def _drive(image_name, image_type, interface, read_only):
@@ -323,7 +393,8 @@ def _edit_config(bundle_path, edit):
 	try:
 		with open(config_path, "rb") as config_file:
 			config = plistlib.load(config_file)
-		edit(config)
+		if edit(config) is False:
+			return
 		temporary_path = config_path + ".tmp"
 		with open(temporary_path, "wb") as config_file:
 			config_file.write(config_plist_bytes(config))
@@ -334,27 +405,37 @@ def _edit_config(bundle_path, edit):
 		raise UTMConfigError("{} is not a UTM QEMU configuration".format(config_path)) from None
 
 
-def update_additional_arguments(bundle_path, options):
-	"""Replace the AdditionalArguments of an existing bundle's config.plist and return the new list.
+def update_additional_arguments(bundle_path, options, blocks):
+	"""Replace the ``blocks`` (names from ARGUMENT_BLOCKS) in an existing bundle's AdditionalArguments.
 
 	``options`` takes the same argument options as ``build_config``, such as
 	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, ``battery``, ``battery_file``, and
-	``extra_args``. With ``battery``, the memory size comes from the bundle, and ``battery_file`` defaults to
-	wn-battery-<name>.bin in the UTM group container. Nothing else in config.plist changes.
+	``extra_args``. Only the named blocks are built from them; every other argument stays as it is, and
+	BLOCK_EXTRA means every argument that is in no other block. With ``battery``, the memory size comes from
+	the bundle, and ``battery_file`` defaults to wn-battery-<name>.bin in the UTM group container. Nothing else
+	in config.plist changes, and the file is not written when the arguments stay the same.
+	Return the arguments before and after.
 	"""
+	unknown = sorted(set(blocks) - set(ARGUMENT_BLOCKS))
+	if unknown:
+		raise UTMConfigError("unknown argument blocks: {}".format(", ".join(unknown)))
 	if options.get("battery") and not options.get("battery_file"):
 		options = dict(options, battery_file=battery_file_for_bundle(bundle_path))
 	resolved = _resolve_argument_options(options)
-	arguments = []
+	result = {}
 
 	def replace_arguments(config):
 		if resolved["battery"]:
 			resolved["memory_mib"] = config["System"]["MemorySize"]
-		arguments.extend(_additional_arguments(resolved))
-		config["QEMU"]["AdditionalArguments"] = arguments
+		before = list(config["QEMU"].get("AdditionalArguments", []))
+		new_blocks = _argument_blocks(resolved)
+		after = merge_argument_blocks(before, {block: new_blocks[block] for block in blocks})
+		result.update(before=before, after=after)
+		config["QEMU"]["AdditionalArguments"] = after
+		return before != after
 
 	_edit_config(bundle_path, replace_arguments)
-	return arguments
+	return result["before"], result["after"]
 
 
 def set_display_hardware(bundle_path, hardware):

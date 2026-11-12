@@ -16,6 +16,7 @@ class FakeBackend(Backend):
 
 	def stop(self, force=False):
 		self.calls.append(("stop", force))
+		self.state = "stopped"
 
 	def status(self):
 		self.calls.append(("status",))

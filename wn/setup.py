@@ -5,15 +5,18 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Optional, Tuple
 
+from wn.agent import LOG_PATH, REPOSITORY_DIRECTORY, install_launch_agent
 from wn.backends.utm import UTMBackend, UTMCtlError
-from wn.config import config_path
+from wn.battery_file import battery_file_path, prepare_battery_file
+from wn.config import config_path, load_config
 from wn.downloads import fetch_all
 from wn.errors import WnError
-from wn.payload import build_payload_iso
+from wn.payload import SECURE_BOOT_CERT, build_payload_iso
 from wn.qcow2 import create_empty_qcow2
 from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import looks_drawn, take_screendump
@@ -23,6 +26,7 @@ from wn.utm_config import (
 	BUNDLE_SUFFIX,
 	DATA_DIRECTORY_NAME,
 	DEFAULT_OPTIONS,
+	default_battery_file,
 	detach_drives,
 	random_mac_address,
 	set_display_hardware,
@@ -81,6 +85,12 @@ class SetupOptions:
 	qmp_port: int = DEFAULT_OPTIONS["qmp_port"]
 	qmp_session_port: Optional[int] = None
 	mac_address: Optional[str] = None
+	battery: bool = True
+	battery_file: Optional[str] = None
+
+
+def install_agent():
+	return install_launch_agent(sys.executable, REPOSITORY_DIRECTORY)
 
 
 def restart_utm(run=subprocess.run, sleep=time.sleep, clock=time.monotonic):
@@ -100,7 +110,7 @@ class Installer:
 	"""Runs every step of ``wn setup``. The collaborators are parameters so tests can replace them."""
 
 	def __init__(self, options, output, backend=None, fetch=fetch_all, build_payload=build_payload_iso, restart=restart_utm,
-			qmp_client_factory=qmp_client_for, clock=time.monotonic, sleep=time.sleep):
+			qmp_client_factory=qmp_client_for, clock=time.monotonic, sleep=time.sleep, install_agent=install_agent):
 		self.options = options
 		self.output = output
 		self.backend = backend or UTMBackend({"vm_name": options.name, "qmp_port": options.qmp_port, "qmp_session_port": options.qmp_session_port})
@@ -110,8 +120,10 @@ class Installer:
 		self.qmp_client_factory = qmp_client_factory
 		self.clock = clock
 		self.sleep = sleep
+		self.install_agent = install_agent
 		self.started_at = clock()
 		self.bundle = os.path.join(os.path.expanduser(options.bundle_dir), options.name + BUNDLE_SUFFIX)
+		self.battery_file = options.battery_file or default_battery_file(options.name)
 
 	def report(self, message):
 		elapsed = int(self.clock() - self.started_at)
@@ -134,6 +146,8 @@ class Installer:
 			self.finish_bundle(display=None)
 		address = self.wait_for_ip()
 		self.write_config_if_absent()
+		if self.options.battery:
+			self.start_battery_agent()
 		self.print_summary(address)
 		return address
 
@@ -164,14 +178,19 @@ class Installer:
 			"audio_args": FINAL_AUDIO_ARGS,
 			"qmp_port": options.qmp_port,
 			"qmp_session_port": options.qmp_session_port,
+			"battery": options.battery,
+			"battery_file": self.battery_file if options.battery else None,
+			"secure_boot_cert": SECURE_BOOT_CERT if options.battery else None,
 		}
 		try:
 			write_bundle(os.path.dirname(self.bundle), bundle_options)
+			if options.battery:
+				prepare_battery_file(self.battery_file)
 			data = os.path.join(self.bundle, DATA_DIRECTORY_NAME)
 			create_empty_qcow2(os.path.join(data, DISK_IMAGE), options.disk_gib)
 			shutil.copyfile(downloads.windows_iso, os.path.join(data, WINDOWS_ISO_IMAGE))
 			self.report("Building the setup disc (answer file, drivers, guest tools{})".format(", NVDA" if downloads.nvda_installer else ""))
-			self.build_payload(os.path.join(data, PAYLOAD_IMAGE), self.unattend_options(), downloads.virtio_iso, downloads.guest_tools_iso, downloads.nvda_installer)
+			self.build_payload(os.path.join(data, PAYLOAD_IMAGE), self.unattend_options(), downloads.virtio_iso, downloads.guest_tools_iso, downloads.nvda_installer, battery=options.battery)
 		except BaseException as error:
 			shutil.rmtree(self.bundle, ignore_errors=True)
 			if isinstance(error, OSError):
@@ -338,6 +357,20 @@ class Installer:
 			json.dump(values, config_file, indent="\t")
 			config_file.write("\n")
 		self.report("Wrote {}".format(path))
+
+	def start_battery_agent(self):
+		"""Install and start the launch agent that writes the Mac's battery to the battery file."""
+		path = self.install_agent()
+		agent_file = battery_file_path(load_config())
+		for line in (
+			"Installed the wn agent and started it: {}".format(path),
+			"It writes the Mac's battery status to {} for the battery in Windows.".format(agent_file),
+			"Log: {}".format(os.path.expanduser(LOG_PATH)),
+			"To remove it: python3 -m wn agent --uninstall",
+		):
+			self.output.write(line + "\n")
+		if agent_file != self.battery_file:
+			self.output.write("Warning: the VM reads {}, but the agent writes {}. Set vm_name or battery_file in {}\n".format(self.battery_file, agent_file, config_path()))
 
 	def print_summary(self, address):
 		self.report("Done")

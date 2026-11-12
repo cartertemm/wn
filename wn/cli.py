@@ -1,12 +1,14 @@
 """Command line interface for wn."""
 
 import argparse
+import difflib
 import getpass
 import json
 import os
 import shlex
 import shutil
 import sys
+import time
 
 from wn import __version__, agent, keygrab, mouse
 from wn.backend import create_backend
@@ -23,11 +25,17 @@ from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
 from wn.utm_config import (
 	AUDIO_COREAUDIO,
 	AUDIO_MODES,
+	BLOCK_AUDIO,
+	BLOCK_BATTERY,
+	BLOCK_EXTRA,
+	BLOCK_QMP,
+	BLOCK_RAMFB,
 	BUNDLE_SUFFIX,
 	DATA_DIRECTORY_NAME,
 	DEFAULT_BUNDLE_DIRECTORY,
 	DEFAULT_OPTIONS,
 	DEFAULT_QEMU_IMG_PATH,
+	argument_units,
 	battery_file_for_bundle,
 	create_disk_image,
 	random_mac_address,
@@ -41,6 +49,8 @@ DEFAULT_DISK_GIB = 64
 DEFAULT_CPU_COUNT = 8
 DEFAULT_MEMORY_MIB = 8192
 DEFAULT_SCROLL_COUNT = 1
+DEFAULT_STOP_TIMEOUT_SECONDS = 120
+STOP_POLL_SECONDS = 2
 STOPPED_STATE = "stopped"
 DEFAULT_SETUP_VM_NAME = "Windows"
 NO_SOFTWARE_ANSWERS = ("0", "none")
@@ -57,6 +67,7 @@ def build_parser():
 	subcommands.add_parser("start", help="start the VM")
 	stop = subcommands.add_parser("stop", help="shut down the VM")
 	stop.add_argument("--force", action="store_true", help="power off at once instead of a clean shutdown")
+	stop.add_argument("--timeout", type=int, default=DEFAULT_STOP_TIMEOUT_SECONDS, metavar="SECONDS", help="how long to wait for Windows to shut down (default: %(default)s)")
 	subcommands.add_parser("status", help="show whether the VM is running")
 	subcommands.add_parser("ip", help="print the guest IP address")
 
@@ -97,6 +108,7 @@ def _add_setup_parser(subcommands):
 	setup.add_argument("--headless", action="store_true", help="create the VM without a display window")
 	setup.add_argument("--software", default=",".join(name for name, _ in SOFTWARE_CHOICES), help="comma separated software to install, or none (default: %(default)s)")
 	setup.add_argument("--edition", default=DEFAULT_EDITION, help="Windows 11 edition (default: %(default)s)")
+	setup.add_argument("--no-battery", action="store_true", help="do not add the native battery: no firmware driver, no Secure Boot certificate, no NVDIMM, and no wn agent")
 	setup.add_argument("--downloads-dir", default=DEFAULT_DOWNLOADS_DIR, metavar="DIR", help="where to keep the downloaded ISOs and installers (default: %(default)s)")
 	setup.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
 
@@ -154,12 +166,17 @@ def _add_mouse_parser(subcommands):
 
 
 def _add_update_vm_args_parser(subcommands):
-	update = subcommands.add_parser("update-vm-args", help="rewrite the QEMU additional arguments of an existing UTM bundle. Stop the VM first")
+	update = subcommands.add_parser("update-vm-args", help="change parts of the QEMU additional arguments of an existing UTM bundle. Stop the VM first",
+		description="Each flag replaces one part of the AdditionalArguments. Every argument that no flag names stays as it is.")
 	update.add_argument("--bundle", metavar="PATH", help="the .utm bundle (default: vm_name.utm in UTM's documents folder)")
-	update.add_argument("--headless", action="store_true", help="the VM has no display window")
-	update.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output the bundle was created with (default: %(default)s)")
-	update.add_argument("--battery", action="store_true", help="map the battery file into the guest as an NVDIMM, for the wn-acpi firmware driver")
-	_add_audio_args_option(update)
+	update.add_argument("--qmp", action="store_true", help="write the QMP servers again from qmp_port and qmp_session_port in the config")
+	update.add_argument("--headless", action="store_true", help="add the ramfb display that a VM with no display window needs")
+	update.add_argument("--audio", choices=AUDIO_MODES, help="replace the audio arguments: spice removes them, coreaudio writes the default coreaudio block")
+	battery = update.add_mutually_exclusive_group()
+	battery.add_argument("--battery", action="store_true", help="map the battery file into the guest as an NVDIMM, for the wn-acpi firmware driver")
+	battery.add_argument("--no-battery", action="store_true", help="remove the battery NVDIMM")
+	update.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the audio arguments, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\"")
+	update.add_argument("--extra-args", metavar="ARGS", help="QEMU arguments that replace every argument that is not QMP, ramfb, audio, or battery, such as \"-device virtio-keyboard-pci,id=vkbd\"")
 
 
 def _add_audio_args_option(parser):
@@ -222,7 +239,21 @@ def run_start(context):
 
 
 def run_stop(context):
-	context.backend.stop(force=context.arguments.force)
+	arguments = context.arguments
+	if arguments.force:
+		context.backend.stop(force=True)
+		return
+	context.backend.stop()
+	deadline = time.monotonic() + arguments.timeout
+	while True:
+		status = context.backend.status()
+		if status.state == STOPPED_STATE:
+			context.print("{}: stopped".format(status.name))
+			return
+		if time.monotonic() >= deadline:
+			context.stderr.write("wn: error: {} is still {} {} s after the shutdown request. Windows may be busy or showing a dialog. Check the screen, or run wn stop --force to power off\n".format(status.name, status.state, arguments.timeout))
+			return EXIT_FAILURE
+		time.sleep(STOP_POLL_SECONDS)
 
 
 def run_status(context):
@@ -372,16 +403,23 @@ def run_update_vm_args(context):
 	status = context.backend.status()
 	if status.state != STOPPED_STATE:
 		raise WnError("VM '{}' is {}. Run wn stop, wait for wn status to say stopped, then run update-vm-args again".format(status.name, status.state))
-	new_arguments = update_additional_arguments(bundle, {
+	blocks = [block for block, named in (
+		(BLOCK_QMP, arguments.qmp),
+		(BLOCK_RAMFB, arguments.headless),
+		(BLOCK_AUDIO, arguments.audio or arguments.audio_args is not None),
+		(BLOCK_BATTERY, arguments.battery or arguments.no_battery),
+		(BLOCK_EXTRA, arguments.extra_args is not None),
+	) if named]
+	before, after = update_additional_arguments(bundle, {
 		"qmp_port": config.qmp_port,
 		"qmp_session_port": config.qmp_session_port,
 		"headless": arguments.headless,
-		"audio": arguments.audio,
+		"audio": arguments.audio or AUDIO_COREAUDIO,
 		"audio_args": arguments.audio_args,
 		"extra_args": arguments.extra_args,
 		"battery": arguments.battery,
 		"battery_file": config.battery_file,
-	})
+	}, blocks)
 	if arguments.battery:
 		battery_file = config.battery_file or battery_file_for_bundle(bundle)
 		try:
@@ -389,9 +427,17 @@ def run_update_vm_args(context):
 		except WnError as error:
 			raise WnError("{}. Create the folder or set battery_file in the config".format(error)) from None
 		context.print("Battery file: {}".format(battery_file))
+	if before == after:
+		context.print("AdditionalArguments in {} did not change".format(os.path.join(bundle, "config.plist")))
+		return
 	context.print("Updated {}".format(os.path.join(bundle, "config.plist")))
-	context.print("AdditionalArguments: {}".format(" ".join(shlex.quote(argument) for argument in new_arguments)))
+	for line in difflib.unified_diff(_argument_lines(before), _argument_lines(after), "AdditionalArguments before", "AdditionalArguments after", lineterm=""):
+		context.print(line)
 	context.print("Next: quit UTM and open it again so it reads the new arguments, then run wn start")
+
+
+def _argument_lines(arguments):
+	return [" ".join(shlex.quote(argument) for argument in unit) for unit in argument_units(arguments)]
 
 
 def _parse_software(text):
@@ -517,6 +563,8 @@ def run_setup(context):
 		downloads_dir=arguments.downloads_dir,
 		qmp_port=context.config.qmp_port,
 		qmp_session_port=context.config.qmp_session_port,
+		battery=not arguments.no_battery,
+		battery_file=context.config.battery_file,
 		**answers
 	)
 	Installer(options, context.stdout).run()

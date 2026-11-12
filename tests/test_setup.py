@@ -7,9 +7,12 @@ import tempfile
 import unittest
 from unittest import mock
 
+from test_efivars import secure_flash
 from wn.backend import VMStatus
 from wn.backends.utm import UTMCtlError
 from wn.downloads import Downloads
+from wn.efivars import EFI_IMAGE_SECURITY_DATABASE_GUID, find, parse_signature_lists, qcow2_image, read_flash
+from wn.payload import SECURE_BOOT_CERT
 from wn.qmp import QMPConnectionError
 from wn.setup import (
 	FINAL_AUDIO_ARGS,
@@ -136,7 +139,16 @@ class InstallerTestCase(unittest.TestCase):
 		self.restarts = []
 		self.payload_calls = []
 		self.fetch_calls = []
+		self.agent_installs = []
 		self.output = io.StringIO()
+		self.group_container = os.path.join(root, "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM")
+		os.makedirs(self.group_container)
+		template = os.path.join(root, "edk2-arm-secure-vars.fd")
+		with open(template, "wb") as template_file:
+			template_file.write(qcow2_image(secure_flash()))
+		template_patch = mock.patch("wn.utm_config.SECURE_VARS_TEMPLATE", template)
+		template_patch.start()
+		self.addCleanup(template_patch.stop)
 		isdir_patch = mock.patch("wn.setup.os.path.isdir", side_effect=lambda path: path == "/Applications/UTM.app" or os.path.exists(path))
 		isdir_patch.start()
 		self.addCleanup(isdir_patch.stop)
@@ -148,8 +160,8 @@ class InstallerTestCase(unittest.TestCase):
 		self.fetch_calls.append((downloads_dir, include_nvda))
 		return Downloads(windows_iso=self.windows_iso, virtio_iso="virtio.iso", guest_tools_iso="tools.iso", nvda_installer="nvda.exe" if include_nvda else None)
 
-	def build_payload(self, image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer):
-		self.payload_calls.append((unattend_options, virtio_iso, guest_tools_iso, nvda_installer))
+	def build_payload(self, image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer, battery=True):
+		self.payload_calls.append((unattend_options, virtio_iso, guest_tools_iso, nvda_installer, battery))
 		with open(image_path, "wb") as image:
 			image.write(b"payload")
 
@@ -157,13 +169,17 @@ class InstallerTestCase(unittest.TestCase):
 		self.restarts.append(self.clock())
 		self.backend.known = True
 
+	def install_agent(self):
+		self.agent_installs.append(self.clock())
+		return os.path.join(self.directory.name, "Library", "LaunchAgents", "com.wn.agent.plist")
+
 	def installer(self, **overrides):
 		values = {"name": "Windows", "username": "carter", "bundle_dir": self.bundle_dir, "downloads_dir": "/dl"}
 		values.update(overrides)
 		return Installer(
 			SetupOptions(**values), self.output, backend=self.backend, fetch=self.fetch, build_payload=self.build_payload,
 			restart=self.restart_utm, qmp_client_factory=FakeQMP(self.qmp_log),
-			clock=self.clock, sleep=self.clock.sleep,
+			clock=self.clock, sleep=self.clock.sleep, install_agent=self.install_agent,
 		)
 
 	def bundle_config(self):
@@ -176,7 +192,7 @@ class RunTests(InstallerTestCase):
 		address = self.installer().run()
 		self.assertEqual(address, "192.168.64.7")
 		self.assertEqual(self.fetch_calls, [("/dl", True)])
-		unattend_options, virtio_iso, guest_tools_iso, nvda = self.payload_calls[0]
+		unattend_options, virtio_iso, guest_tools_iso, nvda, _ = self.payload_calls[0]
 		self.assertEqual((unattend_options.username, unattend_options.computer_name, unattend_options.edition), ("carter", "WINDOWS", "Pro"))
 		self.assertEqual((virtio_iso, guest_tools_iso, nvda), ("virtio.iso", "tools.iso", "nvda.exe"))
 		self.assertEqual(self.backend.calls.count("start"), 2)
@@ -190,9 +206,67 @@ class RunTests(InstallerTestCase):
 		self.assertEqual([display["Hardware"] for display in config["Display"]], [FINAL_DISPLAY])
 		self.assertEqual([drive["ImageType"] for drive in config["Drive"]], ["Disk"])
 		data = os.listdir(os.path.join(self.bundle_dir, "Windows.utm", "Data"))
-		self.assertEqual(data, ["disk.qcow2"])
+		self.assertEqual(sorted(data), ["disk.qcow2", "efi_vars.fd"])
 		self.assertEqual(config["QEMU"]["MachinePropertyOverride"], "kernel-irqchip=off")
-		self.assertEqual(config["QEMU"]["AdditionalArguments"][4:], shlex.split(FINAL_AUDIO_ARGS))
+		audio = shlex.split(FINAL_AUDIO_ARGS)
+		self.assertEqual(config["QEMU"]["AdditionalArguments"][4:4 + len(audio)], audio)
+
+	def test_battery_is_on_by_default(self):
+		self.installer().run()
+		arguments = self.bundle_config()["QEMU"]["AdditionalArguments"]
+		self.assertEqual(arguments[arguments.index("-machine") + 1], "nvdimm=on")
+		self.assertIn("maxmem=8193M,slots=1", arguments)
+		self.assertIn("memory-backend-file,id=wnbattery,share=on,mem-path=wn-battery-Windows.bin,size=1M", arguments)
+		self.assertIn("nvdimm,id=wnbatterynv,memdev=wnbattery", arguments)
+		with open(os.path.join(self.group_container, "wn-battery-Windows.bin"), "rb") as battery_file:
+			self.assertEqual(battery_file.read(4), b"WNBT")
+		self.assertTrue(self.payload_calls[0][4])
+
+	def test_battery_file_exists_before_the_first_start(self):
+		path = os.path.join(self.group_container, "wn-battery-Windows.bin")
+		original_start = self.backend.start
+		seen = []
+
+		def start():
+			seen.append(os.path.exists(path))
+			original_start()
+		self.backend.start = start
+		self.installer().run()
+		self.assertTrue(seen[0])
+
+	def test_vars_file_has_the_certificate_in_db(self):
+		self.installer().run()
+		flash = read_flash(os.path.join(self.bundle_dir, "Windows.utm", "Data", "efi_vars.fd"))
+		with open(SECURE_BOOT_CERT, "rb") as cert_file:
+			cert = cert_file.read()
+		lists = parse_signature_lists(find(flash, "db", EFI_IMAGE_SECURITY_DATABASE_GUID).data)
+		self.assertEqual(lists[-1][1][0][1], cert)
+
+	def test_installs_the_agent_and_says_how_to_remove_it(self):
+		self.installer().run()
+		self.assertEqual(len(self.agent_installs), 1)
+		output = self.output.getvalue()
+		self.assertIn("com.wn.agent.plist", output)
+		self.assertIn("python3 -m wn agent --uninstall", output)
+		self.assertIn(os.path.join(self.group_container, "wn-battery-Windows.bin"), output)
+		self.assertNotIn("Warning", output)
+
+	def test_warns_when_the_agent_writes_another_file(self):
+		path = os.path.join(self.directory.name, ".config", "wn", "config.json")
+		os.makedirs(os.path.dirname(path))
+		with open(path, "w") as config_file:
+			json.dump({"vm_name": "Other"}, config_file)
+		self.installer().run()
+		self.assertIn("Warning: the VM reads", self.output.getvalue())
+
+	def test_no_battery(self):
+		self.installer(battery=False).run()
+		arguments = self.bundle_config()["QEMU"]["AdditionalArguments"]
+		self.assertNotIn("nvdimm=on", arguments)
+		self.assertEqual(os.listdir(os.path.join(self.bundle_dir, "Windows.utm", "Data")), ["disk.qcow2"])
+		self.assertEqual(os.listdir(self.group_container), [])
+		self.assertFalse(self.payload_calls[0][4])
+		self.assertEqual(self.agent_installs, [])
 
 	def test_reverts_display_when_desktop_stays_blank(self):
 		self.desktop_drawn.return_value = False
@@ -283,7 +357,7 @@ class FailureTests(InstallerTestCase):
 		self.assertIn("stopped", str(context.exception))
 
 	def test_bundle_removed_when_payload_fails(self):
-		def broken_payload(*arguments):
+		def broken_payload(*arguments, **keywords):
 			raise OSError("disk full")
 		installer = self.installer()
 		installer.build_payload = broken_payload

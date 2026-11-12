@@ -27,9 +27,10 @@ VOLUME_NAME = "WNSETUP"
 ANSWER_FILE_NAME = "autounattend.xml"
 GUEST_TOOLS_PATTERN = "utm-guest-tools-*.exe"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SECURE_BOOT_CERT = os.path.join(REPO_ROOT, "efi", "dist", "wn-sb.cer")
 BATTERY_FILES = (
 	os.path.join(REPO_ROOT, "efi", "dist", "wn-acpi.efi"),
-	os.path.join(REPO_ROOT, "efi", "dist", "wn-sb.cer"),
+	SECURE_BOOT_CERT,
 	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_INSTALLER),
 )
 

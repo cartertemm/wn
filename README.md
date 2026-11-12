@@ -51,6 +51,8 @@ python3 -m wn setup
 | Software to install (1 is NVDA) | `--software nvda` or `--software none` | NVDA |
 | Windows 11 edition | `--edition NAME` | `Pro` |
 
+Pass `--no-battery` to leave out the [native battery](#native-battery).
+
 Then it works on its own:
 
 1. Downloads the Windows 11 ARM64 ISO, the virtio-win drivers, the UTM guest
@@ -64,6 +66,8 @@ Then it works on its own:
 5. Shuts down the VM, removes the install discs, switches the display to
    virtio-gpu, and starts it again.
 6. Writes `~/.config/wn/config.json` if it does not exist.
+7. Installs and starts `wn agent`, which feeds the
+   [native battery](#native-battery).
 
 After the downloads, this takes about 11 minutes. A UTM window opens while
 Windows installs. Leave it alone until `wn` prints `Done` and the IP address.
@@ -79,7 +83,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda
 | Command | Example | What it does |
 |---|---|---|
 | `start` | `python3 -m wn start` | Starts the VM. |
-| `stop` | `python3 -m wn stop --force` | Shuts down Windows. `--force` powers off at once. |
+| `stop` | `python3 -m wn stop` | Shuts down Windows and waits until the VM has stopped, up to `--timeout` seconds (120). Exits with 1 if it is still running then. `--force` powers off at once. |
 | `status` | `python3 -m wn status` | Prints `Windows: running` or `Windows: stopped`. |
 | `ip` | `python3 -m wn ip` | Prints the guest IP address. |
 | `key` | `python3 -m wn key ctrl+alt+del` | Presses one or more key combos. |
@@ -87,7 +91,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda
 | `mouse` | `python3 -m wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls. |
 | `grab` | `python3 -m wn grab` | Sends every Mac key press to the guest. |
 | `init-vm` | `python3 -m wn init-vm --iso ~/Downloads/Win11_ARM64.iso` | Creates a UTM bundle without installing Windows. |
-| `update-vm-args` | `python3 -m wn update-vm-args` | Rewrites the QEMU arguments of a stopped VM. |
+| `update-vm-args` | `python3 -m wn update-vm-args --battery` | Changes parts of the QEMU arguments of a stopped VM and prints the change. |
 | `agent` | `python3 -m wn agent start` | Writes the Mac's battery status to the native battery in the guest. Takes `start`, `stop`, `status`, `--install`, `--uninstall`, or `--once`. See [Native battery](#native-battery). |
 | `battery` | `python3 -m wn battery status` | Reads or writes the native battery block in guest memory. See [Native battery](#native-battery). |
 
@@ -107,25 +111,68 @@ audio stack.
 
 ## Native battery
 
-With the firmware battery driver installed in the VM, Windows shows the Mac's
-battery in its own battery icon, in Settings, in Device Manager under
-Batteries, and to NVDA. The driver is a UEFI driver that adds an ACPI battery
-table. The table reads a small data block from a file on the Mac, which QEMU
-maps into the guest as an NVDIMM. `wn agent` writes the Mac's battery status
-into that file.
+Windows shows the Mac's battery in its own battery icon, in Settings, in
+Device Manager under Batteries, and to NVDA. `wn setup` sets this up, so it
+works on the first desktop with Secure Boot on:
 
-This needs three things, each set up once:
+- The VM's Secure Boot variables come with the certificate
+  `efi/dist/wn-sb.cer` in the allowed list (`db`).
+- At the first sign in, Windows copies the signed firmware driver
+  `efi/dist/wn-acpi.efi` to the EFI system partition and registers it as a
+  driver load option. The log is `C:\wn-acpi-install.log`.
+- QEMU maps the battery file
+  `~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<name>.bin`
+  into the guest as an NVDIMM. The driver adds an ACPI battery that reads it.
+- Setup installs `wn agent` as a launch agent. It writes the Mac's battery
+  status into that file and starts at every login. Setup prints the plist
+  path. To remove it, run `python3 -m wn agent --uninstall`.
 
-1. The signed driver on the VM's EFI system partition, registered with the
-   firmware as a driver load option.
-2. The certificate of the key that signed it in the VM's Secure Boot allowed
-   list (`db`).
-3. The NVDIMM on the VM, added with `wn update-vm-args --battery`.
+To make a VM without the battery, pass `--no-battery` to `wn setup`.
 
-The repository carries the signed driver, `efi/dist/wn-acpi.efi`, and its
-certificate, `efi/dist/wn-sb.cer`, so you do not build or sign anything.
-If you change the driver, sign it with your own key and enroll that key's
-certificate instead. Install `osslsigncode` and create a key pair:
+Known issue: macOS blocks the launch agent from writing the battery file,
+because the file is in UTM's app data folder. `wn-agent.log` then shows
+"Operation not permitted", and Windows keeps the last status written. The
+`wn battery` commands work from Terminal.
+
+For an existing VM that has the driver and the certificate, stop the VM, then
+add the NVDIMM and install the agent:
+
+```sh
+python3 -m wn update-vm-args --battery
+python3 -m wn agent --install
+```
+
+Quit UTM and open it again, then start the VM. VMs made before setup enrolled
+the certificate do not have it, so the firmware refuses the driver. Make a new
+VM with `wn setup` for those.
+
+Check and control the agent:
+
+```sh
+python3 -m wn agent status
+python3 -m wn agent stop
+python3 -m wn agent start
+```
+
+The agent checks the battery every 5 seconds and writes the file when the
+status changes, and every 30 seconds otherwise. Windows sees each write within
+about a second. To test, write a fake status once, then the real one:
+
+```sh
+python3 -m wn battery set --percent 20 --discharging
+python3 -m wn battery sync
+```
+
+`wn battery status` prints the block as the guest sees it.
+
+Windows also finds QEMU's NVDIMM bus. Device Manager shows "Storage Class
+Memory Bus" under System devices with code 10. It does not affect the battery.
+
+To remove the battery from a VM, stop it and run
+`python3 -m wn update-vm-args --no-battery`.
+
+If you change the driver, sign it with your own key. Install `osslsigncode`,
+create a key pair, build, and sign:
 
 ```sh
 brew install osslsigncode
@@ -137,114 +184,10 @@ openssl x509 -in efi/keys/wn-sb.crt -outform DER -out efi/keys/wn-sb.cer
 efi/sign.sh
 ```
 
-`efi/sign.sh` writes `efi/dist/wn-acpi.efi` and `efi/dist/wn-sb.cer` and
-checks the signature. Git ignores `efi/keys/*.key`. Keep the private key safe:
-anything signed with it runs in your VM with Secure Boot on.
-
-**Install the driver.** Setup does this. A first-logon command runs
-`efi\install-wn-acpi.ps1` from the setup disc. It copies the driver and the
-certificate to `\EFI\wn` on the EFI system partition and writes the
-`Driver####` and `DriverOrder` firmware variables. It logs to
-`C:\wn-acpi-install.log`.
-
-For an existing VM, copy the script, the driver, and the certificate into one
-folder in the VM, then run the script as administrator. With the VM running:
-
-```sh
-U=/Applications/UTM.app/Contents/MacOS/utmctl
-$U exec Windows --cmd cmd /c mkdir 'C:\wn-acpi'
-$U file push Windows 'C:\wn-acpi\install-wn-acpi.ps1' < efi/guest/install-wn-acpi.ps1
-$U file push Windows 'C:\wn-acpi\wn-acpi.efi' < efi/dist/wn-acpi.efi
-$U file push Windows 'C:\wn-acpi\wn-sb.cer' < efi/dist/wn-sb.cer
-$U exec Windows --cmd powershell -ExecutionPolicy Bypass -File 'C:\wn-acpi\install-wn-acpi.ps1'
-```
-
-`utmctl exec` runs the script as SYSTEM, which works too. You can run the
-script again at any time. It replaces an existing `wn-acpi` entry and does not
-add a second one.
-
-**Enroll the certificate.** Setup does this. For an existing VM, enroll it
-from the firmware menu. Start the VM and press Esc until the menu opens
-(`python3 -m wn key esc` works too). Go to Device Manager > Secure Boot
-Configuration:
-
-1. Set Secure Boot Mode to Custom Mode.
-2. Open Custom Secure Boot Options > DB Options > Enroll Signature >
-   Enroll Signature Using File.
-3. Pick the EFI system partition, then `EFI` > `wn` > `wn-sb.cer`. In the
-   file list, a blank line sits above the folders, so press Down once more
-   than you expect.
-4. Choose Commit Changes and Exit. The Signature GUID field can stay empty.
-5. Press Esc back to the front page and choose Reset.
-
-Leave PK and KEK alone, and leave Secure Boot on. Secure Boot Mode shows
-Standard Mode again when you come back. The new `db` entry stays. DB Options >
-Delete Signature lists it, with an owner GUID of all zeros, under the
-Microsoft entries.
-
-**Add the NVDIMM.** Stop the VM first, then:
-
-```sh
-python3 -m wn update-vm-args --battery --audio-args "<your audio arguments>"
-```
-
-`update-vm-args` rebuilds the whole AdditionalArguments list, so pass your
-`--audio-args` again or they are lost. It creates the battery file
-`~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<vm_name>.bin`
-with a full battery on AC power. UTM's sandbox lets QEMU open files only in
-that folder, so QEMU gets the bare file name. Quit UTM and open it again so
-it reads the new arguments, then start the VM. Run the command again after
-you change the VM's memory size in UTM.
-
-`wn agent start` checks the battery every 5 seconds. It writes the file at
-once when the status changes, and every 30 seconds otherwise. Windows sees
-each write within about a second. If the file is missing, the agent logs it
-and tries again. Without the launch agent below, `wn agent start` runs in the
-terminal until you press Ctrl+C. `wn agent --once` prints the battery status
-as JSON and writes the file once.
-
-To start the agent when you log in, run this on the Mac. It adds a launch
-agent that launchd keeps running and logs to `~/Library/Logs/wn-agent.log`:
-
-```sh
-python3 -m wn agent --install
-```
-
-To turn autostart off, run `python3 -m wn agent --uninstall`.
-
-Control the agent with these commands:
-
-```sh
-python3 -m wn agent status
-python3 -m wn agent stop
-python3 -m wn agent start
-```
-
-`status` shows whether the launch agent is installed, whether the agent runs
-and its PID, the QMP address and whether the VM answers there, and when the
-battery file was last written. It exits with 1 when the agent is not running.
-`stop` unloads the launch agent until you log in again or run `start`. If the
-agent runs in a terminal, `stop` sends it SIGTERM.
-
-Use `wn battery` to check the block by hand:
-
-```sh
-python3 -m wn battery status
-python3 -m wn battery sync
-python3 -m wn battery set --percent 20 --discharging
-```
-
-`status` prints the block as the guest sees it. `sync` writes the Mac's
-battery status once. `set` writes a fake status once, so you can watch
-Windows react. It takes `--charging`, `--discharging` (the default), or
-`--ac`. A running `wn agent` writes the real status again within 30 seconds.
-
-Windows also finds QEMU's NVDIMM bus. Device Manager shows "Storage Class
-Memory Bus" under System devices with code 10 (cannot start). It does not
-affect the battery, and no new disk appears in Disk Management.
-
-To remove the battery, stop the VM and run `wn update-vm-args` without
-`--battery` (with your usual `--audio-args`).
+`efi/sign.sh` writes `efi/dist/wn-acpi.efi` and `efi/dist/wn-sb.cer`, and the
+next `wn setup` enrolls that certificate. Git ignores `efi/keys/*.key`. Keep
+the private key safe: anything signed with it runs in your VM with Secure Boot
+on.
 
 ## Configuration
 
@@ -280,7 +223,7 @@ Accessibility permission in System Settings > Privacy & Security >
 Accessibility. See `keygrab/README.md` for details.
 
 **Headless mode.** `--headless` on `setup` or `init-vm` creates the VM with no
-display window. Pass `--headless` to `update-vm-args` too for such a VM.
+display window.
 
 **QEMU arguments.** `init-vm` and `update-vm-args` take these options:
 
@@ -292,7 +235,19 @@ display window. Pass `--headless` to `update-vm-args` too for such a VM.
   properties. The default `kernel-irqchip=off` avoids the UTM 5.0.8 reboot
   hang with 2 or more vCPUs. An empty string keeps UTM's defaults.
 
-After `update-vm-args`, quit UTM and open it again so it reads the new
+`update-vm-args` reads the bundle's current arguments and changes only the
+parts that its flags name. Everything else stays as it is:
+
+| Flag | Part it replaces |
+|---|---|
+| `--qmp` | The QMP servers, from `qmp_port` and `qmp_session_port` |
+| `--headless` | Adds `-device ramfb` |
+| `--audio spice`, `--audio coreaudio`, `--audio-args ARGS` | The audio arguments |
+| `--battery`, `--no-battery` | The battery NVDIMM |
+| `--extra-args ARGS` | Every argument that is not in one of the parts above |
+
+It prints the old and new arguments as a diff. With no flags, nothing
+changes. Afterwards, quit UTM and open it again so it reads the new
 arguments.
 
 `wn setup` restarts UTM so it finds the new VM. Stop other VMs in UTM before

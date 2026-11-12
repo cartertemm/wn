@@ -13,13 +13,22 @@ from wn.utm_config import (
 	EFI_VARS_FILE_NAME,
 	SECURE_VARS_TEMPLATE,
 	DEFAULT_QEMU_IMG_PATH,
+	ARGUMENT_BLOCKS,
+	BLOCK_AUDIO,
+	BLOCK_BATTERY,
+	BLOCK_EXTRA,
+	BLOCK_QMP,
+	BLOCK_RAMFB,
 	UTMConfigError,
+	argument_units,
 	battery_file_for_bundle,
+	block_of,
 	build_config,
 	default_battery_file,
 	config_plist_bytes,
 	create_disk_image,
 	detach_drives,
+	merge_argument_blocks,
 	set_display_hardware,
 	update_additional_arguments,
 	write_bundle,
@@ -488,51 +497,120 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 			return plistlib.load(plist_file)
 
 	def test_rewrites_only_additional_arguments(self):
-		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "qmp_port": 4444})
+		before, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "qmp_port": 4444}, ARGUMENT_BLOCKS)
 		config = self.read_config()
-		self.assertEqual(arguments_of(config), new_arguments)
-		self.assertEqual(new_arguments[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
-		self.assertIn("coreaudio,id=ca0,out.buffer-length=20000", new_arguments)
+		self.assertEqual(before, ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off"])
+		self.assertEqual(arguments_of(config), after)
+		self.assertEqual(after[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
+		self.assertIn("coreaudio,id=ca0,out.buffer-length=20000", after)
 		config["QEMU"]["AdditionalArguments"] = self.original["QEMU"]["AdditionalArguments"]
 		self.assertEqual(config, self.original)
 
-	def test_matches_a_new_bundle(self):
-		update_additional_arguments(self.bundle, {"audio": "coreaudio"})
+	def test_every_block_matches_a_new_bundle(self):
+		update_additional_arguments(self.bundle, {"audio": "coreaudio"}, ARGUMENT_BLOCKS)
 		self.assertEqual(arguments_of(self.read_config()), arguments_of(build_config(options(audio="coreaudio"))))
 
 	def test_audio_args(self):
-		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "audio_args": "-audiodev coreaudio,id=ca0 -device intel-hda"})
-		self.assertEqual(new_arguments[4:], ["-audiodev", "coreaudio,id=ca0", "-device", "intel-hda"])
-		self.assertEqual(arguments_of(self.read_config()), new_arguments)
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "audio_args": "-audiodev coreaudio,id=ca0 -device intel-hda"}, [BLOCK_AUDIO])
+		self.assertEqual(after, ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-audiodev", "coreaudio,id=ca0", "-device", "intel-hda"])
+		self.assertEqual(arguments_of(self.read_config()), after)
 
 	def test_extra_args(self):
-		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "extra_args": "-device virtio-keyboard-pci,id=vkbd"})
-		self.assertEqual(new_arguments[-2:], ["-device", "virtio-keyboard-pci,id=vkbd"])
-		self.assertEqual(arguments_of(self.read_config()), new_arguments)
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "extra_args": "-device virtio-keyboard-pci,id=vkbd"}, [BLOCK_EXTRA])
+		self.assertEqual(after[-2:], ["-device", "virtio-keyboard-pci,id=vkbd"])
+		self.assertEqual(arguments_of(self.read_config()), after)
 
 	def test_battery_uses_the_bundle_memory_size_and_group_container_file(self):
 		config = self.read_config()
 		config["System"]["MemorySize"] = 6144
 		with open(self.plist_path, "wb") as plist_file:
 			plistlib.dump(config, plist_file)
-		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True})
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True}, [BLOCK_BATTERY])
 		expected = battery_arguments(6144, "wn-battery-Win11.bin")
-		self.assertTrue(contains_sequence(new_arguments, expected))
-		self.assertEqual(arguments_of(self.read_config()), new_arguments)
+		self.assertTrue(contains_sequence(after, expected))
+		self.assertEqual(arguments_of(self.read_config()), after)
 
 	def test_battery_with_a_configured_file(self):
-		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True, "battery_file": BATTERY_FILE})
-		self.assertTrue(contains_sequence(new_arguments, battery_arguments(8192, BATTERY_FILE)))
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True, "battery_file": BATTERY_FILE}, [BLOCK_BATTERY])
+		self.assertTrue(contains_sequence(after, battery_arguments(8192, BATTERY_FILE)))
 
 	def test_missing_bundle(self):
 		with self.assertRaises(UTMConfigError) as context:
-			update_additional_arguments(os.path.join(self.bundle, "missing.utm"), {})
+			update_additional_arguments(os.path.join(self.bundle, "missing.utm"), {}, [])
 		self.assertIn("config.plist", str(context.exception))
 
 	def test_unknown_option(self):
 		with self.assertRaises(UTMConfigError):
-			update_additional_arguments(self.bundle, {"colour": "red"})
+			update_additional_arguments(self.bundle, {"colour": "red"}, [])
 		self.assertEqual(self.read_config(), self.original)
+
+	def test_unknown_block(self):
+		with self.assertRaises(UTMConfigError):
+			update_additional_arguments(self.bundle, {}, ["display"])
+
+	def set_arguments(self, arguments):
+		config = self.read_config()
+		config["QEMU"]["AdditionalArguments"] = arguments
+		with open(self.plist_path, "wb") as plist_file:
+			plistlib.dump(config, plist_file)
+
+	def test_no_blocks_keeps_every_argument_and_the_file(self):
+		self.set_arguments(CUSTOM_ARGUMENTS)
+		with open(self.plist_path, "rb") as plist_file:
+			original = plist_file.read()
+		before, after = update_additional_arguments(self.bundle, {"audio": "coreaudio"}, [])
+		self.assertEqual(before, CUSTOM_ARGUMENTS)
+		self.assertEqual(after, CUSTOM_ARGUMENTS)
+		with open(self.plist_path, "rb") as plist_file:
+			self.assertEqual(plist_file.read(), original)
+
+	def test_battery_keeps_tuned_audio_ramfb_and_extra_args(self):
+		self.set_arguments(CUSTOM_ARGUMENTS)
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True, "battery_file": BATTERY_FILE}, [BLOCK_BATTERY])
+		self.assertEqual(after, CUSTOM_ARGUMENTS[:-2] + battery_arguments(8192, BATTERY_FILE) + CUSTOM_ARGUMENTS[-2:])
+
+	def test_battery_is_replaced_in_place(self):
+		self.set_arguments(CUSTOM_ARGUMENTS[:-2] + battery_arguments(4096, BATTERY_FILE) + CUSTOM_ARGUMENTS[-2:])
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True, "battery_file": BATTERY_FILE}, [BLOCK_BATTERY])
+		self.assertEqual(after, CUSTOM_ARGUMENTS[:-2] + battery_arguments(8192, BATTERY_FILE) + CUSTOM_ARGUMENTS[-2:])
+
+	def test_removing_the_battery(self):
+		self.set_arguments(CUSTOM_ARGUMENTS[:-2] + battery_arguments(8192, BATTERY_FILE) + CUSTOM_ARGUMENTS[-2:])
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio"}, [BLOCK_BATTERY])
+		self.assertEqual(after, CUSTOM_ARGUMENTS)
+
+	def test_qmp_block_keeps_its_place(self):
+		self.set_arguments(CUSTOM_ARGUMENTS)
+		_, after = update_additional_arguments(self.bundle, {"audio": "coreaudio", "qmp_port": 5000}, [BLOCK_QMP])
+		self.assertEqual(after[:4], ["-qmp", "tcp:127.0.0.1:5000,server=on,wait=off", "-qmp", "tcp:127.0.0.1:5001,server=on,wait=off"])
+		self.assertEqual(after[4:], CUSTOM_ARGUMENTS[4:])
+
+
+CUSTOM_ARGUMENTS = [
+	"-qmp", "tcp:127.0.0.1:4444,server=on,wait=off",
+	"-qmp", "tcp:127.0.0.1:4445,server=on,wait=off",
+	"-device", "ramfb",
+	"-audiodev", "coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3",
+	"-device", "intel-hda",
+	"-device", "hda-output,audiodev=ca0",
+	"-gdb", "tcp:127.0.0.1:4446",
+]
+
+
+class ArgumentBlockTests(unittest.TestCase):
+	def test_units(self):
+		self.assertEqual(argument_units(["-device", "ramfb", "-S", "-m", "maxmem=9M,slots=1"]), [["-device", "ramfb"], ["-S"], ["-m", "maxmem=9M,slots=1"]])
+
+	def test_blocks(self):
+		units = argument_units(CUSTOM_ARGUMENTS + battery_arguments(8192, BATTERY_FILE) + ["-machine", "highmem=on", "-device", "virtio-keyboard-pci"])
+		self.assertEqual([block_of(unit) for unit in units], [
+			BLOCK_QMP, BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_AUDIO, BLOCK_AUDIO, BLOCK_EXTRA,
+			BLOCK_BATTERY, BLOCK_BATTERY, BLOCK_BATTERY, BLOCK_BATTERY, BLOCK_EXTRA, BLOCK_EXTRA,
+		])
+
+	def test_missing_block_goes_before_later_blocks(self):
+		merged = merge_argument_blocks(["-qmp", "a", "-gdb", "x"], {BLOCK_AUDIO: ["-device", "intel-hda"]})
+		self.assertEqual(merged, ["-qmp", "a", "-device", "intel-hda", "-gdb", "x"])
 
 
 FAKE_QEMU_IMG_SOURCE = """

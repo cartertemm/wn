@@ -1,6 +1,8 @@
 """Stands in for utmctl in tests. State lives in the JSON file named by FAKE_UTMCTL_STATE.
 
 State format: {"vms": [{"uuid", "name", "status", "ip_addresses"}], "fail": {command: stderr}, "calls": [argv]}.
+A VM with "request_stop_lists": N goes to "stopping" on ``stop --request`` and to "stopped" after N more ``list``
+calls. N = -1 means Windows never shuts down, so the VM stays "started".
 """
 
 import json
@@ -34,6 +36,11 @@ def find_vm(state, name):
 def list_vms(state, arguments):
 	print(LIST_HEADER)
 	for vm in state["vms"]:
+		if "stop_countdown" in vm:
+			vm["stop_countdown"] -= 1
+			if vm["stop_countdown"] <= 0:
+				vm["status"] = "stopped"
+				del vm["stop_countdown"]
 		print("{} {} {}".format(vm["uuid"], vm["status"].ljust(STATUS_COLUMN_WIDTH), vm["name"]))
 
 
@@ -47,8 +54,13 @@ def start(state, arguments):
 
 def stop(state, arguments):
 	vm = find_vm(state, arguments[0])
-	vm["status"] = "stopped"
 	vm["last_stop_flags"] = arguments[1:]
+	lists = vm.get("request_stop_lists")
+	if lists is None or "--request" not in arguments:
+		vm["status"] = "stopped"
+	elif lists >= 0:
+		vm["status"] = "stopping"
+		vm["stop_countdown"] = lists
 
 
 def ip_address(state, arguments):
