@@ -8,9 +8,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from xml.sax.saxutils import escape
 
+from wn.backend import create_backend
+from wn.battery_sync import LOG_PREFIX, BatterySync, battery_reading, run_sync_loop, sync_message
 from wn.errors import WnError
 
 DEFAULT_AGENT_PORT = 47100
@@ -155,6 +158,27 @@ def serve(configured_bind, port, output, find=find_bind_address, sleep=time.slee
 		server.server_close()
 
 
+def qmp_address(config, backend_factory=create_backend):
+	return config.qmp_socket or backend_factory(config).qmp_socket_path()
+
+
+def start_battery_sync(port, qmp_address, output, read_status=battery_status):
+	"""Run the battery sync loop in a daemon thread. Return the event that stops it, and the thread."""
+	stop = threading.Event()
+	sync = BatterySync(port, qmp_address)
+	thread = threading.Thread(target=run_sync_loop, args=(sync, read_status, output, stop.wait), name="battery-sync", daemon=True)
+	thread.start()
+	return stop, thread
+
+
+def sync_once(port, qmp_address, status):
+	"""Write one reading to the guest and return a line that says what happened."""
+	try:
+		return sync_message(BatterySync(port, qmp_address).write(battery_reading(status)))
+	except WnError as error:
+		return LOG_PREFIX + str(error)
+
+
 def launch_agent_path():
 	return os.path.join(os.path.expanduser(LAUNCH_AGENTS_DIRECTORY), LAUNCHD_LABEL + ".plist")
 
@@ -206,9 +230,14 @@ def uninstall_launch_agent(run=None, uid=None):
 	return True
 
 
-def run_agent_command(arguments, config, output):
+def run_agent_command(arguments, config, output, messages=None):
+	messages = messages or sys.stderr
 	if arguments.once:
-		output.write(json.dumps(battery_status(), indent="\t") + "\n")
+		status = battery_status()
+		output.write(json.dumps(status, indent="\t") + "\n")
+		output.flush()
+		if config.battery_sync:
+			messages.write(sync_once(config.gdb_port, qmp_address(config), status) + "\n")
 	elif arguments.install:
 		path = install_launch_agent(sys.executable, REPOSITORY_DIRECTORY)
 		output.write("Installed {}. The agent now starts when you log in. Log: {}\n".format(path, os.path.expanduser(LOG_PATH)))
@@ -218,4 +247,6 @@ def run_agent_command(arguments, config, output):
 		else:
 			output.write("The launch agent is not installed\n")
 	else:
+		if config.battery_sync:
+			start_battery_sync(config.gdb_port, qmp_address(config), output)
 		serve(config.agent_bind, config.agent_port, output)

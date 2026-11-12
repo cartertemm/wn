@@ -90,6 +90,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda,wn-to
 | `init-vm` | `python3 -m wn init-vm --iso ~/Downloads/Win11_ARM64.iso` | Creates a UTM bundle without installing Windows. |
 | `update-vm-args` | `python3 -m wn update-vm-args` | Rewrites the QEMU arguments of a stopped VM. |
 | `agent` | `python3 -m wn agent` | Serves the Mac's battery status to wn-tools in the guest. See [wn-tools](#wn-tools). |
+| `battery` | `python3 -m wn battery status` | Reads or writes the native battery block in guest memory. See [Native battery](#native-battery). |
 
 `key`, `type`, and `mouse` take `--dry-run` to print the QMP commands as JSON
 instead of sending them. Run `python3 -m wn <command> --help` for every option.
@@ -165,10 +166,51 @@ autostart off, run `python3 -m wn agent --uninstall` on the Mac, and
 `reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v wn-tools /f`
 in Windows.
 
-What it does not do. Windows' own battery icon and battery settings stay
-absent, because Windows shows those only for a battery driver, and a driver
-has to be signed for the kernel. The battery shows only through the wn-tools
-icon.
+What it does not do. Without the [native battery](#native-battery),
+Windows' own battery icon and battery settings stay absent, because Windows
+shows those only for a battery driver. The battery then shows only through
+the wn-tools icon.
+
+### Native battery
+
+With the firmware battery driver installed in the VM, Windows shows the Mac's
+battery in its own battery icon and in Settings. The driver is an ACPI table
+that reads a small data block in guest memory. `wn agent` writes the Mac's
+battery status into that block through QEMU's GDB stub.
+
+This needs two things:
+
+- The firmware battery driver in the VM.
+- The extra QEMU argument `-gdb tcp:127.0.0.1:4446` on the VM, so the agent
+  can reach the GDB stub. The stub listens only on the Mac.
+- The QMP port that `wn setup` already adds, so the agent can check the VM
+  state.
+
+`wn agent` checks the battery every 5 seconds. It writes the block at once
+when the status changes, and every 30 seconds otherwise. Each write pauses
+the VM for less than a millisecond. If the VM or the block is not there, the
+agent logs it and tries again every 30 seconds. The web server for wn-tools
+keeps working either way. `wn agent --once` also writes the block once and
+says whether it found it.
+
+The agent writes only while the VM runs. QEMU pauses the VM while the agent
+is connected to the GDB stub, and resumes it when the agent disconnects. So
+before each write, the agent asks QMP (on `qmp_port`, or `qmp_socket` when
+set) for the VM state. It skips the write when the VM is paused, not started
+yet, or QMP does not answer, so it never resumes a VM that you paused.
+
+Use `wn battery` to check the block by hand:
+
+```sh
+python3 -m wn battery status
+python3 -m wn battery sync
+python3 -m wn battery set --percent 20 --discharging
+```
+
+`status` prints the block as the guest sees it. `sync` writes the Mac's
+battery status once. `set` writes a fake status once, so you can watch
+Windows react. It takes `--charging`, `--discharging` (the default), or
+`--ac`. A running `wn agent` writes the real status again within 30 seconds.
 
 ## Configuration
 
@@ -189,6 +231,8 @@ icon.
 | `keygrab_send_repeats` | `true` | Send auto-repeat key presses in `grab` mode. |
 | `agent_bind` | none | Address for `wn agent` to listen on. By default it finds the UTM shared network address. |
 | `agent_port` | `47100` | Port for `wn agent`. |
+| `gdb_port` | `4446` | Port of the VM's GDB stub on `127.0.0.1`, for the native battery. |
+| `battery_sync` | `true` | Write the Mac's battery status to the native battery block from `wn agent`. |
 
 ## Advanced
 

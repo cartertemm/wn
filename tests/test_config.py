@@ -127,6 +127,25 @@ class ConfigTests(unittest.TestCase):
 			load_config()
 		self.assertIn("utmctl_path", str(context.exception))
 
+	def test_battery_sync_defaults(self):
+		config = load_config()
+		self.assertEqual(config.gdb_port, 4446)
+		self.assertTrue(config.battery_sync)
+
+	def test_battery_sync_settings_are_loaded(self):
+		self.write_config(json.dumps({"gdb_port": 4500, "battery_sync": False}))
+		config = load_config()
+		self.assertEqual(config.gdb_port, 4500)
+		self.assertFalse(config.battery_sync)
+
+	def test_battery_sync_types(self):
+		for key, value in (("gdb_port", "4446"), ("gdb_port", True), ("battery_sync", 1)):
+			with self.subTest(key=key, value=value):
+				self.write_config(json.dumps({key: value}))
+				with self.assertRaises(ConfigError) as context:
+					load_config()
+				self.assertIn(key, str(context.exception))
+
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")
 		with self.assertRaises(ConfigError):

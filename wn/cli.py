@@ -11,6 +11,7 @@ import sys
 from wn import __version__, agent, keygrab, mouse
 from wn.attach import attach
 from wn.backend import create_backend
+from wn.battery_sync import run_battery_command
 from wn.config import load_config
 from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
@@ -83,6 +84,7 @@ def build_parser():
 	_add_update_vm_args_parser(subcommands)
 	_add_setup_parser(subcommands)
 	_add_agent_parser(subcommands)
+	_add_battery_parser(subcommands)
 	return parser
 
 
@@ -108,6 +110,20 @@ def _add_agent_parser(subcommands):
 	modes.add_argument("--once", action="store_true", help="print the battery status as JSON and exit")
 	modes.add_argument("--install", action="store_true", help="start the agent at every login with a launchd agent in ~/Library/LaunchAgents")
 	modes.add_argument("--uninstall", action="store_true", help="remove the launchd agent")
+
+
+def _add_battery_parser(subcommands):
+	battery = subcommands.add_parser("battery", help="read or write the battery block that the guest firmware driver reads")
+	actions = battery.add_subparsers(dest="battery_command", metavar="action")
+	actions.required = True
+	actions.add_parser("status", help="read the battery block from the guest and print it")
+	actions.add_parser("sync", help="write the Mac's battery status to the guest once")
+	set_parser = actions.add_parser("set", help="write a fake battery status once, for testing. A running wn agent overwrites it within 30 s")
+	set_parser.add_argument("--percent", type=int, required=True, help="charge level, 0 to 100")
+	power = set_parser.add_mutually_exclusive_group()
+	power.add_argument("--charging", action="store_true", help="on AC power and charging")
+	power.add_argument("--discharging", action="store_true", help="on battery power (the default)")
+	power.add_argument("--ac", action="store_true", help="on AC power, not charging")
 
 
 def _add_mouse_parser(subcommands):
@@ -171,11 +187,12 @@ def _add_key_options(parser):
 
 
 class CommandContext:
-	def __init__(self, arguments, config, backend_factory, qmp_client_factory, stdout, stdin=None):
+	def __init__(self, arguments, config, backend_factory, qmp_client_factory, stdout, stdin=None, stderr=None):
 		self.arguments = arguments
 		self.config = config
 		self.stdout = stdout
 		self.stdin = stdin
+		self.stderr = stderr
 		self._backend_factory = backend_factory
 		self._qmp_client_factory = qmp_client_factory
 		self._backend = None
@@ -186,9 +203,11 @@ class CommandContext:
 			self._backend = self._backend_factory(self.config)
 		return self._backend
 
+	def qmp_address(self, session=False):
+		return self.config.qmp_socket or self.backend.qmp_socket_path(session=session)
+
 	def connect_qmp(self, session=False):
-		socket_path = self.config.qmp_socket or self.backend.qmp_socket_path(session=session)
-		return self._qmp_client_factory(socket_path)
+		return self._qmp_client_factory(self.qmp_address(session=session))
 
 	def print(self, text):
 		self.stdout.write(text + "\n")
@@ -474,7 +493,11 @@ def _setup_answers(arguments, stdin, stdout):
 
 
 def run_agent(context):
-	agent.run_agent_command(context.arguments, context.config, context.stdout)
+	agent.run_agent_command(context.arguments, context.config, context.stdout, context.stderr)
+
+
+def run_battery(context):
+	run_battery_command(context.arguments, context.config, context.qmp_address(), context.stdout, agent.battery_status)
 
 
 def run_setup(context):
@@ -506,6 +529,7 @@ COMMANDS = {
 	"update-vm-args": run_update_vm_args,
 	"setup": run_setup,
 	"agent": run_agent,
+	"battery": run_battery,
 }
 
 
@@ -514,7 +538,7 @@ def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_clien
 	stderr = stderr or sys.stderr
 	arguments = build_parser().parse_args(argv)
 	try:
-		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin)
+		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin, stderr)
 		COMMANDS[arguments.command](context)
 	except (WnError, NotImplementedError) as error:
 		stderr.write("wn: error: {}\n".format(error))
