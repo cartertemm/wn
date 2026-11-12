@@ -13,9 +13,8 @@ from xml.sax.saxutils import escape
 from wn.appbundle import build_app, executable_path, remove_app
 from wn.backend import create_backend
 from wn.battery_file import BatteryFile, battery_file_path, battery_writer
-from wn.battery_sync import BATTERY_CHANNEL_FILE, LOG_PREFIX, battery_reading, run_sync_loop, sync_message
+from wn.battery_sync import LOG_PREFIX, battery_reading, run_sync_loop, sync_message
 from wn.errors import WnError
-from wn.gdbstub import DEFAULT_HOST as GDB_HOST
 from wn.qmp import qmp_client_for
 
 PMSET_COMMAND = ["/usr/bin/pmset", "-g", "batt"]
@@ -196,7 +195,7 @@ def serve(config, output, wait=time.sleep):
 	try:
 		output.write("Running the agent in the foreground with PID {}. Press Ctrl+C to stop\n".format(os.getpid()))
 		output.flush()
-		run_sync_loop(battery_writer(config, lambda: qmp_address(config)), battery_status, output, wait)
+		run_sync_loop(battery_writer(config), battery_status, output, wait)
 	except KeyboardInterrupt:
 		pass
 	finally:
@@ -274,12 +273,10 @@ def agent_status(config, output, run=None, uid=None):
 	pid = launchd_state(run, uid)[1] if installed else None
 	if pid is None:
 		pid = foreground_pid()
-	channel = config.battery_channel if config.battery_channel == BATTERY_CHANNEL_FILE else "{} ({}:{})".format(config.battery_channel, GDB_HOST, config.gdb_port)
 	lines = [
 		"Installed: yes ({})".format(path) if installed else "Installed: no",
 		"Running: yes, PID {}".format(pid) if pid is not None else "Running: no",
 		_qmp_line(qmp_address(config)),
-		"Battery channel: {}".format(channel),
 		_battery_file_line(battery_file_path(config)),
 	]
 	output.write("".join(line + "\n" for line in lines))
@@ -293,7 +290,7 @@ def run_agent_command(arguments, config, output, messages=None, wait=time.sleep)
 		output.write(json.dumps(status, indent="\t") + "\n")
 		output.flush()
 		if config.battery_sync:
-			messages.write(sync_once(battery_writer(config, lambda: qmp_address(config)), status) + "\n")
+			messages.write(sync_once(battery_writer(config), status) + "\n")
 	elif arguments.install:
 		path = install_launch_agent(sys.executable, REPOSITORY_DIRECTORY)
 		output.write("Installed {}. The agent now starts when you log in. Log: {}\n".format(path, os.path.expanduser(LOG_PATH)))

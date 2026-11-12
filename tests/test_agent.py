@@ -12,7 +12,6 @@ import time
 import unittest
 from unittest import mock
 
-from fake_gdb_server import FakeGdbServer
 from fake_qmp_server import TCPFakeQMPServer, reply
 from wn import agent
 from wn.agent import (
@@ -28,7 +27,7 @@ from wn.agent import (
 )
 from wn.appbundle import AppBundleError, app_path, executable_path
 from wn.battery_file import BatteryFile
-from wn.battery_sync import BLOCK_SIZE, BatterySync, decode_block
+from wn.battery_sync import BLOCK_SIZE, decode_block
 from wn.cli import main
 from wn.config import Config
 
@@ -66,8 +65,6 @@ DESKTOP_WITH_UPS = (
 	"Now drawing from 'AC Power'\n"
 	" -Back-UPS ES 550 (id=123)\t100%; charged; 0:00 remaining present: true\n"
 )
-BLOCK_ADDRESS = 0x50000000
-REGION_SIZE = 0x1000
 UID = os.getuid()
 TARGET = "gui/{}/{}".format(UID, LAUNCHD_LABEL)
 LAUNCHCTL_NOT_LOADED = 113
@@ -276,44 +273,13 @@ class AgentCommandTests(unittest.TestCase):
 		self.assertEqual(json.loads(stdout)["percent"], 83)
 		self.assertEqual(stderr, "sync result\n")
 
-	def test_once_writes_the_battery_block(self):
-		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server, running_qmp_server() as qmp:
-			server.write(BLOCK_ADDRESS, b"WNBT")
-			self.write_config({"battery_channel": "gdb", "gdb_port": server.port, "qmp_socket": qmp.address})
-			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
-				exit_code, stdout, stderr = self.run_cli("--once")
-			block = server.read(BLOCK_ADDRESS, BLOCK_SIZE)
+	def test_once_reports_a_write_error(self):
+		self.write_config({"battery_file": os.path.join(self.home.name, "missing", "wn-battery.bin")})
+		with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
+			exit_code, stdout, stderr = self.run_cli("--once")
 		self.assertEqual(exit_code, 0)
 		self.assertEqual(json.loads(stdout)["percent"], 83)
-		self.assertEqual(stderr, "battery block found at 0x50000000 and written\n")
-		self.assertEqual(decode_block(block)["percent"], 83)
-
-	def test_once_reports_a_missing_block(self):
-		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server, running_qmp_server() as qmp:
-			self.write_config({"battery_channel": "gdb", "gdb_port": server.port, "qmp_socket": qmp.address})
-			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
-				exit_code, _, stderr = self.run_cli("--once")
-		self.assertEqual(exit_code, 0)
-		self.assertEqual(stderr, "no battery block (firmware driver not installed)\n")
-
-	def test_once_reports_an_unreachable_stub(self):
-		with running_qmp_server() as qmp:
-			self.write_config({"battery_channel": "gdb", "gdb_port": unused_port(), "qmp_socket": qmp.address})
-			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
-				exit_code, stdout, stderr = self.run_cli("--once")
-		self.assertEqual(exit_code, 0)
-		self.assertEqual(json.loads(stdout)["percent"], 83)
-		self.assertIn("battery sync: cannot connect to the GDB stub", stderr)
-
-	def test_once_skips_sync_when_qmp_is_unreachable(self):
-		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server:
-			server.write(BLOCK_ADDRESS, b"WNBT")
-			self.write_config({"battery_channel": "gdb", "gdb_port": server.port, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
-			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
-				exit_code, _, stderr = self.run_cli("--once")
-		self.assertEqual(exit_code, 0)
-		self.assertIn("battery sync: cannot check the VM state over QMP", stderr)
-		self.assertEqual(server.connections, 0)
+		self.assertIn("battery sync: cannot write the battery file", stderr)
 
 	def test_once_writes_the_battery_file(self):
 		path = os.path.join(self.home.name, "wn-battery.bin")
@@ -377,14 +343,6 @@ class AgentCommandTests(unittest.TestCase):
 		self.assertIsInstance(writer, BatteryFile)
 		self.assertEqual(writer.path, os.path.join(self.home.name, "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM", "wn-battery-Windows.bin"))
 		self.assertIs(read_status, battery_status)
-
-	def test_uses_the_gdb_channel_from_config(self):
-		self.write_config({"battery_channel": "gdb", "gdb_port": 4500, "qmp_port": 4600})
-		with mock.patch("wn.agent.run_sync_loop") as loop:
-			self.run_cli("start")
-		writer = loop.call_args.args[0]
-		self.assertIsInstance(writer, BatterySync)
-		self.assertEqual((writer.port, writer.qmp_address), (4500, "tcp:127.0.0.1:4600"))
 
 	def test_uses_the_configured_battery_file(self):
 		self.write_config({"battery_file": "/tmp/wn-battery.bin"})
@@ -608,11 +566,6 @@ class AgentControlTests(unittest.TestCase):
 		_, stdout, _ = self.run_cli(FakeLaunchctl(), "status")
 		self.assertIn("Battery file: {} (no battery block yet)".format(battery_path), stdout)
 
-	def test_status_shows_the_gdb_stub_for_the_gdb_channel(self):
-		self.write_config({"battery_channel": "gdb", "gdb_port": 4500, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
-		_, stdout, _ = self.run_cli(FakeLaunchctl(), "status")
-		self.assertIn("Battery channel: gdb (127.0.0.1:4500)", stdout)
-
 
 class AgentLoopTests(unittest.TestCase):
 	def setUp(self):
@@ -630,20 +583,18 @@ class AgentLoopTests(unittest.TestCase):
 		return output.getvalue()
 
 	def test_loop_writes_the_block(self):
-		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server, running_qmp_server() as qmp:
-			server.write(BLOCK_ADDRESS, b"WNBT")
-			self.run_agent(Config(battery_channel="gdb", gdb_port=server.port, qmp_socket=qmp.address), lambda seconds: True)
-			self.assertEqual(decode_block(server.read(BLOCK_ADDRESS, BLOCK_SIZE))["percent"], 83)
-		self.assertFalse(server.paused)
+		path = os.path.join(self.home.name, "wn-battery.bin")
+		self.run_agent(Config(battery_file=path), lambda seconds: True)
+		with open(path, "rb") as data_file:
+			self.assertEqual(decode_block(data_file.read(BLOCK_SIZE))["percent"], 83)
 
-	def test_loop_keeps_going_when_the_stub_is_down(self):
+	def test_loop_keeps_going_when_the_write_fails(self):
 		waits = []
 		def wait(seconds):
 			waits.append(seconds)
 			return len(waits) > 1
-		with running_qmp_server() as qmp:
-			output = self.run_agent(Config(battery_channel="gdb", gdb_port=unused_port(), qmp_socket=qmp.address), wait)
-		self.assertIn("battery sync: cannot connect to the GDB stub", output)
+		output = self.run_agent(Config(battery_file=os.path.join(self.home.name, "missing", "wn-battery.bin")), wait)
+		self.assertIn("battery sync: cannot write the battery file", output)
 		self.assertEqual(len(waits), 2)
 
 

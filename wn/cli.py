@@ -552,7 +552,7 @@ def run_agent(context):
 
 
 def run_battery(context):
-	run_battery_command(context.arguments, battery_writer(context.config, context.qmp_address), context.stdout, agent.battery_status)
+	run_battery_command(context.arguments, battery_writer(context.config), context.stdout, agent.battery_status)
 
 
 def run_setup(context):

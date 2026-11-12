@@ -8,7 +8,6 @@ import os
 import time
 
 from wn.battery_sync import (
-	BATTERY_CHANNEL_FILE,
 	BLOCK_MAGIC,
 	BLOCK_SIZE,
 	FLAG_AC_ONLINE,
@@ -17,7 +16,6 @@ from wn.battery_sync import (
 	MAX_PERCENT,
 	BatteryBlockError,
 	BatteryReading,
-	BatterySync,
 	decode_block,
 	encode_block,
 )
@@ -34,11 +32,8 @@ def battery_file_path(config):
 	return config.battery_file or default_battery_file(config.vm_name)
 
 
-def battery_writer(config, qmp_address):
-	"""Return the writer for the configured channel. ``qmp_address`` is called only for the GDB channel."""
-	if config.battery_channel == BATTERY_CHANNEL_FILE:
-		return BatteryFile(battery_file_path(config))
-	return BatterySync(config.gdb_port, qmp_address())
+def battery_writer(config):
+	return BatteryFile(battery_file_path(config))
 
 
 class BatteryFile:

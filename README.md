@@ -216,9 +216,7 @@ on.
 | `keygrab_keycodes` | `keygrab/keycodes.json` | Table that maps macOS keycodes to QEMU key names. |
 | `keygrab_send_repeats` | `true` | Send auto-repeat key presses in `grab` mode. |
 | `battery_sync` | `true` | Write the Mac's battery status to the native battery block from `wn agent`. |
-| `battery_channel` | `file` | How the agent writes the battery block: `file` (the NVDIMM file) or `gdb` (QEMU's GDB stub, older). |
 | `battery_file` | `~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<vm_name>.bin` | Battery file that QEMU maps into the guest. UTM's QEMU can open it only in that folder. |
-| `gdb_port` | `4446` | Port of the VM's GDB stub on `127.0.0.1`, for the `gdb` battery channel. |
 
 ## Advanced
 

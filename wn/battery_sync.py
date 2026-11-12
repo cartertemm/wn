@@ -1,7 +1,6 @@
-"""Write the Mac's battery status into a data block in guest memory, where the firmware battery driver reads it.
+"""Encode the Mac's battery status into the data block that the firmware battery driver reads.
 
-The block is one page that the guest firmware reserves and marks with the magic "WNBT". The host finds it
-by probing a fixed list of guest physical addresses through QEMU's GDB stub.
+The block starts with the magic "WNBT". wn.battery_file writes it into the file that QEMU maps into the guest.
 """
 
 import collections
@@ -10,17 +9,7 @@ import struct
 import time
 
 from wn.errors import WnError
-from wn.gdbstub import GdbStubClient, GdbStubError
-from wn.qmp import qmp_client_for
 
-DEFAULT_GDB_PORT = 4446
-BATTERY_CHANNEL_FILE = "file"
-BATTERY_CHANNEL_GDB = "gdb"
-BATTERY_CHANNELS = (BATTERY_CHANNEL_FILE, BATTERY_CHANNEL_GDB)
-BLOCK_BASE_ADDRESS = 0x50000000
-CANDIDATE_SPACING = 0x100000
-CANDIDATE_COUNT = 16
-CANDIDATE_ADDRESSES = tuple(BLOCK_BASE_ADDRESS + index * CANDIDATE_SPACING for index in range(CANDIDATE_COUNT))
 BLOCK_MAGIC = b"WNBT"
 BLOCK_VERSION = 1
 BLOCK_LAYOUT = struct.Struct("<4sIIIIIIIQ")
@@ -37,7 +26,6 @@ MINUTES_PER_HOUR = 60
 MAX_PERCENT = 100
 POLL_SECONDS = 5
 WRITE_INTERVAL_SECONDS = 30
-RUNNING_STATUS = "running"
 LOG_PREFIX = "battery sync: "
 NO_BLOCK_MESSAGE = "no battery block (firmware driver not installed)"
 
@@ -45,11 +33,7 @@ BatteryReading = collections.namedtuple("BatteryReading", "flags percent rate_mw
 
 
 class BatteryBlockError(WnError):
-	"""Raised when the guest has no battery block or a write does not stick."""
-
-
-class VmNotRunningError(WnError):
-	"""Raised instead of opening the GDB stub, because detaching from it would resume a paused VM."""
+	"""Raised when the battery block cannot be read or written, or a value is out of range."""
 
 
 def _rate_mw(status, remaining_mwh, charging, discharging):
@@ -111,81 +95,14 @@ def decode_block(data):
 	}
 
 
-def sync_message(location):
-	"""Describe a write result: a guest address from the GDB channel, or a path from the file channel."""
-	if location is None:
-		return NO_BLOCK_MESSAGE
-	if isinstance(location, str):
-		return "battery file {} written".format(location)
-	return "battery block found at 0x{:x} and written".format(location)
-
-
-def _has_magic(client, address):
-	try:
-		return client.read_memory(address, len(BLOCK_MAGIC)) == BLOCK_MAGIC
-	except GdbStubError:
-		return False
-
-
-class BatterySync:
-	"""Find the block in guest memory once, then keep writing to that address.
-
-	Every session first asks QMP for the VM state, and goes on only while the VM runs. Detaching from
-	the GDB stub always resumes the VM, so a session on a paused VM would unpause it.
-	"""
-
-	def __init__(self, port, qmp_address, client_factory=GdbStubClient, qmp_factory=qmp_client_for, clock=time.time):
-		self.port = port
-		self.qmp_address = qmp_address
-		self.address = None
-		self._client_factory = client_factory
-		self._qmp_factory = qmp_factory
-		self._clock = clock
-
-	def _require_running(self):
-		try:
-			with self._qmp_factory(self.qmp_address) as qmp:
-				status = qmp.execute("query-status")["status"]
-		except (WnError, OSError) as error:
-			raise VmNotRunningError("cannot check the VM state over QMP, sync skipped: {}".format(error)) from None
-		if status != RUNNING_STATUS:
-			raise VmNotRunningError("the VM is {}, sync skipped".format(status))
-
-	def _session(self):
-		self._require_running()
-		return self._client_factory(self.port)
-
-	def _locate(self, client):
-		if self.address is not None and _has_magic(client, self.address):
-			return self.address
-		self.address = next((address for address in CANDIDATE_ADDRESSES if _has_magic(client, address)), None)
-		return self.address
-
-	def write(self, reading):
-		"""Write the reading and read it back. Return the block address, or None if the guest has no block."""
-		with self._session() as client:
-			address = self._locate(client)
-			if address is None:
-				return None
-			data = encode_block(reading, int(self._clock()))
-			client.write_memory(address, data)
-			if client.read_memory(address, len(data)) != data:
-				raise BatteryBlockError("the battery block at 0x{:x} did not keep the written data".format(address))
-			return address
-
-	def read(self):
-		"""Return the block address and its decoded fields, or (None, None) if the guest has no block."""
-		with self._session() as client:
-			address = self._locate(client)
-			if address is None:
-				return None, None
-			return address, decode_block(client.read_memory(address, BLOCK_SIZE))
+def sync_message(path):
+	return "battery file {} written".format(path)
 
 
 def run_sync_loop(sync, read_status, log, wait, monotonic=time.monotonic):
 	"""Poll pmset every 5 s. Write at once when the reading changes, and every 30 s otherwise.
 
-	Any error is logged and the loop goes on, so the GDB side can never stop the agent. ``wait`` sleeps
+	Any error is logged and the loop goes on, so a failed write can never stop the agent. ``wait`` sleeps
 	for the given seconds and returns True when the loop must end.
 	"""
 	last_reading = None
@@ -218,7 +135,7 @@ def _describe_flags(flags):
 def _format_block(location, block):
 	updated = datetime.datetime.fromtimestamp(block["updated_unix"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 	lines = [
-		"Battery block at {}".format(location if isinstance(location, str) else "0x{:x}".format(location)),
+		"Battery block at {}".format(location),
 		"magic: {}".format(block["magic"]),
 		"version: {}".format(block["version"]),
 		"flags: {}".format(_describe_flags(block["flags"])),
@@ -236,14 +153,11 @@ def _fake_status(arguments):
 
 
 def _write_or_fail(sync, status, output):
-	address = sync.write(battery_reading(status))
-	if address is None:
-		raise BatteryBlockError(NO_BLOCK_MESSAGE)
-	output.write(sync_message(address) + "\n")
+	output.write(sync_message(sync.write(battery_reading(status))) + "\n")
 
 
 def run_battery_command(arguments, sync, output, read_status):
-	"""Run ``wn battery``. ``sync`` is a BatterySync or a wn.battery_file.BatteryFile."""
+	"""Run ``wn battery``. ``sync`` is a wn.battery_file.BatteryFile."""
 	if arguments.battery_command == "status":
 		address, block = sync.read()
 		if address is None:

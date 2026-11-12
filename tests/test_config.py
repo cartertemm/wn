@@ -128,41 +128,24 @@ class ConfigTests(unittest.TestCase):
 		self.assertIn("utmctl_path", str(context.exception))
 
 	def test_battery_sync_defaults(self):
-		config = load_config()
-		self.assertEqual(config.gdb_port, 4446)
-		self.assertTrue(config.battery_sync)
+		self.assertTrue(load_config().battery_sync)
 
 	def test_battery_sync_settings_are_loaded(self):
-		self.write_config(json.dumps({"gdb_port": 4500, "battery_sync": False}))
-		config = load_config()
-		self.assertEqual(config.gdb_port, 4500)
-		self.assertFalse(config.battery_sync)
+		self.write_config(json.dumps({"battery_sync": False}))
+		self.assertFalse(load_config().battery_sync)
 
-	def test_battery_sync_types(self):
-		for key, value in (("gdb_port", "4446"), ("gdb_port", True), ("battery_sync", 1)):
-			with self.subTest(key=key, value=value):
-				self.write_config(json.dumps({key: value}))
-				with self.assertRaises(ConfigError) as context:
-					load_config()
-				self.assertIn(key, str(context.exception))
-
-	def test_battery_channel_defaults(self):
-		config = load_config()
-		self.assertEqual(config.battery_channel, "file")
-		self.assertIsNone(config.battery_file)
-
-	def test_battery_channel_settings_are_loaded(self):
-		self.write_config(json.dumps({"battery_channel": "gdb", "battery_file": "~/wn-battery.bin"}))
-		config = load_config()
-		self.assertEqual(config.battery_channel, "gdb")
-		self.assertEqual(config.battery_file, os.path.expanduser("~/wn-battery.bin"))
-
-	def test_battery_channel_must_be_known(self):
-		self.write_config(json.dumps({"battery_channel": "usb"}))
+	def test_battery_sync_type(self):
+		self.write_config(json.dumps({"battery_sync": 1}))
 		with self.assertRaises(ConfigError) as context:
 			load_config()
-		self.assertIn("battery_channel", str(context.exception))
-		self.assertIn("file, gdb", str(context.exception))
+		self.assertIn("battery_sync", str(context.exception))
+
+	def test_battery_file_default(self):
+		self.assertIsNone(load_config().battery_file)
+
+	def test_battery_file_is_loaded(self):
+		self.write_config(json.dumps({"battery_file": "~/wn-battery.bin"}))
+		self.assertEqual(load_config().battery_file, os.path.expanduser("~/wn-battery.bin"))
 
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")

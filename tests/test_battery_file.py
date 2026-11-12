@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 from wn.battery_file import FILE_SIZE, BatteryFile, battery_file_path, battery_writer, prepare_battery_file
-from wn.battery_sync import BLOCK_SIZE, BatteryBlockError, BatterySync, battery_reading, decode_block, encode_block, sync_message
+from wn.battery_sync import BLOCK_SIZE, BatteryBlockError, battery_reading, decode_block, encode_block, sync_message
 from wn.config import Config
 
 UPDATED_UNIX = 1789000000
@@ -118,15 +118,10 @@ class ChannelTests(unittest.TestCase):
 	def test_configured_path(self):
 		self.assertEqual(battery_file_path(Config(battery_file="/tmp/b.bin")), "/tmp/b.bin")
 
-	def test_file_channel_is_the_default(self):
-		writer = battery_writer(Config(battery_file="/tmp/b.bin"), lambda: self.fail("the file channel needs no QMP"))
+	def test_writer_uses_the_battery_file(self):
+		writer = battery_writer(Config(battery_file="/tmp/b.bin"))
 		self.assertIsInstance(writer, BatteryFile)
 		self.assertEqual(writer.path, "/tmp/b.bin")
-
-	def test_gdb_channel(self):
-		writer = battery_writer(Config(battery_channel="gdb", gdb_port=4500), lambda: "tcp:127.0.0.1:4444")
-		self.assertIsInstance(writer, BatterySync)
-		self.assertEqual((writer.port, writer.qmp_address), (4500, "tcp:127.0.0.1:4444"))
 
 
 if __name__ == "__main__":

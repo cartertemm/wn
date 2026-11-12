@@ -6,7 +6,6 @@ import os
 from typing import Optional
 
 from wn.backends.utm import DEFAULT_QMP_PORT, DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
-from wn.battery_sync import BATTERY_CHANNEL_FILE, BATTERY_CHANNELS, DEFAULT_GDB_PORT
 from wn.errors import WnError
 from wn.text_input import DEFAULT_KEY_DELAY_MS
 
@@ -30,9 +29,7 @@ class Config:
 	keygrab_keycodes: Optional[str] = None
 	keygrab_send_repeats: bool = True
 	screen_size: Optional[str] = None
-	gdb_port: int = DEFAULT_GDB_PORT
 	battery_sync: bool = True
-	battery_channel: str = BATTERY_CHANNEL_FILE
 	battery_file: Optional[str] = None
 
 
@@ -48,13 +45,8 @@ FIELD_TYPES = {
 	"keygrab_keycodes": (str, type(None)),
 	"keygrab_send_repeats": (bool,),
 	"screen_size": (str, type(None)),
-	"gdb_port": (int,),
 	"battery_sync": (bool,),
-	"battery_channel": (str,),
 	"battery_file": (str, type(None)),
-}
-CHOICE_FIELDS = {
-	"battery_channel": BATTERY_CHANNELS,
 }
 PATH_FIELDS = ("utmctl_path", "qmp_socket", "keygrab_binary", "keygrab_keycodes", "battery_file")
 
@@ -82,8 +74,6 @@ def _validate(path, values):
 		allowed_types = FIELD_TYPES[key]
 		if not isinstance(value, allowed_types) or (isinstance(value, bool) and bool not in allowed_types):
 			raise ConfigError("{}: setting '{}' has the wrong type".format(path, key))
-		if key in CHOICE_FIELDS and value not in CHOICE_FIELDS[key]:
-			raise ConfigError("{}: setting '{}' must be one of: {}".format(path, key, ", ".join(CHOICE_FIELDS[key])))
 
 
 def load_config(path=None):
