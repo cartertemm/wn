@@ -4,13 +4,15 @@ import plistlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from wn.utm_config import (
 	CONFIGURATION_VERSION,
 	DEFAULT_QEMU_IMG_PATH,
 	UTMConfigError,
-	battery_file_in_bundle,
+	battery_file_for_bundle,
 	build_config,
+	default_battery_file,
 	config_plist_bytes,
 	create_disk_image,
 	detach_drives,
@@ -239,6 +241,7 @@ class ConfigContentTests(unittest.TestCase):
 
 
 BATTERY_FILE = "/vm/Windows.utm/Data/wn-battery.bin"
+GROUP_CONTAINER_FILE = "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-Win11.bin"
 
 
 def battery_arguments(memory_mib, path):
@@ -282,16 +285,32 @@ class BatteryArgumentTests(unittest.TestCase):
 					build_config(options(battery=True, battery_file=path))
 				self.assertIn("battery_file", str(context.exception))
 
-	def test_battery_file_in_bundle(self):
-		self.assertEqual(battery_file_in_bundle("/vm/Windows.utm"), BATTERY_FILE)
+	def test_default_battery_file_is_in_the_utm_group_container(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			self.assertEqual(default_battery_file("Win11"), GROUP_CONTAINER_FILE)
 
-	def test_write_bundle_puts_the_file_in_data(self):
+	def test_battery_file_for_bundle_uses_the_bundle_name(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			self.assertEqual(battery_file_for_bundle("/vm/Win11.utm"), GROUP_CONTAINER_FILE)
+
+	def test_group_container_file_gets_a_bare_name(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			arguments = arguments_of(build_config(options(battery=True, battery_file=GROUP_CONTAINER_FILE)))
+		self.assertTrue(contains_sequence(arguments, battery_arguments(8192, "wn-battery-Win11.bin")))
+
+	def test_group_container_file_name_without_spaces(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			with self.assertRaises(UTMConfigError) as context:
+				build_config(options(battery=True, battery_file=default_battery_file("My VM")))
+		self.assertIn("battery_file", str(context.exception))
+
+	def test_write_bundle_puts_the_file_in_the_group_container(self):
 		directory = tempfile.TemporaryDirectory()
 		self.addCleanup(directory.cleanup)
 		bundle = write_bundle(directory.name, options(name="Win11", battery=True))
 		with open(os.path.join(bundle, "config.plist"), "rb") as plist_file:
 			arguments = arguments_of(plistlib.load(plist_file))
-		self.assertTrue(contains_sequence(arguments, battery_arguments(8192, os.path.join(bundle, "Data", "wn-battery.bin"))))
+		self.assertTrue(contains_sequence(arguments, battery_arguments(8192, "wn-battery-Win11.bin")))
 
 
 class ConfigValidationTests(unittest.TestCase):
@@ -430,13 +449,13 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 		self.assertEqual(new_arguments[-2:], ["-device", "virtio-keyboard-pci,id=vkbd"])
 		self.assertEqual(arguments_of(self.read_config()), new_arguments)
 
-	def test_battery_uses_the_bundle_memory_size_and_data_folder(self):
+	def test_battery_uses_the_bundle_memory_size_and_group_container_file(self):
 		config = self.read_config()
 		config["System"]["MemorySize"] = 6144
 		with open(self.plist_path, "wb") as plist_file:
 			plistlib.dump(config, plist_file)
 		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True})
-		expected = battery_arguments(6144, os.path.join(self.bundle, "Data", "wn-battery.bin"))
+		expected = battery_arguments(6144, "wn-battery-Win11.bin")
 		self.assertTrue(contains_sequence(new_arguments, expected))
 		self.assertEqual(arguments_of(self.read_config()), new_arguments)
 

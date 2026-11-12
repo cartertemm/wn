@@ -174,30 +174,103 @@ the wn-tools icon.
 ### Native battery
 
 With the firmware battery driver installed in the VM, Windows shows the Mac's
-battery in its own battery icon and in Settings. The driver is an ACPI table
-that reads a small data block in guest memory. `wn agent` writes the Mac's
-battery status into that block through QEMU's GDB stub.
+battery in its own battery icon, in Settings, in Device Manager under
+Batteries, and to NVDA. The driver is a UEFI driver that adds an ACPI battery
+table. The table reads a small data block from a file on the Mac, which QEMU
+maps into the guest as an NVDIMM. `wn agent` writes the Mac's battery status
+into that file.
 
-This needs two things:
+This needs three things, each set up once:
 
-- The firmware battery driver in the VM.
-- The extra QEMU argument `-gdb tcp:127.0.0.1:4446` on the VM, so the agent
-  can reach the GDB stub. The stub listens only on the Mac.
-- The QMP port that `wn setup` already adds, so the agent can check the VM
-  state.
+1. The driver, signed with your own Secure Boot key.
+2. That key's certificate in the VM's Secure Boot allowed list (`db`).
+3. The NVDIMM on the VM, added with `wn update-vm-args --battery`.
 
-`wn agent` checks the battery every 5 seconds. It writes the block at once
-when the status changes, and every 30 seconds otherwise. Each write pauses
-the VM for less than a millisecond. If the VM or the block is not there, the
-agent logs it and tries again every 30 seconds. The web server for wn-tools
-keeps working either way. `wn agent --once` also writes the block once and
-says whether it found it.
+**Sign the driver.** Install `osslsigncode` and create a key pair:
 
-The agent writes only while the VM runs. QEMU pauses the VM while the agent
-is connected to the GDB stub, and resumes it when the agent disconnects. So
-before each write, the agent asks QMP (on `qmp_port`, or `qmp_socket` when
-set) for the VM state. It skips the write when the VM is paused, not started
-yet, or QMP does not answer, so it never resumes a VM that you paused.
+```sh
+brew install osslsigncode
+mkdir -p efi/keys
+openssl req -new -x509 -newkey rsa:2048 -nodes -subj "/CN=wn Secure Boot/" \
+	-keyout efi/keys/wn-sb.key -out efi/keys/wn-sb.crt -days 3650
+openssl x509 -in efi/keys/wn-sb.crt -outform DER -out efi/keys/wn-sb.cer
+```
+
+Git ignores `efi/keys/*.key`. Keep the private key safe: anything signed with
+it runs in your VM with Secure Boot on. Build and sign the driver:
+
+```sh
+(cd efi/wn-acpi && cargo build --release)
+efi/sign.sh
+```
+
+`efi/sign.sh` writes `efi/wn-acpi/wn-acpi-signed.efi` and checks the
+signature.
+
+**Copy the driver and certificate to the VM.** With the VM running:
+
+```sh
+U=/Applications/UTM.app/Contents/MacOS/utmctl
+$U file push Windows 'C:\wn-sb.cer' < efi/keys/wn-sb.cer
+$U file push Windows 'C:\wn-acpi.efi' < efi/wn-acpi/wn-acpi-signed.efi
+```
+
+Then, in an administrator Command Prompt in Windows:
+
+```bat
+mountvol S: /S
+mkdir S:\EFI\wn
+copy /y C:\wn-sb.cer S:\EFI\wn\wn-sb.cer
+copy /y C:\wn-acpi.efi S:\EFI\wn\wn-acpi.efi
+mountvol S: /D
+```
+
+**Register the driver with the firmware.** Do this once, from the UEFI
+shell. Start the VM and press Esc until the firmware menu opens
+(`python3 -m wn key esc` works too). Choose Boot Manager > EFI Internal
+Shell, press Esc to skip `startup.nsh`, and run:
+
+```
+bcfg driver add 0 FS0:\EFI\wn\wn-acpi.efi "wn-acpi"
+reset
+```
+
+**Enroll the certificate.** Open the firmware menu again and go to Device
+Manager > Secure Boot Configuration:
+
+1. Set Secure Boot Mode to Custom Mode.
+2. Open Custom Secure Boot Options > DB Options > Enroll Signature >
+   Enroll Signature Using File.
+3. Pick the EFI system partition, then `EFI` > `wn` > `wn-sb.cer`. In the
+   file list, a blank line sits above the folders, so press Down once more
+   than you expect.
+4. Choose Commit Changes and Exit. The Signature GUID field can stay empty.
+5. Press Esc back to the front page and choose Reset.
+
+Leave PK and KEK alone, and leave Secure Boot on. Secure Boot Mode shows
+Standard Mode again when you come back. The new `db` entry stays. DB Options >
+Delete Signature lists it, with an owner GUID of all zeros, under the
+Microsoft entries.
+
+**Add the NVDIMM.** Stop the VM first, then:
+
+```sh
+python3 -m wn update-vm-args --battery --audio-args "<your audio arguments>"
+```
+
+`update-vm-args` rebuilds the whole AdditionalArguments list, so pass your
+`--audio-args` again or they are lost. It creates the battery file
+`~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<vm_name>.bin`
+with a full battery on AC power. UTM's sandbox lets QEMU open files only in
+that folder, so QEMU gets the bare file name. Quit UTM and open it again so
+it reads the new arguments, then start the VM. Run the command again after
+you change the VM's memory size in UTM.
+
+`wn agent` checks the battery every 5 seconds. It writes the file at once
+when the status changes, and every 30 seconds otherwise. Windows sees each
+write within about a second. If the file is missing, the agent logs it and
+tries again. The web server for wn-tools keeps working either way.
+`wn agent --once` also writes the file once.
 
 Use `wn battery` to check the block by hand:
 
@@ -211,6 +284,13 @@ python3 -m wn battery set --percent 20 --discharging
 battery status once. `set` writes a fake status once, so you can watch
 Windows react. It takes `--charging`, `--discharging` (the default), or
 `--ac`. A running `wn agent` writes the real status again within 30 seconds.
+
+Windows also finds QEMU's NVDIMM bus. Device Manager shows "Storage Class
+Memory Bus" under System devices with code 10 (cannot start). It does not
+affect the battery, and no new disk appears in Disk Management.
+
+To remove the battery, stop the VM and run `wn update-vm-args` without
+`--battery` (with your usual `--audio-args`).
 
 ## Configuration
 
@@ -231,8 +311,10 @@ Windows react. It takes `--charging`, `--discharging` (the default), or
 | `keygrab_send_repeats` | `true` | Send auto-repeat key presses in `grab` mode. |
 | `agent_bind` | none | Address for `wn agent` to listen on. By default it finds the UTM shared network address. |
 | `agent_port` | `47100` | Port for `wn agent`. |
-| `gdb_port` | `4446` | Port of the VM's GDB stub on `127.0.0.1`, for the native battery. |
 | `battery_sync` | `true` | Write the Mac's battery status to the native battery block from `wn agent`. |
+| `battery_channel` | `file` | How the agent writes the battery block: `file` (the NVDIMM file) or `gdb` (QEMU's GDB stub, older). |
+| `battery_file` | `~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<vm_name>.bin` | Battery file that QEMU maps into the guest. UTM's QEMU can open it only in that folder. |
+| `gdb_port` | `4446` | Port of the VM's GDB stub on `127.0.0.1`, for the `gdb` battery channel. |
 
 ## Advanced
 

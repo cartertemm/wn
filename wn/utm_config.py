@@ -14,7 +14,8 @@ BUNDLE_SUFFIX = ".utm"
 CONFIG_FILE_NAME = "config.plist"
 DATA_DIRECTORY_NAME = "Data"
 DEFAULT_BUNDLE_DIRECTORY = os.path.join("~", "Library", "Containers", "com.utmapp.UTM", "Data", "Documents")
-BATTERY_FILE_NAME = "wn-battery.bin"
+UTM_GROUP_CONTAINER = os.path.join("~", "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM")
+BATTERY_FILE_NAME = "wn-battery-{}.bin"
 BATTERY_FILE_SIZE_MIB = 1
 BATTERY_MEMDEV_ID = "wnbattery"
 BATTERY_DEVICE_ID = "wnbatterynv"
@@ -95,7 +96,7 @@ def _resolve_argument_options(options):
 	if resolved["battery"]:
 		if not resolved["battery_file"]:
 			raise UTMConfigError("the battery option needs battery_file")
-		if any(character in resolved["battery_file"] for character in BATTERY_FILE_FORBIDDEN):
+		if any(character in _qemu_battery_path(resolved["battery_file"]) for character in BATTERY_FILE_FORBIDDEN):
 			raise UTMConfigError("battery_file must not contain spaces or commas: {}".format(resolved["battery_file"]))
 	resolved["qmp_session_port"] = session_port(resolved["qmp_port"], resolved["qmp_session_port"])
 	if resolved["qmp_session_port"] == resolved["qmp_port"]:
@@ -114,8 +115,23 @@ def _qmp_server(port):
 	return ["-qmp", "tcp:{}:{},server=on,wait=off".format(QMP_HOST, port)]
 
 
-def battery_file_in_bundle(bundle_path):
-	return os.path.join(bundle_path, DATA_DIRECTORY_NAME, BATTERY_FILE_NAME)
+def default_battery_file(vm_name):
+	"""Return the VM's battery file in the UTM group container, the only folder UTM's sandboxed QEMU may open."""
+	return os.path.join(os.path.expanduser(UTM_GROUP_CONTAINER), BATTERY_FILE_NAME.format(vm_name))
+
+
+def battery_file_for_bundle(bundle_path):
+	name = os.path.basename(os.path.normpath(bundle_path))
+	if name.endswith(BUNDLE_SUFFIX):
+		name = name[:-len(BUNDLE_SUFFIX)]
+	return default_battery_file(name)
+
+
+def _qemu_battery_path(battery_file):
+	"""QEMU runs in the UTM group container, so a file there gets a bare name, which avoids the space in the path."""
+	if os.path.dirname(battery_file) == os.path.expanduser(UTM_GROUP_CONTAINER):
+		return os.path.basename(battery_file)
+	return battery_file
 
 
 def _battery_arguments(options):
@@ -123,7 +139,7 @@ def _battery_arguments(options):
 	return [
 		"-machine", "nvdimm=on",
 		"-m", "maxmem={}M,slots=1".format(options["memory_mib"] + BATTERY_FILE_SIZE_MIB),
-		"-object", "memory-backend-file,id={},share=on,mem-path={},size={}M".format(BATTERY_MEMDEV_ID, options["battery_file"], BATTERY_FILE_SIZE_MIB),
+		"-object", "memory-backend-file,id={},share=on,mem-path={},size={}M".format(BATTERY_MEMDEV_ID, _qemu_battery_path(options["battery_file"]), BATTERY_FILE_SIZE_MIB),
 		"-device", "nvdimm,id={},memdev={}".format(BATTERY_DEVICE_ID, BATTERY_MEMDEV_ID),
 	]
 
@@ -262,7 +278,7 @@ def write_bundle(path, options):
 	"""
 	bundle = os.path.join(path, options.get("name", "") + BUNDLE_SUFFIX)
 	if options.get("battery") and not options.get("battery_file"):
-		options = dict(options, battery_file=battery_file_in_bundle(bundle))
+		options = dict(options, battery_file=battery_file_for_bundle(bundle))
 	config = build_config(options)
 	config_path = os.path.join(bundle, CONFIG_FILE_NAME)
 	if os.path.exists(config_path):
@@ -299,10 +315,10 @@ def update_additional_arguments(bundle_path, options):
 	``options`` takes the same argument options as ``build_config``, such as
 	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, ``battery``, ``battery_file``, and
 	``extra_args``. With ``battery``, the memory size comes from the bundle, and ``battery_file`` defaults to
-	Data/wn-battery.bin in the bundle. Nothing else in config.plist changes.
+	wn-battery-<name>.bin in the UTM group container. Nothing else in config.plist changes.
 	"""
 	if options.get("battery") and not options.get("battery_file"):
-		options = dict(options, battery_file=battery_file_in_bundle(bundle_path))
+		options = dict(options, battery_file=battery_file_for_bundle(bundle_path))
 	resolved = _resolve_argument_options(options)
 	arguments = []
 

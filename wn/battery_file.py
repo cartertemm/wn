@@ -21,7 +21,7 @@ from wn.battery_sync import (
 	decode_block,
 	encode_block,
 )
-from wn.utm_config import BATTERY_FILE_SIZE_MIB, BUNDLE_SUFFIX, DEFAULT_BUNDLE_DIRECTORY, battery_file_in_bundle
+from wn.utm_config import BATTERY_FILE_SIZE_MIB, default_battery_file
 
 FILE_SIZE = BATTERY_FILE_SIZE_MIB << 20
 UPDATED_OFFSET = 32
@@ -30,11 +30,8 @@ DEFAULT_READING = BatteryReading(FLAG_PRESENT | FLAG_AC_ONLINE, MAX_PERCENT, 0, 
 
 
 def battery_file_path(config):
-	"""Return ``battery_file`` from the config, or Data/wn-battery.bin in the VM's UTM bundle."""
-	if config.battery_file:
-		return config.battery_file
-	bundle = os.path.join(os.path.expanduser(DEFAULT_BUNDLE_DIRECTORY), config.vm_name + BUNDLE_SUFFIX)
-	return battery_file_in_bundle(bundle)
+	"""Return ``battery_file`` from the config, or wn-battery-<vm_name>.bin in the UTM group container."""
+	return config.battery_file or default_battery_file(config.vm_name)
 
 
 def battery_writer(config, qmp_address):

@@ -29,7 +29,7 @@ from wn.utm_config import (
 	DEFAULT_BUNDLE_DIRECTORY,
 	DEFAULT_OPTIONS,
 	DEFAULT_QEMU_IMG_PATH,
-	battery_file_in_bundle,
+	battery_file_for_bundle,
 	create_disk_image,
 	random_mac_address,
 	update_additional_arguments,
@@ -390,7 +390,7 @@ def run_update_vm_args(context):
 		"battery_file": config.battery_file,
 	})
 	if arguments.battery:
-		battery_file = config.battery_file or battery_file_in_bundle(bundle)
+		battery_file = config.battery_file or battery_file_for_bundle(bundle)
 		try:
 			prepare_battery_file(battery_file)
 		except WnError as error:

@@ -548,14 +548,19 @@ class UpdateVMArgsTests(CLITestCase):
 		with open(self.plist_path, "wb") as plist_file:
 			plistlib.dump(config, plist_file)
 		os.makedirs(os.path.join(self.bundle, "Data"))
+		os.makedirs(self.group_container)
+
+	@property
+	def group_container(self):
+		return os.path.join(self.home.name, "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM")
 
 	def test_battery_adds_the_nvdimm_and_prepares_the_file(self):
 		self.add_memory_size(8192)
 		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")
 		self.assertEqual(exit_code, 0, stderr)
-		path = os.path.join(self.bundle, "Data", "wn-battery.bin")
+		path = os.path.join(self.group_container, "wn-battery-Windows.bin")
 		arguments = self.read_plist()["QEMU"]["AdditionalArguments"]
-		self.assertIn("memory-backend-file,id=wnbattery,share=on,mem-path={},size=1M".format(path), arguments)
+		self.assertIn("memory-backend-file,id=wnbattery,share=on,mem-path=wn-battery-Windows.bin,size=1M", arguments)
 		self.assertIn("maxmem=8193M,slots=1", arguments)
 		with open(path, "rb") as data_file:
 			self.assertEqual(data_file.read(4), b"WNBT")
@@ -563,7 +568,7 @@ class UpdateVMArgsTests(CLITestCase):
 
 	def test_battery_keeps_an_existing_file(self):
 		self.add_memory_size(8192)
-		path = os.path.join(self.bundle, "Data", "wn-battery.bin")
+		path = os.path.join(self.group_container, "wn-battery-Windows.bin")
 		with open(path, "wb") as data_file:
 			data_file.write(b"keep")
 		self.assertEqual(self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")[0], 0)

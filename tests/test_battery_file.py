@@ -105,15 +105,15 @@ class BatteryFileTests(unittest.TestCase):
 
 
 class ChannelTests(unittest.TestCase):
-	def test_default_path_is_in_the_vm_bundle(self):
+	def test_default_path_is_in_the_utm_group_container(self):
 		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
 			path = battery_file_path(Config())
-		self.assertEqual(path, "/home/me/Library/Containers/com.utmapp.UTM/Data/Documents/Windows.utm/Data/wn-battery.bin")
+		self.assertEqual(path, "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-Windows.bin")
 
 	def test_default_path_follows_vm_name(self):
 		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
 			path = battery_file_path(Config(vm_name="Win11"))
-		self.assertEqual(path, "/home/me/Library/Containers/com.utmapp.UTM/Data/Documents/Win11.utm/Data/wn-battery.bin")
+		self.assertEqual(path, "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-Win11.bin")
 
 	def test_configured_path(self):
 		self.assertEqual(battery_file_path(Config(battery_file="/tmp/b.bin")), "/tmp/b.bin")

@@ -392,7 +392,7 @@ class AgentCommandTests(unittest.TestCase):
 		self.assertEqual(serve.call_args.args[:2], (None, 47100))
 		writer = start.call_args.args[0]
 		self.assertIsInstance(writer, BatteryFile)
-		self.assertEqual(writer.path, os.path.join(self.home.name, "Library", "Containers", "com.utmapp.UTM", "Data", "Documents", "Windows.utm", "Data", "wn-battery.bin"))
+		self.assertEqual(writer.path, os.path.join(self.home.name, "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM", "wn-battery-Windows.bin"))
 
 	def test_serve_uses_config(self):
 		self.write_config({"agent_bind": "192.168.64.1", "agent_port": 47200, "battery_channel": "gdb", "gdb_port": 4500, "qmp_port": 4600})

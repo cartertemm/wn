@@ -4,7 +4,8 @@ import os
 import re
 import shutil
 
-UTM_GROUP_CONTAINER = os.path.join("~", "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM")
+from wn.utm_config import UTM_GROUP_CONTAINER
+
 PPM_HEADER_PATTERN = re.compile(rb"P6\s+(\d+)\s+(\d+)\s+\d+\s")
 BYTES_PER_PIXEL = 3
 SAMPLE_STEP_PIXELS = 7
