@@ -194,7 +194,7 @@ efi/sign.sh
 ```
 
 `efi/sign.sh` writes `efi/dist/wn-acpi.efi` and `efi/dist/wn-sb.cer`, and the
-next `wn setup` enrolls that certificate. Git ignores `efi/keys/*.key`. Keep
+next `wn setup` enrolls that certificate. Git ignores the `efi/keys` folder. Keep
 the private key safe: anything signed with it runs in your VM with Secure Boot
 on.
 

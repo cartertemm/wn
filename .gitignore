@@ -14,4 +14,4 @@ vm/
 keygrab/bin/
 tools/latency/bin/
 efi/wn-acpi/target/
-efi/keys/*.key
+efi/keys/

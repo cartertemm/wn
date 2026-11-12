@@ -287,7 +287,7 @@ class UtmTemplateTests(unittest.TestCase):
 
 	def test_enroll_into_template(self):
 		flash = read_flash(UTM_SECURE_VARS)
-		with open(os.path.join(REPO, "efi", "keys", "wn-sb.cer"), "rb") as cert_file:
+		with open(os.path.join(REPO, "efi", "dist", "wn-sb.cer"), "rb") as cert_file:
 			cert = cert_file.read()
 		before = find(flash, "db", EFI_IMAGE_SECURITY_DATABASE_GUID).data
 		after = find(enroll_db_cert(flash, cert, WN_SIGNATURE_OWNER_GUID), "db", EFI_IMAGE_SECURITY_DATABASE_GUID).data
