@@ -7,12 +7,15 @@ import shlex
 import subprocess
 import uuid
 
+from wn.efivars import EfiVarsError, make_vars_with_cert
 from wn.errors import WnError
 
 CONFIGURATION_VERSION = 4
 BUNDLE_SUFFIX = ".utm"
 CONFIG_FILE_NAME = "config.plist"
 DATA_DIRECTORY_NAME = "Data"
+EFI_VARS_FILE_NAME = "efi_vars.fd"
+SECURE_VARS_TEMPLATE = "/Applications/UTM.app/Contents/Resources/qemu/edk2-arm-secure-vars.fd"
 DEFAULT_BUNDLE_DIRECTORY = os.path.join("~", "Library", "Containers", "com.utmapp.UTM", "Data", "Documents")
 UTM_GROUP_CONTAINER = os.path.join("~", "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM")
 BATTERY_FILE_NAME = "wn-battery-{}.bin"
@@ -53,6 +56,7 @@ DEFAULT_OPTIONS = {
 	"battery_file": None,
 	"tpm": True,
 	"uefi": True,
+	"secure_boot_cert": None,
 }
 
 
@@ -108,7 +112,10 @@ def _resolve_options(options):
 	missing = [key for key in REQUIRED_OPTIONS if not options.get(key)]
 	if missing:
 		raise UTMConfigError("missing VM options: {}".format(", ".join(missing)))
-	return _resolve_argument_options(options)
+	resolved = _resolve_argument_options(options)
+	if resolved["secure_boot_cert"] and not (resolved["tpm"] and resolved["uefi"]):
+		raise UTMConfigError("secure_boot_cert needs tpm and uefi, because UTM turns on Secure Boot only for UEFI VMs with a TPM")
+	return resolved
 
 
 def _qmp_server(port):
@@ -274,7 +281,9 @@ def config_plist_bytes(config):
 def write_bundle(path, options):
 	"""Create ``<path>/<name>.utm`` with config.plist and an empty Data directory. Return the bundle path.
 
-	The caller places the disk image and ISO in Data afterwards.
+	With ``secure_boot_cert`` (a DER certificate file), Data also gets efi_vars.fd made from UTM's Secure Boot
+	template with the certificate added to db. UTM copies its template only when efi_vars.fd is missing, so
+	this file is the one the VM uses. The caller places the disk image and ISO in Data afterwards.
 	"""
 	bundle = os.path.join(path, options.get("name", "") + BUNDLE_SUFFIX)
 	if options.get("battery") and not options.get("battery_file"):
@@ -285,11 +294,27 @@ def write_bundle(path, options):
 		raise UTMConfigError("{} already exists. Remove it first to write a new configuration".format(config_path))
 	try:
 		os.makedirs(os.path.join(bundle, DATA_DIRECTORY_NAME), exist_ok=True)
+	except OSError as error:
+		raise UTMConfigError("cannot write UTM bundle {}: {}".format(bundle, error)) from None
+	if options.get("secure_boot_cert"):
+		prepare_vars_file(bundle, options["secure_boot_cert"])
+	try:
 		with open(config_path, "wb") as config_file:
 			config_file.write(config_plist_bytes(config))
 	except OSError as error:
 		raise UTMConfigError("cannot write UTM bundle {}: {}".format(bundle, error)) from None
 	return bundle
+
+
+def prepare_vars_file(bundle_path, cert_path):
+	"""Write the bundle's Data/efi_vars.fd from UTM's Secure Boot template with ``cert_path`` enrolled in db."""
+	vars_path = os.path.join(bundle_path, DATA_DIRECTORY_NAME, EFI_VARS_FILE_NAME)
+	try:
+		make_vars_with_cert(SECURE_VARS_TEMPLATE, cert_path, vars_path)
+	except FileExistsError:
+		raise UTMConfigError("{} already exists. Remove it first to write new UEFI variables".format(vars_path)) from None
+	except (OSError, EfiVarsError) as error:
+		raise UTMConfigError("cannot write {}: {}".format(vars_path, error)) from None
 
 
 def _edit_config(bundle_path, edit):
