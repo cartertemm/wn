@@ -10,6 +10,7 @@ import sys
 import time
 from xml.sax.saxutils import escape
 
+from wn.appbundle import build_app, executable_path, remove_app
 from wn.backend import create_backend
 from wn.battery_file import BatteryFile, battery_file_path, battery_writer
 from wn.battery_sync import BATTERY_CHANNEL_FILE, LOG_PREFIX, battery_reading, run_sync_loop, sync_message
@@ -135,6 +136,7 @@ def render_launch_agent(python, working_directory):
 		text = template_file.read()
 	for placeholder, value in (
 		("@LABEL@", LAUNCHD_LABEL),
+		("@AGENT@", executable_path()),
 		("@PYTHON@", python),
 		("@WORKING_DIRECTORY@", working_directory),
 		("@LOG@", os.path.expanduser(LOG_PATH)),
@@ -144,12 +146,16 @@ def render_launch_agent(python, working_directory):
 
 
 def install_launch_agent(python, working_directory, run=None, uid=None):
-	"""Write the launch agent plist and load it, so the agent starts at every login. Return the plist path."""
+	"""Build the agent app, write the launch agent plist that runs it, and load it. Return the plist path.
+
+	The plist starts Python through the app's stub, so macOS asks once whether wn-agent may use UTM's data.
+	"""
 	run = run or subprocess.run
 	uid = os.getuid() if uid is None else uid
 	path = launch_agent_path()
 	if os.path.exists(path):
 		_launchctl(run, "bootout", "gui/{}/{}".format(uid, LAUNCHD_LABEL))
+	build_app(run)
 	os.makedirs(os.path.dirname(path), exist_ok=True)
 	os.makedirs(os.path.dirname(os.path.expanduser(LOG_PATH)), exist_ok=True)
 	with open(path, "w") as plist_file:
@@ -167,6 +173,7 @@ def uninstall_launch_agent(run=None, uid=None):
 		return False
 	_launchctl(run, "bootout", "gui/{}/{}".format(uid, LAUNCHD_LABEL))
 	os.remove(path)
+	remove_app()
 	return True
 
 

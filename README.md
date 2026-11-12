@@ -67,7 +67,8 @@ Then it works on its own:
    virtio-gpu, and starts it again.
 6. Writes `~/.config/wn/config.json` if it does not exist.
 7. Installs and starts `wn agent`, which feeds the
-   [native battery](#native-battery).
+   [native battery](#native-battery). macOS asks whether "wn-agent" may
+   access data from other apps. Click Allow.
 
 After the downloads, this takes about 11 minutes. A UTM window opens while
 Windows installs. Leave it alone until `wn` prints `Done` and the IP address.
@@ -129,10 +130,18 @@ works on the first desktop with Secure Boot on:
 
 To make a VM without the battery, pass `--no-battery` to `wn setup`.
 
-Known issue: macOS blocks the launch agent from writing the battery file,
-because the file is in UTM's app data folder. `wn-agent.log` then shows
-"Operation not permitted", and Windows keeps the last status written. The
-`wn battery` commands work from Terminal.
+The battery file is in UTM's app data folder, which macOS protects. So the
+launch agent runs Python through a small app,
+`~/Library/Application Support/wn/wn-agent.app`, and macOS asks you about that
+app by name: "wn-agent" would like to access data from other apps. Click
+Allow. If the repository is in your Documents folder, macOS also asks for
+access to Documents once.
+
+macOS can ask again when the agent starts, for example after you log in. To
+stop the question, add `wn-agent.app` to System Settings > Privacy & Security
+> Full Disk Access. Until you allow access, `wn-agent.log` shows "Operation not
+permitted" and Windows keeps the last status written. The `wn battery`
+commands work from Terminal.
 
 For an existing VM that has the driver and the certificate, stop the VM, then
 add the NVDIMM and install the agent:

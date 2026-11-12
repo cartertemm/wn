@@ -6,6 +6,7 @@
 	<string>@LABEL@</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>@AGENT@</string>
 		<string>@PYTHON@</string>
 		<string>-m</string>
 		<string>wn</string>

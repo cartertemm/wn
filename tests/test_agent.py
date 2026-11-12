@@ -7,6 +7,7 @@ import signal
 import subprocess
 import tempfile
 import socket
+import sys
 import time
 import unittest
 from unittest import mock
@@ -25,6 +26,7 @@ from wn.agent import (
 	run_agent_command,
 	uninstall_launch_agent,
 )
+from wn.appbundle import AppBundleError, app_path, executable_path
 from wn.battery_file import BatteryFile
 from wn.battery_sync import BLOCK_SIZE, BatterySync, decode_block
 from wn.cli import main
@@ -199,12 +201,24 @@ class LaunchAgentTests(unittest.TestCase):
 		with open(self.path, "rb") as plist_file:
 			plist = plistlib.load(plist_file)
 		self.assertEqual(plist["Label"], LAUNCHD_LABEL)
-		self.assertEqual(plist["ProgramArguments"], ["/usr/bin/python3", "-m", "wn", "agent", "start", "--foreground"])
+		self.assertEqual(plist["ProgramArguments"], [executable_path(), "/usr/bin/python3", "-m", "wn", "agent", "start", "--foreground"])
 		self.assertEqual(plist["WorkingDirectory"], "/repo dir")
 		self.assertTrue(plist["RunAtLoad"])
 		self.assertTrue(plist["KeepAlive"])
 		self.assertEqual(plist["StandardErrorPath"], os.path.join(self.home.name, "Library", "Logs", "wn-agent.log"))
 		self.assertEqual(self.run.call_args_list[-1], mock.call(["/bin/launchctl", "bootstrap", "gui/501", self.path], capture_output=True, text=True))
+
+	def test_install_builds_the_app_before_loading_it(self):
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		commands = [call.args[0][0] for call in self.run.call_args_list]
+		self.assertEqual(commands, ["/usr/bin/clang", "/usr/bin/codesign", "/bin/launchctl"])
+		self.assertTrue(os.path.isfile(os.path.join(app_path(), "Contents", "Info.plist")))
+
+	def test_install_reports_a_build_failure_without_loading(self):
+		self.run.return_value = subprocess.CompletedProcess([], 1, stdout="", stderr="no developer tools")
+		with self.assertRaises(AppBundleError):
+			install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		self.assertFalse(os.path.exists(self.path))
 
 	def test_install_escapes_xml(self):
 		install_launch_agent("/usr/bin/python3", "/a&b<c>", run=self.run, uid=501)
@@ -214,11 +228,11 @@ class LaunchAgentTests(unittest.TestCase):
 	def test_install_replaces_a_loaded_agent(self):
 		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
 		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
-		commands = [call.args[0][1] for call in self.run.call_args_list]
+		commands = [call.args[0][1] for call in self.run.call_args_list if call.args[0][0] == "/bin/launchctl"]
 		self.assertEqual(commands, ["bootstrap", "bootout", "bootstrap"])
 
 	def test_install_reports_launchctl_failure(self):
-		self.run.return_value = subprocess.CompletedProcess([], 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")
+		self.run.side_effect = [completed(), completed(), subprocess.CompletedProcess([], 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")]
 		with self.assertRaises(AgentError) as caught:
 			install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
 		self.assertIn("Input/output error", str(caught.exception))
@@ -228,6 +242,7 @@ class LaunchAgentTests(unittest.TestCase):
 		self.run.reset_mock()
 		self.assertTrue(uninstall_launch_agent(run=self.run, uid=501))
 		self.assertFalse(os.path.exists(self.path))
+		self.assertFalse(os.path.exists(app_path()))
 		self.run.assert_called_once_with(["/bin/launchctl", "bootout", "gui/501/" + LAUNCHD_LABEL], capture_output=True, text=True)
 
 	def test_uninstall_when_absent(self):
@@ -324,6 +339,7 @@ class AgentCommandTests(unittest.TestCase):
 		with open(launch_agent_path(), "rb") as plist_file:
 			plist = plistlib.load(plist_file)
 		self.assertEqual(plist["WorkingDirectory"], os.path.dirname(os.path.dirname(os.path.abspath(agent.__file__))))
+		self.assertEqual(plist["ProgramArguments"][1], sys.executable)
 		self.assertEqual(run.call_args.args[0][:2], ["/bin/launchctl", "bootstrap"])
 		self.assertIn(launch_agent_path(), stdout)
 
