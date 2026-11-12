@@ -14,6 +14,9 @@ from wn.gdbstub import GdbStubClient, GdbStubError
 from wn.qmp import qmp_client_for
 
 DEFAULT_GDB_PORT = 4446
+BATTERY_CHANNEL_FILE = "file"
+BATTERY_CHANNEL_GDB = "gdb"
+BATTERY_CHANNELS = (BATTERY_CHANNEL_FILE, BATTERY_CHANNEL_GDB)
 BLOCK_BASE_ADDRESS = 0x50000000
 CANDIDATE_SPACING = 0x100000
 CANDIDATE_COUNT = 16
@@ -108,10 +111,13 @@ def decode_block(data):
 	}
 
 
-def sync_message(address):
-	if address is None:
+def sync_message(location):
+	"""Describe a write result: a guest address from the GDB channel, or a path from the file channel."""
+	if location is None:
 		return NO_BLOCK_MESSAGE
-	return "battery block found at 0x{:x} and written".format(address)
+	if isinstance(location, str):
+		return "battery file {} written".format(location)
+	return "battery block found at 0x{:x} and written".format(location)
 
 
 def _has_magic(client, address):
@@ -209,10 +215,10 @@ def _describe_flags(flags):
 	return "0x{:x} ({})".format(flags, ", ".join(names) or "none")
 
 
-def _format_block(address, block):
+def _format_block(location, block):
 	updated = datetime.datetime.fromtimestamp(block["updated_unix"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 	lines = [
-		"Battery block at 0x{:x}".format(address),
+		"Battery block at {}".format(location if isinstance(location, str) else "0x{:x}".format(location)),
 		"magic: {}".format(block["magic"]),
 		"version: {}".format(block["version"]),
 		"flags: {}".format(_describe_flags(block["flags"])),
@@ -236,8 +242,8 @@ def _write_or_fail(sync, status, output):
 	output.write(sync_message(address) + "\n")
 
 
-def run_battery_command(arguments, config, qmp_address, output, read_status):
-	sync = BatterySync(config.gdb_port, qmp_address)
+def run_battery_command(arguments, sync, output, read_status):
+	"""Run ``wn battery``. ``sync`` is a BatterySync or a wn.battery_file.BatteryFile."""
 	if arguments.battery_command == "status":
 		address, block = sync.read()
 		if address is None:

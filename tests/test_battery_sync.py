@@ -308,7 +308,7 @@ class BatteryCommandTests(unittest.TestCase):
 		self.addCleanup(self.qmp.__exit__, None, None, None)
 		os.makedirs(os.path.join(self.home.name, ".config", "wn"))
 		with open(os.path.join(self.home.name, ".config", "wn", "config.json"), "w") as config_file:
-			json.dump({"gdb_port": self.server.port, "qmp_socket": self.qmp.address}, config_file)
+			json.dump({"battery_channel": "gdb", "gdb_port": self.server.port, "qmp_socket": self.qmp.address}, config_file)
 
 	vm_status = "running"
 
@@ -371,6 +371,40 @@ class BatteryCommandTests(unittest.TestCase):
 
 
 
+class FileBatteryCommandTests(unittest.TestCase):
+	def setUp(self):
+		self.home = tempfile.TemporaryDirectory()
+		self.addCleanup(self.home.cleanup)
+		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		self.path = os.path.join(self.home.name, "wn-battery.bin")
+		os.makedirs(os.path.join(self.home.name, ".config", "wn"))
+		with open(os.path.join(self.home.name, ".config", "wn", "config.json"), "w") as config_file:
+			json.dump({"battery_file": self.path, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())}, config_file)
+
+	def run_cli(self, *argv):
+		stdout = io.StringIO()
+		stderr = io.StringIO()
+		exit_code = main(["battery"] + list(argv), stdout=stdout, stderr=stderr)
+		return exit_code, stdout.getvalue(), stderr.getvalue()
+
+	def test_set_then_status(self):
+		exit_code, stdout, stderr = self.run_cli("set", "--percent", "42", "--charging")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(stdout, "battery file {} written\n".format(self.path))
+		exit_code, stdout, _ = self.run_cli("status")
+		self.assertEqual(exit_code, 0)
+		self.assertIn("Battery block at {}".format(self.path), stdout)
+		self.assertIn("flags: 0x7 (present, ac online, charging)", stdout)
+		self.assertIn("percent: 42", stdout)
+
+	def test_status_without_file(self):
+		exit_code, _, stderr = self.run_cli("status")
+		self.assertEqual(exit_code, 1)
+		self.assertIn(self.path, stderr)
+
+
 class PausedBatteryCommandTests(unittest.TestCase):
 	def test_sync_skips_a_paused_vm(self):
 		home = tempfile.TemporaryDirectory()
@@ -379,7 +413,7 @@ class PausedBatteryCommandTests(unittest.TestCase):
 			gdb.write(BASE, MAGIC)
 			os.makedirs(os.path.join(home.name, ".config", "wn"))
 			with open(os.path.join(home.name, ".config", "wn", "config.json"), "w") as config_file:
-				json.dump({"gdb_port": gdb.port, "qmp_socket": qmp.address}, config_file)
+				json.dump({"battery_channel": "gdb", "gdb_port": gdb.port, "qmp_socket": qmp.address}, config_file)
 			stderr = io.StringIO()
 			with mock.patch("wn.cli.agent.battery_status", return_value=DISCHARGING_STATUS):
 				exit_code = main(["battery", "sync"], stdout=io.StringIO(), stderr=stderr)

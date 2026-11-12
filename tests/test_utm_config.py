@@ -9,6 +9,7 @@ from wn.utm_config import (
 	CONFIGURATION_VERSION,
 	DEFAULT_QEMU_IMG_PATH,
 	UTMConfigError,
+	battery_file_in_bundle,
 	build_config,
 	config_plist_bytes,
 	create_disk_image,
@@ -237,6 +238,62 @@ class ConfigContentTests(unittest.TestCase):
 		self.assertNotEqual(first["Information"]["UUID"], second["Information"]["UUID"])
 
 
+BATTERY_FILE = "/vm/Windows.utm/Data/wn-battery.bin"
+
+
+def battery_arguments(memory_mib, path):
+	return [
+		"-machine", "nvdimm=on",
+		"-m", "maxmem={}M,slots=1".format(memory_mib + 1),
+		"-object", "memory-backend-file,id=wnbattery,share=on,mem-path={},size=1M".format(path),
+		"-device", "nvdimm,id=wnbatterynv,memdev=wnbattery",
+	]
+
+
+class BatteryArgumentTests(unittest.TestCase):
+	def test_no_nvdimm_by_default(self):
+		self.assertNotIn("nvdimm,id=wnbatterynv,memdev=wnbattery", arguments_of(build_config(options())))
+
+	def test_battery_adds_the_nvdimm(self):
+		arguments = arguments_of(build_config(options(battery=True, battery_file=BATTERY_FILE)))
+		self.assertTrue(contains_sequence(arguments, battery_arguments(8192, BATTERY_FILE)))
+
+	def test_maxmem_follows_memory_size(self):
+		arguments = arguments_of(build_config(options(battery=True, battery_file=BATTERY_FILE, memory_mib=4096)))
+		self.assertIn("maxmem=4097M,slots=1", arguments)
+
+	def test_battery_comes_before_extra_args(self):
+		arguments = arguments_of(build_config(options(audio="coreaudio", audio_args="-device intel-hda", battery=True, battery_file=BATTERY_FILE, extra_args="-device virtio-keyboard-pci")))
+		self.assertEqual(arguments[4:], ["-device", "intel-hda"] + battery_arguments(8192, BATTERY_FILE) + ["-device", "virtio-keyboard-pci"])
+
+	def test_machine_properties_are_unchanged(self):
+		config = build_config(options(battery=True, battery_file=BATTERY_FILE))
+		self.assertEqual(config["QEMU"]["MachinePropertyOverride"], "kernel-irqchip=off")
+
+	def test_battery_needs_a_file(self):
+		with self.assertRaises(UTMConfigError) as context:
+			build_config(options(battery=True))
+		self.assertIn("battery_file", str(context.exception))
+
+	def test_battery_file_without_spaces_or_commas(self):
+		for path in ("/vm/My VM.utm/Data/wn-battery.bin", "/vm/a,b/wn-battery.bin"):
+			with self.subTest(path=path):
+				with self.assertRaises(UTMConfigError) as context:
+					build_config(options(battery=True, battery_file=path))
+				self.assertIn("battery_file", str(context.exception))
+
+	def test_battery_file_in_bundle(self):
+		self.assertEqual(battery_file_in_bundle("/vm/Windows.utm"), BATTERY_FILE)
+
+	def test_write_bundle_puts_the_file_in_data(self):
+		directory = tempfile.TemporaryDirectory()
+		self.addCleanup(directory.cleanup)
+		bundle = write_bundle(directory.name, options(name="Win11", battery=True))
+		with open(os.path.join(bundle, "config.plist"), "rb") as plist_file:
+			arguments = arguments_of(plistlib.load(plist_file))
+		self.assertTrue(contains_sequence(arguments, battery_arguments(8192, os.path.join(bundle, "Data", "wn-battery.bin"))))
+
+
 class ConfigValidationTests(unittest.TestCase):
 	def test_audio_args_need_coreaudio(self):
 		with self.assertRaises(UTMConfigError) as context:
@@ -372,6 +429,20 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "extra_args": "-device virtio-keyboard-pci,id=vkbd"})
 		self.assertEqual(new_arguments[-2:], ["-device", "virtio-keyboard-pci,id=vkbd"])
 		self.assertEqual(arguments_of(self.read_config()), new_arguments)
+
+	def test_battery_uses_the_bundle_memory_size_and_data_folder(self):
+		config = self.read_config()
+		config["System"]["MemorySize"] = 6144
+		with open(self.plist_path, "wb") as plist_file:
+			plistlib.dump(config, plist_file)
+		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True})
+		expected = battery_arguments(6144, os.path.join(self.bundle, "Data", "wn-battery.bin"))
+		self.assertTrue(contains_sequence(new_arguments, expected))
+		self.assertEqual(arguments_of(self.read_config()), new_arguments)
+
+	def test_battery_with_a_configured_file(self):
+		new_arguments = update_additional_arguments(self.bundle, {"audio": "coreaudio", "battery": True, "battery_file": BATTERY_FILE})
+		self.assertTrue(contains_sequence(new_arguments, battery_arguments(8192, BATTERY_FILE)))
 
 	def test_missing_bundle(self):
 		with self.assertRaises(UTMConfigError) as context:

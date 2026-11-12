@@ -146,6 +146,24 @@ class ConfigTests(unittest.TestCase):
 					load_config()
 				self.assertIn(key, str(context.exception))
 
+	def test_battery_channel_defaults(self):
+		config = load_config()
+		self.assertEqual(config.battery_channel, "file")
+		self.assertIsNone(config.battery_file)
+
+	def test_battery_channel_settings_are_loaded(self):
+		self.write_config(json.dumps({"battery_channel": "gdb", "battery_file": "~/wn-battery.bin"}))
+		config = load_config()
+		self.assertEqual(config.battery_channel, "gdb")
+		self.assertEqual(config.battery_file, os.path.expanduser("~/wn-battery.bin"))
+
+	def test_battery_channel_must_be_known(self):
+		self.write_config(json.dumps({"battery_channel": "usb"}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn("battery_channel", str(context.exception))
+		self.assertIn("file, gdb", str(context.exception))
+
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")
 		with self.assertRaises(ConfigError):

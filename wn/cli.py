@@ -11,6 +11,7 @@ import sys
 from wn import __version__, agent, keygrab, mouse
 from wn.attach import attach
 from wn.backend import create_backend
+from wn.battery_file import battery_writer, prepare_battery_file
 from wn.battery_sync import run_battery_command
 from wn.config import load_config
 from wn.downloads import DEFAULT_DOWNLOADS_DIR
@@ -25,8 +26,10 @@ from wn.utm_config import (
 	AUDIO_MODES,
 	BUNDLE_SUFFIX,
 	DATA_DIRECTORY_NAME,
+	DEFAULT_BUNDLE_DIRECTORY,
 	DEFAULT_OPTIONS,
 	DEFAULT_QEMU_IMG_PATH,
+	battery_file_in_bundle,
 	create_disk_image,
 	random_mac_address,
 	update_additional_arguments,
@@ -35,7 +38,6 @@ from wn.utm_config import (
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
-DEFAULT_BUNDLE_DIRECTORY = os.path.join("~", "Library", "Containers", "com.utmapp.UTM", "Data", "Documents")
 DEFAULT_DISK_GIB = 64
 DEFAULT_CPU_COUNT = 8
 DEFAULT_MEMORY_MIB = 8192
@@ -155,6 +157,7 @@ def _add_update_vm_args_parser(subcommands):
 	update.add_argument("--bundle", metavar="PATH", help="the .utm bundle (default: vm_name.utm in UTM's documents folder)")
 	update.add_argument("--headless", action="store_true", help="the VM has no display window")
 	update.add_argument("--audio", choices=AUDIO_MODES, default=AUDIO_COREAUDIO, help="audio output the bundle was created with (default: %(default)s)")
+	update.add_argument("--battery", action="store_true", help="map the battery file into the guest as an NVDIMM, for the wn-acpi firmware driver")
 	_add_audio_args_option(update)
 
 
@@ -383,7 +386,16 @@ def run_update_vm_args(context):
 		"audio": arguments.audio,
 		"audio_args": arguments.audio_args,
 		"extra_args": arguments.extra_args,
+		"battery": arguments.battery,
+		"battery_file": config.battery_file,
 	})
+	if arguments.battery:
+		battery_file = config.battery_file or battery_file_in_bundle(bundle)
+		try:
+			prepare_battery_file(battery_file)
+		except WnError as error:
+			raise WnError("{}. Create the folder or set battery_file in the config".format(error)) from None
+		context.print("Battery file: {}".format(battery_file))
 	context.print("Updated {}".format(os.path.join(bundle, "config.plist")))
 	context.print("AdditionalArguments: {}".format(" ".join(shlex.quote(argument) for argument in new_arguments)))
 	context.print("Next: quit UTM and open it again so it reads the new arguments, then run wn start")
@@ -497,7 +509,7 @@ def run_agent(context):
 
 
 def run_battery(context):
-	run_battery_command(context.arguments, context.config, context.qmp_address(), context.stdout, agent.battery_status)
+	run_battery_command(context.arguments, battery_writer(context.config, context.qmp_address), context.stdout, agent.battery_status)
 
 
 def run_setup(context):

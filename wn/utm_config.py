@@ -13,6 +13,12 @@ CONFIGURATION_VERSION = 4
 BUNDLE_SUFFIX = ".utm"
 CONFIG_FILE_NAME = "config.plist"
 DATA_DIRECTORY_NAME = "Data"
+DEFAULT_BUNDLE_DIRECTORY = os.path.join("~", "Library", "Containers", "com.utmapp.UTM", "Data", "Documents")
+BATTERY_FILE_NAME = "wn-battery.bin"
+BATTERY_FILE_SIZE_MIB = 1
+BATTERY_MEMDEV_ID = "wnbattery"
+BATTERY_DEVICE_ID = "wnbatterynv"
+BATTERY_FILE_FORBIDDEN = (",", " ", "\t", "\n")
 DEFAULT_QEMU_IMG_PATH = "/opt/homebrew/bin/qemu-img"
 QMP_HOST = "127.0.0.1"
 AUDIODEV_ID = "ca0"
@@ -42,6 +48,8 @@ DEFAULT_OPTIONS = {
 	"audio_buffer_length_us": 20000,
 	"audio_args": None,
 	"extra_args": None,
+	"battery": False,
+	"battery_file": None,
 	"tpm": True,
 	"uefi": True,
 }
@@ -84,6 +92,11 @@ def _resolve_argument_options(options):
 			shlex.split(resolved["extra_args"])
 		except ValueError as error:
 			raise UTMConfigError("cannot parse extra_args: {}".format(error)) from None
+	if resolved["battery"]:
+		if not resolved["battery_file"]:
+			raise UTMConfigError("the battery option needs battery_file")
+		if any(character in resolved["battery_file"] for character in BATTERY_FILE_FORBIDDEN):
+			raise UTMConfigError("battery_file must not contain spaces or commas: {}".format(resolved["battery_file"]))
 	resolved["qmp_session_port"] = session_port(resolved["qmp_port"], resolved["qmp_session_port"])
 	if resolved["qmp_session_port"] == resolved["qmp_port"]:
 		raise UTMConfigError("qmp_session_port must differ from qmp_port {}".format(resolved["qmp_port"]))
@@ -101,6 +114,20 @@ def _qmp_server(port):
 	return ["-qmp", "tcp:{}:{},server=on,wait=off".format(QMP_HOST, port)]
 
 
+def battery_file_in_bundle(bundle_path):
+	return os.path.join(bundle_path, DATA_DIRECTORY_NAME, BATTERY_FILE_NAME)
+
+
+def _battery_arguments(options):
+	"""Map the battery file into the guest as an NVDIMM. The second -machine and -m merge with UTM's own."""
+	return [
+		"-machine", "nvdimm=on",
+		"-m", "maxmem={}M,slots=1".format(options["memory_mib"] + BATTERY_FILE_SIZE_MIB),
+		"-object", "memory-backend-file,id={},share=on,mem-path={},size={}M".format(BATTERY_MEMDEV_ID, options["battery_file"], BATTERY_FILE_SIZE_MIB),
+		"-device", "nvdimm,id={},memdev={}".format(BATTERY_DEVICE_ID, BATTERY_MEMDEV_ID),
+	]
+
+
 def _additional_arguments(options):
 	arguments = _qmp_server(options["qmp_port"]) + _qmp_server(options["qmp_session_port"])
 	if options["headless"]:
@@ -113,6 +140,8 @@ def _additional_arguments(options):
 			"-device", "intel-hda",
 			"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
 		]
+	if options["battery"]:
+		arguments += _battery_arguments(options)
 	if options["extra_args"]:
 		arguments += shlex.split(options["extra_args"])
 	return arguments
@@ -231,8 +260,10 @@ def write_bundle(path, options):
 
 	The caller places the disk image and ISO in Data afterwards.
 	"""
+	bundle = os.path.join(path, options.get("name", "") + BUNDLE_SUFFIX)
+	if options.get("battery") and not options.get("battery_file"):
+		options = dict(options, battery_file=battery_file_in_bundle(bundle))
 	config = build_config(options)
-	bundle = os.path.join(path, config["Information"]["Name"] + BUNDLE_SUFFIX)
 	config_path = os.path.join(bundle, CONFIG_FILE_NAME)
 	if os.path.exists(config_path):
 		raise UTMConfigError("{} already exists. Remove it first to write a new configuration".format(config_path))
@@ -266,12 +297,19 @@ def update_additional_arguments(bundle_path, options):
 	"""Replace the AdditionalArguments of an existing bundle's config.plist and return the new list.
 
 	``options`` takes the same argument options as ``build_config``, such as
-	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, and ``extra_args``. Nothing
-	else in config.plist changes.
+	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio``, ``audio_args``, ``battery``, ``battery_file``, and
+	``extra_args``. With ``battery``, the memory size comes from the bundle, and ``battery_file`` defaults to
+	Data/wn-battery.bin in the bundle. Nothing else in config.plist changes.
 	"""
-	arguments = _additional_arguments(_resolve_argument_options(options))
+	if options.get("battery") and not options.get("battery_file"):
+		options = dict(options, battery_file=battery_file_in_bundle(bundle_path))
+	resolved = _resolve_argument_options(options)
+	arguments = []
 
 	def replace_arguments(config):
+		if resolved["battery"]:
+			resolved["memory_mib"] = config["System"]["MemorySize"]
+		arguments.extend(_additional_arguments(resolved))
 		config["QEMU"]["AdditionalArguments"] = arguments
 
 	_edit_config(bundle_path, replace_arguments)

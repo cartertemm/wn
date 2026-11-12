@@ -542,6 +542,45 @@ class UpdateVMArgsTests(CLITestCase):
 		expected = os.path.join(self.home.name, "Library", "Containers", "com.utmapp.UTM", "Data", "Documents", "Windows.utm")
 		self.assertEqual(update.call_args.args[0], expected)
 
+	def add_memory_size(self, memory_mib):
+		config = self.read_plist()
+		config["System"] = {"MemorySize": memory_mib}
+		with open(self.plist_path, "wb") as plist_file:
+			plistlib.dump(config, plist_file)
+		os.makedirs(os.path.join(self.bundle, "Data"))
+
+	def test_battery_adds_the_nvdimm_and_prepares_the_file(self):
+		self.add_memory_size(8192)
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")
+		self.assertEqual(exit_code, 0, stderr)
+		path = os.path.join(self.bundle, "Data", "wn-battery.bin")
+		arguments = self.read_plist()["QEMU"]["AdditionalArguments"]
+		self.assertIn("memory-backend-file,id=wnbattery,share=on,mem-path={},size=1M".format(path), arguments)
+		self.assertIn("maxmem=8193M,slots=1", arguments)
+		with open(path, "rb") as data_file:
+			self.assertEqual(data_file.read(4), b"WNBT")
+		self.assertIn(path, stdout)
+
+	def test_battery_keeps_an_existing_file(self):
+		self.add_memory_size(8192)
+		path = os.path.join(self.bundle, "Data", "wn-battery.bin")
+		with open(path, "wb") as data_file:
+			data_file.write(b"keep")
+		self.assertEqual(self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")[0], 0)
+		with open(path, "rb") as data_file:
+			self.assertEqual(data_file.read(4), b"keep")
+
+	def test_battery_uses_the_configured_file(self):
+		self.add_memory_size(4096)
+		path = os.path.join(self.home.name, "battery.bin")
+		os.makedirs(os.path.join(self.home.name, ".config", "wn"), exist_ok=True)
+		with open(os.path.join(self.home.name, ".config", "wn", "config.json"), "w") as config_file:
+			json.dump({"battery_file": path}, config_file)
+		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn("memory-backend-file,id=wnbattery,share=on,mem-path={},size=1M".format(path), self.read_plist()["QEMU"]["AdditionalArguments"])
+		self.assertTrue(os.path.exists(path))
+
 	def test_refuses_running_vm(self):
 		self.backend.state = "running"
 		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle)

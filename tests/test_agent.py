@@ -27,7 +27,8 @@ from wn.agent import (
 	start_battery_sync,
 	uninstall_launch_agent,
 )
-from wn.battery_sync import BLOCK_SIZE, decode_block
+from wn.battery_file import BatteryFile
+from wn.battery_sync import BLOCK_SIZE, BatterySync, decode_block
 from wn.cli import main
 from wn.config import Config
 
@@ -311,7 +312,7 @@ class AgentCommandTests(unittest.TestCase):
 	def test_once_writes_the_battery_block(self):
 		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server, running_qmp_server() as qmp:
 			server.write(BLOCK_ADDRESS, b"WNBT")
-			self.write_config({"gdb_port": server.port, "qmp_socket": qmp.address})
+			self.write_config({"battery_channel": "gdb", "gdb_port": server.port, "qmp_socket": qmp.address})
 			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
 				exit_code, stdout, stderr = self.run_cli("--once")
 			block = server.read(BLOCK_ADDRESS, BLOCK_SIZE)
@@ -322,7 +323,7 @@ class AgentCommandTests(unittest.TestCase):
 
 	def test_once_reports_a_missing_block(self):
 		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server, running_qmp_server() as qmp:
-			self.write_config({"gdb_port": server.port, "qmp_socket": qmp.address})
+			self.write_config({"battery_channel": "gdb", "gdb_port": server.port, "qmp_socket": qmp.address})
 			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
 				exit_code, _, stderr = self.run_cli("--once")
 		self.assertEqual(exit_code, 0)
@@ -330,7 +331,7 @@ class AgentCommandTests(unittest.TestCase):
 
 	def test_once_reports_an_unreachable_stub(self):
 		with running_qmp_server() as qmp:
-			self.write_config({"gdb_port": unused_port(), "qmp_socket": qmp.address})
+			self.write_config({"battery_channel": "gdb", "gdb_port": unused_port(), "qmp_socket": qmp.address})
 			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
 				exit_code, stdout, stderr = self.run_cli("--once")
 		self.assertEqual(exit_code, 0)
@@ -340,12 +341,22 @@ class AgentCommandTests(unittest.TestCase):
 	def test_once_skips_sync_when_qmp_is_unreachable(self):
 		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server:
 			server.write(BLOCK_ADDRESS, b"WNBT")
-			self.write_config({"gdb_port": server.port, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
+			self.write_config({"battery_channel": "gdb", "gdb_port": server.port, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
 			with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
 				exit_code, _, stderr = self.run_cli("--once")
 		self.assertEqual(exit_code, 0)
 		self.assertIn("battery sync: cannot check the VM state over QMP", stderr)
 		self.assertEqual(server.connections, 0)
+
+	def test_once_writes_the_battery_file(self):
+		path = os.path.join(self.home.name, "wn-battery.bin")
+		self.write_config({"battery_file": path, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
+		with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
+			exit_code, _, stderr = self.run_cli("--once")
+		self.assertEqual(exit_code, 0)
+		self.assertEqual(stderr, "battery file {} written\n".format(path))
+		with open(path, "rb") as data_file:
+			self.assertEqual(decode_block(data_file.read(BLOCK_SIZE))["percent"], 83)
 
 	def test_once_skips_sync_when_turned_off(self):
 		self.write_config({"battery_sync": False})
@@ -379,14 +390,24 @@ class AgentCommandTests(unittest.TestCase):
 			exit_code, _, _ = self.run_cli()
 		self.assertEqual(exit_code, 0)
 		self.assertEqual(serve.call_args.args[:2], (None, 47100))
-		self.assertEqual(start.call_args.args[:2], (4446, "tcp:127.0.0.1:4444"))
+		writer = start.call_args.args[0]
+		self.assertIsInstance(writer, BatteryFile)
+		self.assertEqual(writer.path, os.path.join(self.home.name, "Library", "Containers", "com.utmapp.UTM", "Data", "Documents", "Windows.utm", "Data", "wn-battery.bin"))
 
 	def test_serve_uses_config(self):
-		self.write_config({"agent_bind": "192.168.64.1", "agent_port": 47200, "gdb_port": 4500, "qmp_port": 4600})
+		self.write_config({"agent_bind": "192.168.64.1", "agent_port": 47200, "battery_channel": "gdb", "gdb_port": 4500, "qmp_port": 4600})
 		with mock.patch("wn.agent.serve") as serve, mock.patch("wn.agent.start_battery_sync") as start:
 			self.run_cli()
 		self.assertEqual(serve.call_args.args[:2], ("192.168.64.1", 47200))
-		self.assertEqual(start.call_args.args[:2], (4500, "tcp:127.0.0.1:4600"))
+		writer = start.call_args.args[0]
+		self.assertIsInstance(writer, BatterySync)
+		self.assertEqual((writer.port, writer.qmp_address), (4500, "tcp:127.0.0.1:4600"))
+
+	def test_serve_uses_the_configured_battery_file(self):
+		self.write_config({"battery_file": "/tmp/wn-battery.bin"})
+		with mock.patch("wn.agent.serve"), mock.patch("wn.agent.start_battery_sync") as start:
+			self.run_cli()
+		self.assertEqual(start.call_args.args[0].path, "/tmp/wn-battery.bin")
 
 	def test_serve_without_battery_sync(self):
 		self.write_config({"battery_sync": False})
@@ -401,7 +422,7 @@ class BatterySyncThreadTests(unittest.TestCase):
 		output = io.StringIO()
 		with FakeGdbServer({BLOCK_ADDRESS: REGION_SIZE}) as server, running_qmp_server() as qmp:
 			server.write(BLOCK_ADDRESS, b"WNBT")
-			stop, thread = start_battery_sync(server.port, qmp.address, output, read_status=lambda: parse_pmset(DISCHARGING, UPDATED))
+			stop, thread = start_battery_sync(BatterySync(server.port, qmp.address), output, read_status=lambda: parse_pmset(DISCHARGING, UPDATED))
 			deadline = time.monotonic() + THREAD_TIMEOUT_SECONDS
 			while decode_block(server.read(BLOCK_ADDRESS, BLOCK_SIZE))["percent"] != 83 and time.monotonic() < deadline:
 				time.sleep(POLL_INTERVAL_SECONDS)
@@ -416,7 +437,7 @@ class BatterySyncThreadTests(unittest.TestCase):
 		qmp = running_qmp_server()
 		qmp.__enter__()
 		self.addCleanup(qmp.__exit__, None, None, None)
-		stop, thread = start_battery_sync(unused_port(), qmp.address, output, read_status=lambda: parse_pmset(DISCHARGING, UPDATED))
+		stop, thread = start_battery_sync(BatterySync(unused_port(), qmp.address), output, read_status=lambda: parse_pmset(DISCHARGING, UPDATED))
 		self.addCleanup(thread.join, THREAD_TIMEOUT_SECONDS)
 		self.addCleanup(stop.set)
 		server = make_server("127.0.0.1", 0, lambda: {"percent": 83})
