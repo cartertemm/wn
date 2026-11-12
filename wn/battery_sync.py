@@ -99,11 +99,11 @@ def sync_message(path):
 	return "battery file {} written".format(path)
 
 
-def run_sync_loop(sync, read_status, log, wait, monotonic=time.monotonic):
-	"""Poll pmset every 5 s. Write at once when the reading changes, and every 30 s otherwise.
+def run_sync_loop(sync, read_status, log, wait, poll_seconds=POLL_SECONDS, monotonic=time.monotonic):
+	"""Poll pmset every ``poll_seconds``. Write at once when the reading changes, and every 30 s otherwise.
 
 	Any error is logged and the loop goes on, so a failed write can never stop the agent. ``wait`` sleeps
-	for the given seconds and returns True when the loop must end.
+	for up to the given seconds, can return early to poll at once, and returns True when the loop must end.
 	"""
 	last_reading = None
 	next_write_time = 0
@@ -123,7 +123,7 @@ def run_sync_loop(sync, read_status, log, wait, monotonic=time.monotonic):
 			log.write(LOG_PREFIX + message + "\n")
 			log.flush()
 			last_message = message
-		if wait(POLL_SECONDS):
+		if wait(poll_seconds):
 			return
 
 

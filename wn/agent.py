@@ -1,9 +1,11 @@
 """Write the Mac's battery status to the native battery in the guest, and manage the launch agent that runs it."""
 
+import ctypes
 import datetime
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -13,7 +15,7 @@ from xml.sax.saxutils import escape
 from wn.appbundle import build_app, executable_path, remove_app
 from wn.backend import create_backend
 from wn.battery_file import BatteryFile, battery_file_path, battery_writer
-from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, battery_reading, run_sync_loop, sync_message
+from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, POLL_SECONDS, WRITE_INTERVAL_SECONDS, battery_reading, run_sync_loop, sync_message
 from wn.errors import WnError
 from wn.qmp import qmp_client_for
 
@@ -33,6 +35,11 @@ TIME_REMAINING = re.compile(r"(?P<hours>\d+):(?P<minutes>\d{2}) remaining")
 LAUNCHCTL_PID = re.compile(r"^\s*pid = (\d+)\s*$", re.MULTILINE)
 EXIT_RUNNING = 0
 EXIT_NOT_RUNNING = 1
+LIBSYSTEM_PATH = "/usr/lib/libSystem.B.dylib"
+POWER_SOURCES_NOTIFICATION = b"com.apple.system.powersources"
+NOTIFY_STATUS_OK = 0
+NOTIFY_READ_BYTES = 4096
+NOTIFIED_POLL_SECONDS = WRITE_INTERVAL_SECONDS
 
 
 class AgentError(WnError):
@@ -175,11 +182,42 @@ def uninstall_launch_agent(run=None, uid=None):
 	return True
 
 
+def _register_power_notifications():
+	library = ctypes.CDLL(LIBSYSTEM_PATH)
+	library.notify_register_file_descriptor.restype = ctypes.c_uint32
+	notify_fd = ctypes.c_int()
+	token = ctypes.c_int()
+	status = library.notify_register_file_descriptor(POWER_SOURCES_NOTIFICATION, ctypes.byref(notify_fd), 0, ctypes.byref(token))
+	if status != NOTIFY_STATUS_OK:
+		raise AgentError("notify_register_file_descriptor returned status {}".format(status))
+	return notify_fd.value
+
+
+def power_change_waiter(log, register=_register_power_notifications):
+	"""Return a wait function that ends early when macOS reports a power source change, and its poll interval.
+
+	When the notification cannot be registered, log why and return time.sleep with the short poll interval.
+	"""
+	try:
+		notify_fd = register()
+	except (OSError, AttributeError, AgentError) as error:
+		log.write("{}no power source notifications ({}), polling every {} s\n".format(LOG_PREFIX, error, POLL_SECONDS))
+		log.flush()
+		return time.sleep, POLL_SECONDS
+
+	def wait(seconds):
+		readable, _, _ = select.select([notify_fd], [], [], seconds)
+		if readable:
+			os.read(notify_fd, NOTIFY_READ_BYTES)
+
+	return wait, NOTIFIED_POLL_SECONDS
+
+
 def _stop_on_sigterm(signum, frame):
 	raise KeyboardInterrupt
 
 
-def serve(config, output, wait=time.sleep):
+def serve(config, output, wait=None):
 	"""Run the sync loop until Ctrl+C or SIGTERM, with the PID in the pid file while it runs."""
 	if not config.battery_sync:
 		raise AgentError("battery_sync is off in the config, so the agent has nothing to do")
@@ -194,7 +232,10 @@ def serve(config, output, wait=time.sleep):
 	try:
 		output.write("Running the agent in the foreground with PID {}. Press Ctrl+C to stop\n".format(os.getpid()))
 		output.flush()
-		run_sync_loop(battery_writer(config), battery_status, output, wait)
+		poll_seconds = POLL_SECONDS
+		if wait is None:
+			wait, poll_seconds = power_change_waiter(output)
+		run_sync_loop(battery_writer(config), battery_status, output, wait, poll_seconds)
 	except KeyboardInterrupt:
 		pass
 	finally:
@@ -202,7 +243,7 @@ def serve(config, output, wait=time.sleep):
 		os.remove(path)
 
 
-def start_agent(config, output, foreground=False, run=None, uid=None, wait=time.sleep):
+def start_agent(config, output, foreground=False, run=None, uid=None, wait=None):
 	"""Start the launchd job if it is installed, else serve in the foreground."""
 	run = run or subprocess.run
 	uid = os.getuid() if uid is None else uid
@@ -282,7 +323,7 @@ def agent_status(config, output, run=None, uid=None):
 	return EXIT_RUNNING if pid is not None else EXIT_NOT_RUNNING
 
 
-def run_agent_command(arguments, config, output, messages=None, wait=time.sleep):
+def run_agent_command(arguments, config, output, messages=None, wait=None):
 	messages = messages or sys.stderr
 	if arguments.once:
 		status = battery_status()

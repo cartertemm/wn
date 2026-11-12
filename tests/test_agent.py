@@ -3,6 +3,7 @@ import io
 import json
 import os
 import plistlib
+import select
 import signal
 import subprocess
 import tempfile
@@ -22,6 +23,7 @@ from wn.agent import (
 	launch_agent_path,
 	parse_pmset,
 	pid_file_path,
+	power_change_waiter,
 	run_agent_command,
 	uninstall_launch_agent,
 )
@@ -87,6 +89,19 @@ LAUNCHCTL_PRINT_STOPPED = (
 
 def completed(stdout="", returncode=0):
 	return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
+
+
+def stop_at_once(seconds):
+	return True
+
+
+FAKE_WAITER = (stop_at_once, 30)
+
+
+def stub_power_change_waiter(test):
+	patcher = mock.patch("wn.agent.power_change_waiter", return_value=FAKE_WAITER)
+	patcher.start()
+	test.addCleanup(patcher.stop)
 
 
 class FakeLaunchctl:
@@ -248,6 +263,7 @@ class AgentCommandTests(unittest.TestCase):
 		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		stub_power_change_waiter(self)
 
 	def run_cli(self, *argv):
 		stdout = io.StringIO()
@@ -332,6 +348,7 @@ class AgentCommandTests(unittest.TestCase):
 		self.assertIsInstance(writer, BatteryFile)
 		self.assertEqual(writer.path, os.path.join(self.home.name, "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM", "wn-battery-Windows.bin"))
 		self.assertIs(read_status, battery_status)
+		self.assertEqual(loop.call_args.args[3:], FAKE_WAITER)
 
 	def test_uses_the_configured_battery_file(self):
 		write_config(self.home.name, {"battery_file": "/tmp/wn-battery.bin"})
@@ -360,6 +377,7 @@ class AgentControlTests(unittest.TestCase):
 		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		stub_power_change_waiter(self)
 		self.plist = os.path.join(self.home.name, "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist")
 
 	def run_cli(self, launchctl, *argv):
@@ -549,6 +567,39 @@ class AgentControlTests(unittest.TestCase):
 		write_config(self.home.name, {"battery_file": battery_path, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
 		_, stdout, _ = self.run_cli(FakeLaunchctl(), "status")
 		self.assertIn("Battery file: {} (no battery block yet)".format(battery_path), stdout)
+
+
+class PowerChangeWaiterTests(unittest.TestCase):
+	def setUp(self):
+		self.read_fd, self.write_fd = os.pipe()
+		self.addCleanup(os.close, self.read_fd)
+		self.addCleanup(os.close, self.write_fd)
+		self.log = io.StringIO()
+
+	def readable(self):
+		return bool(select.select([self.read_fd], [], [], 0)[0])
+
+	def test_returns_early_and_drains_the_tokens(self):
+		wait, poll_seconds = power_change_waiter(self.log, register=lambda: self.read_fd)
+		os.write(self.write_fd, b"\x00\x00\x00\x01" * 2)
+		start = time.monotonic()
+		self.assertFalse(wait(60))
+		self.assertLess(time.monotonic() - start, 5)
+		self.assertFalse(self.readable())
+		self.assertEqual(poll_seconds, 30)
+		self.assertEqual(self.log.getvalue(), "")
+
+	def test_times_out_without_a_notification(self):
+		wait, _ = power_change_waiter(self.log, register=lambda: self.read_fd)
+		self.assertFalse(wait(0.01))
+
+	def test_falls_back_to_polling_when_registration_fails(self):
+		def register():
+			raise AgentError("notify_register_file_descriptor returned status 1")
+		wait, poll_seconds = power_change_waiter(self.log, register=register)
+		self.assertIs(wait, time.sleep)
+		self.assertEqual(poll_seconds, 5)
+		self.assertEqual(self.log.getvalue(), "battery sync: no power source notifications (notify_register_file_descriptor returned status 1), polling every 5 s\n")
 
 
 class AgentLoopTests(unittest.TestCase):

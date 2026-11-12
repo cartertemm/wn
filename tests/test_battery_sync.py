@@ -94,7 +94,7 @@ class FakeSync:
 
 
 class LoopTests(unittest.TestCase):
-	def run_loop(self, statuses, results=(), seconds_per_poll=5):
+	def run_loop(self, statuses, results=(), seconds_per_poll=5, poll_seconds=5):
 		clock = {"now": 0.0}
 		polls = {"left": len(statuses)}
 		status_list = list(statuses)
@@ -108,12 +108,12 @@ class LoopTests(unittest.TestCase):
 			return status
 
 		def wait(seconds):
-			self.assertEqual(seconds, 5)
+			self.assertEqual(seconds, poll_seconds)
 			clock["now"] += seconds_per_poll
 			polls["left"] -= 1
 			return polls["left"] == 0
 
-		run_sync_loop(sync, read_status, log, wait, monotonic=lambda: clock["now"])
+		run_sync_loop(sync, read_status, log, wait, poll_seconds, monotonic=lambda: clock["now"])
 		return sync, log.getvalue()
 
 	def test_writes_first_reading_and_only_changes_within_30_seconds(self):
@@ -123,6 +123,10 @@ class LoopTests(unittest.TestCase):
 
 	def test_rewrites_every_30_seconds(self):
 		sync, _ = self.run_loop([DISCHARGING_STATUS] * 13)
+		self.assertEqual(len(sync.readings), 3)
+
+	def test_waits_for_the_given_poll_interval(self):
+		sync, _ = self.run_loop([DISCHARGING_STATUS] * 3, seconds_per_poll=30, poll_seconds=30)
 		self.assertEqual(len(sync.readings), 3)
 
 	def test_logs_errors_and_keeps_going(self):
