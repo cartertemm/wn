@@ -1,0 +1,5 @@
+[build]
+target = "aarch64-unknown-uefi"
+
+[target.aarch64-unknown-uefi]
+rustflags = ["-C", "link-arg=/subsystem:efi_boot_service_driver"]

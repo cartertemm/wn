@@ -14,3 +14,4 @@ vm/
 keygrab/bin/
 latency/bin/
 wn-tools/bin/
+efi/wn-acpi/target/

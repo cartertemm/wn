@@ -1,0 +1,16 @@
+[package]
+name = "wn-acpi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+uefi = { version = "=0.35.0", features = ["panic_handler"] }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"
