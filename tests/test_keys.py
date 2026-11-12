@@ -7,7 +7,7 @@ from wn.keys import (
 	combos_to_input_steps,
 	key_event,
 	parse_combo,
-	send_combos,
+	send_input_steps,
 )
 
 
@@ -112,11 +112,11 @@ class RecordingClient:
 		return {}
 
 
-class SendCombosTests(unittest.TestCase):
+class SendInputStepsTests(unittest.TestCase):
 	def test_sends_input_events_and_sleeps_for_hold_and_delay(self):
 		client = RecordingClient()
 		sleeps = []
-		send_combos(client, ["a", "shift+b"], delay_ms=30, hold_ms=40, sleep=sleeps.append)
+		send_input_steps(client, combos_to_input_steps(["a", "shift+b"], delay_ms=30, hold_ms=40), sleep=sleeps.append)
 		self.assertEqual(client.commands, [
 			("input-send-event", press("a")),
 			("input-send-event", release("a")),
@@ -125,11 +125,9 @@ class SendCombosTests(unittest.TestCase):
 		])
 		self.assertEqual(sleeps, [0.04, 0.03, 0.04, 0.03])
 
-	def test_validates_all_combos_before_sending(self):
-		client = RecordingClient()
+	def test_validates_all_combos_before_any_step(self):
 		with self.assertRaises(KeyNameError):
-			send_combos(client, ["a", "bogus"], delay_ms=0, hold_ms=None, sleep=lambda seconds: None)
-		self.assertEqual(client.commands, [])
+			combos_to_input_steps(["a", "bogus"], delay_ms=0)
 
 
 if __name__ == "__main__":

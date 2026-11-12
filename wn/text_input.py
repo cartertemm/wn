@@ -3,7 +3,6 @@
 import string
 
 from wn.errors import WnError
-from wn.keys import send_combos
 
 DEFAULT_KEY_DELAY_MS = 20
 
@@ -61,19 +60,10 @@ class UnsupportedCharacterError(WnError):
 SUPPORTED_CHARACTERS_HINT = "only US-ASCII letters, digits, punctuation, space, tab and newline are supported"
 
 
-def _unsupported_character_error(char, position=None):
-	location = "" if position is None else " at position {}".format(position)
+def _unsupported_character_error(char, position):
 	return UnsupportedCharacterError(
-		"cannot type {!r} (U+{:04X}){}: {}".format(char, ord(char), location, SUPPORTED_CHARACTERS_HINT)
+		"cannot type {!r} (U+{:04X}) at position {}: {}".format(char, ord(char), position, SUPPORTED_CHARACTERS_HINT)
 	)
-
-
-def char_to_combo(char):
-	"""Return the combo that types ``char`` on a US layout."""
-	try:
-		return CHAR_COMBOS[char]
-	except KeyError:
-		raise _unsupported_character_error(char) from None
 
 
 def text_to_combos(text):
@@ -83,8 +73,3 @@ def text_to_combos(text):
 		position, char = unsupported[0]
 		raise _unsupported_character_error(char, position)
 	return [CHAR_COMBOS[char] for char in text]
-
-
-def send_text(client, text, delay_ms=DEFAULT_KEY_DELAY_MS, hold_ms=None, sleep=None):
-	"""Type ``text`` into the guest through a QMP client."""
-	send_combos(client, text_to_combos(text), delay_ms, hold_ms, sleep)

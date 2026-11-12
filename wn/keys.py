@@ -146,8 +146,3 @@ def send_input_steps(client, steps, sleep=None):
 	for arguments, pause_ms in steps:
 		client.execute(INPUT_SEND_EVENT, arguments)
 		sleep(pause_ms / MILLISECONDS_PER_SECOND)
-
-
-def send_combos(client, combos, delay_ms, hold_ms=None, sleep=None):
-	"""Press and release each combo in turn through ``client``."""
-	send_input_steps(client, combos_to_input_steps(combos, delay_ms, hold_ms), sleep)
