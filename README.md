@@ -324,8 +324,7 @@ Control+Option+Command to release the keyboard to macOS, and again to grab
 it. Change this with `--release-hotkey`, for example `control,shift`. Build
 the helper once with `keygrab/build.sh`, then give your terminal app
 Accessibility permission in System Settings > Privacy & Security >
-Accessibility. Grab mode needs a local session on the Mac. Over SSH, use
-`wn key` and `wn type`. See `keygrab/README.md` for details.
+Accessibility. See `keygrab/README.md` for details.
 
 **Headless mode.** `--headless` on `setup` or `init-vm` creates the VM with no
 display window. Pass `--headless` to `update-vm-args` too for such a VM.
