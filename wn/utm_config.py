@@ -34,7 +34,13 @@ BLOCK_EXTRA = "extra"
 ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_EXTRA)
 DEFAULT_QEMU_IMG_PATH = "/opt/homebrew/bin/qemu-img"
 QMP_HOST = "127.0.0.1"
+DEFAULT_QMP_PORT = 4444
 AUDIODEV_ID = "ca0"
+DEFAULT_AUDIO_ARGUMENTS = (
+	"-audiodev", "coreaudio,id={},timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on".format(AUDIODEV_ID),
+	"-device", "intel-hda",
+	"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
+)
 MAXIMUM_USB_SHARE = 3
 INTERFACE_VERSION = 1
 QMP_SESSION_PORT_OFFSET = 1
@@ -52,9 +58,8 @@ DEFAULT_OPTIONS = {
 	"display": "virtio-ramfb",
 	"machine_properties": "kernel-irqchip=off",
 	"headless": False,
-	"qmp_port": 4444,
+	"qmp_port": DEFAULT_QMP_PORT,
 	"qmp_session_port": None,
-	"audio_buffer_length_us": 20000,
 	"audio_args": None,
 	"extra_args": None,
 	"battery": False,
@@ -84,9 +89,6 @@ def session_port(qmp_port, qmp_session_port=None):
 
 
 def _resolve_argument_options(options):
-	unknown = sorted(set(options) - set(REQUIRED_OPTIONS) - set(DEFAULT_OPTIONS))
-	if unknown:
-		raise UTMConfigError("unknown VM options: {}. Known options: {}".format(", ".join(unknown), ", ".join(REQUIRED_OPTIONS + tuple(DEFAULT_OPTIONS))))
 	resolved = dict(DEFAULT_OPTIONS, **options)
 	if resolved["audio_args"]:
 		try:
@@ -154,11 +156,7 @@ def _battery_arguments(options):
 def _audio_arguments(options):
 	if options["audio_args"]:
 		return shlex.split(options["audio_args"])
-	return [
-		"-audiodev", "coreaudio,id={},out.buffer-length={}".format(AUDIODEV_ID, options["audio_buffer_length_us"]),
-		"-device", "intel-hda",
-		"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
-	]
+	return list(DEFAULT_AUDIO_ARGUMENTS)
 
 
 def _argument_blocks(options):

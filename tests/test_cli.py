@@ -10,7 +10,7 @@ from unittest import mock
 
 from fake_keygrab_helper import read_log, write_fake_helper
 from fake_qmp_server import TCPFakeQMPServer, reply
-from fakes import FakeBackend, RecordingQMPClient
+from fakes import FakeBackend, RecordingQMPClient, write_config
 from wn.cli import main
 from wn.keys import combo_to_input_events
 
@@ -27,12 +27,6 @@ class CLITestCase(unittest.TestCase):
 		sleep_patcher = mock.patch("wn.keys.time.sleep")
 		sleep_patcher.start()
 		self.addCleanup(sleep_patcher.stop)
-
-	def write_config(self, values):
-		config_directory = os.path.join(self.home.name, ".config", "wn")
-		os.makedirs(config_directory, exist_ok=True)
-		with open(os.path.join(config_directory, "config.json"), "w") as config_file:
-			json.dump(values, config_file)
 
 	def run_real_cli(self, *argv):
 		stdout = io.StringIO()
@@ -114,7 +108,7 @@ class StopCommandTests(CLITestCase):
 		with open(wrapper, "w") as wrapper_file:
 			wrapper_file.write("#!/bin/sh\nexec '{}' '{}' \"$@\"\n".format(sys.executable, FAKE_UTMCTL))
 		os.chmod(wrapper, stat.S_IRWXU)
-		self.write_config({"utmctl_path": wrapper})
+		write_config(self.home.name, {"utmctl_path": wrapper})
 		self.now = [0.0]
 		for target, replacement in (("wn.cli.time.monotonic", lambda: self.now[0]), ("wn.cli.time.sleep", self.advance)):
 			patcher = mock.patch(target, side_effect=replacement)
@@ -207,7 +201,7 @@ class KeyCommandTests(CLITestCase):
 		self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.07, 0.03])
 
 	def test_config_socket_overrides_backend(self):
-		self.write_config({"qmp_socket": "/configured/qmp.sock"})
+		write_config(self.home.name, {"qmp_socket": "/configured/qmp.sock"})
 		self.run_cli("key", "a")
 		self.assertEqual(self.qmp_log[0], ("connect", "/configured/qmp.sock"))
 		self.assertEqual(self.backend.calls, [])
@@ -260,7 +254,7 @@ class MouseCommandTests(CLITestCase):
 		self.assertEqual(self.mouse_dry_run("move", "640", "360", "--screen", "1280x720"), [abs_move(16383, 16383)])
 
 	def test_move_uses_config_screen_size(self):
-		self.write_config({"screen_size": "1920x1080"})
+		write_config(self.home.name, {"screen_size": "1920x1080"})
 		self.assertEqual(self.mouse_dry_run("move", "960", "540"), [abs_move(16383, 16383)])
 
 	def test_move_out_of_range(self):
@@ -314,14 +308,14 @@ class UTMWiringTests(CLITestCase):
 	def test_key_reaches_utm_qmp_server_over_tcp(self):
 		handlers = {"input-send-event": lambda request: [reply(request, {})]}
 		with TCPFakeQMPServer(handlers) as server:
-			self.write_config({"backend": "utm", "qmp_port": server.port})
+			write_config(self.home.name, {"backend": "utm", "qmp_port": server.port})
 			exit_code, _, stderr = self.run_real_cli("key", "win+r")
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual([request["execute"] for request in server.received], ["qmp_capabilities", "input-send-event", "input-send-event"])
 		self.assertEqual([request["arguments"] for request in server.received[1:]], list(combo_to_input_events("win+r")))
 
 	def test_status_reports_missing_utmctl(self):
-		self.write_config({"utmctl_path": "/no/such/utmctl"})
+		write_config(self.home.name, {"utmctl_path": "/no/such/utmctl"})
 		exit_code, _, stderr = self.run_real_cli("status")
 		self.assertEqual(exit_code, 1)
 		self.assertIn("/no/such/utmctl", stderr)
@@ -371,7 +365,7 @@ class InitVMTests(CLITestCase):
 		self.assertEqual(config["System"]["MemorySize"], 8192)
 		self.assertRegex(config["Network"][0]["MacAddress"], "^" + MAC_PATTERN + "$")
 		self.assertEqual(config["Sound"], [])
-		self.assertIn("coreaudio,id=ca0,out.buffer-length=20000", config["QEMU"]["AdditionalArguments"])
+		self.assertIn("coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on", config["QEMU"]["AdditionalArguments"])
 		self.assertIn("tcp:127.0.0.1:4444,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
 		self.assertIn("tcp:127.0.0.1:4445,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
 		self.assertEqual([drive["ImageType"] for drive in config["Drive"]], ["Disk"])
@@ -430,7 +424,7 @@ class InitVMTests(CLITestCase):
 			self.assertEqual(iso_copy.read(), b"fake drivers")
 
 	def test_name_defaults_to_config_vm_name(self):
-		self.write_config({"vm_name": "Configured", "qmp_port": 4500, "qmp_session_port": 4600})
+		write_config(self.home.name, {"vm_name": "Configured", "qmp_port": 4500, "qmp_session_port": 4600})
 		self.assertEqual(self.init_vm()[0], 0)
 		config = self.read_plist(os.path.join(self.output, "Configured.utm"))
 		self.assertIn("tcp:127.0.0.1:4500,server=on,wait=off", config["QEMU"]["AdditionalArguments"])
@@ -495,7 +489,7 @@ class GrabCommandTests(CLITestCase):
 	def setUp(self):
 		super().setUp()
 		self.helper_path, self.helper_log = write_fake_helper(self.home.name, GRAB_LINES)
-		self.write_config({"keygrab_binary": self.helper_path})
+		write_config(self.home.name, {"keygrab_binary": self.helper_path})
 
 	def test_grab_sends_input_events(self):
 		exit_code, stdout, stderr = self.run_cli("grab")
@@ -528,7 +522,7 @@ class GrabCommandTests(CLITestCase):
 		self.assertEqual(read_log(self.helper_log)[0], ["--release-hotkey", "control,option,command"])
 
 	def test_missing_helper_is_reported(self):
-		self.write_config({"keygrab_binary": "/no/such/wn-keygrab"})
+		write_config(self.home.name, {"keygrab_binary": "/no/such/wn-keygrab"})
 		exit_code, _, stderr = self.run_cli("grab", "--dry-run")
 		self.assertEqual(exit_code, 1)
 		self.assertIn("build.sh", stderr)
@@ -537,7 +531,7 @@ class GrabCommandTests(CLITestCase):
 		keycodes_path = os.path.join(self.home.name, "keycodes.json")
 		with open(keycodes_path, "w") as keycodes_file:
 			json.dump({"keycodes": {"55": "meta_r"}}, keycodes_file)
-		self.write_config({"keygrab_binary": self.helper_path, "keygrab_keycodes": keycodes_path})
+		write_config(self.home.name, {"keygrab_binary": self.helper_path, "keygrab_keycodes": keycodes_path})
 		_, stdout, _ = self.run_cli("grab", "--dry-run")
 		self.assertIn('"meta_r"', stdout)
 
@@ -630,9 +624,7 @@ class UpdateVMArgsTests(CLITestCase):
 	def test_battery_uses_the_configured_file(self):
 		self.add_memory_size(4096)
 		path = os.path.join(self.home.name, "battery.bin")
-		os.makedirs(os.path.join(self.home.name, ".config", "wn"), exist_ok=True)
-		with open(os.path.join(self.home.name, ".config", "wn", "config.json"), "w") as config_file:
-			json.dump({"battery_file": path}, config_file)
+		write_config(self.home.name, {"battery_file": path})
 		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--battery")
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertIn("memory-backend-file,id=wnbattery,share=on,mem-path={},size=1M".format(path), self.read_plist()["QEMU"]["AdditionalArguments"])
@@ -755,7 +747,7 @@ class SetupCommandTests(CLITestCase):
 		self.assertFalse(options.battery)
 
 	def test_battery_file_comes_from_the_config(self):
-		self.write_config({"battery_file": "/tmp/wn-battery.bin"})
+		write_config(self.home.name, {"battery_file": "/tmp/wn-battery.bin"})
 		_, options, _, _ = self.run_setup("--yes")
 		self.assertEqual(options.battery_file, "/tmp/wn-battery.bin")
 

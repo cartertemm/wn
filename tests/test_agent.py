@@ -6,13 +6,13 @@ import plistlib
 import signal
 import subprocess
 import tempfile
-import socket
 import sys
 import time
 import unittest
 from unittest import mock
 
 from fake_qmp_server import TCPFakeQMPServer, reply
+from fakes import unused_port, write_config
 from wn import agent
 from wn.agent import (
 	LAUNCHD_LABEL,
@@ -106,12 +106,6 @@ class FakeLaunchctl:
 
 def running_qmp_server():
 	return TCPFakeQMPServer({"query-status": lambda request: [reply(request, {"running": True, "status": "running"})]})
-
-
-def unused_port():
-	with socket.socket() as probe:
-		probe.bind(("127.0.0.1", 0))
-		return probe.getsockname()[1]
 
 
 class ParsePmsetTests(unittest.TestCase):
@@ -261,11 +255,6 @@ class AgentCommandTests(unittest.TestCase):
 		exit_code = main(["agent"] + list(argv), stdout=stdout, stderr=stderr)
 		return exit_code, stdout.getvalue(), stderr.getvalue()
 
-	def write_config(self, values):
-		os.makedirs(os.path.join(self.home.name, ".config", "wn"), exist_ok=True)
-		with open(os.path.join(self.home.name, ".config", "wn", "config.json"), "w") as config_file:
-			json.dump(values, config_file)
-
 	def test_once_prints_json(self):
 		with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)), mock.patch("wn.agent.sync_once", return_value="sync result"):
 			exit_code, stdout, stderr = self.run_cli("--once")
@@ -274,7 +263,7 @@ class AgentCommandTests(unittest.TestCase):
 		self.assertEqual(stderr, "sync result\n")
 
 	def test_once_reports_a_write_error(self):
-		self.write_config({"battery_file": os.path.join(self.home.name, "missing", "wn-battery.bin")})
+		write_config(self.home.name, {"battery_file": os.path.join(self.home.name, "missing", "wn-battery.bin")})
 		with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
 			exit_code, stdout, stderr = self.run_cli("--once")
 		self.assertEqual(exit_code, 0)
@@ -283,7 +272,7 @@ class AgentCommandTests(unittest.TestCase):
 
 	def test_once_writes_the_battery_file(self):
 		path = os.path.join(self.home.name, "wn-battery.bin")
-		self.write_config({"battery_file": path, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
+		write_config(self.home.name, {"battery_file": path, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
 		with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)):
 			exit_code, _, stderr = self.run_cli("--once")
 		self.assertEqual(exit_code, 0)
@@ -292,7 +281,7 @@ class AgentCommandTests(unittest.TestCase):
 			self.assertEqual(decode_block(data_file.read(BLOCK_SIZE))["percent"], 83)
 
 	def test_once_skips_sync_when_turned_off(self):
-		self.write_config({"battery_sync": False})
+		write_config(self.home.name, {"battery_sync": False})
 		with mock.patch("wn.agent.subprocess.run", return_value=completed(DISCHARGING)), mock.patch("wn.agent.sync_once") as sync:
 			_, _, stderr = self.run_cli("--once")
 		sync.assert_not_called()
@@ -345,13 +334,13 @@ class AgentCommandTests(unittest.TestCase):
 		self.assertIs(read_status, battery_status)
 
 	def test_uses_the_configured_battery_file(self):
-		self.write_config({"battery_file": "/tmp/wn-battery.bin"})
+		write_config(self.home.name, {"battery_file": "/tmp/wn-battery.bin"})
 		with mock.patch("wn.agent.run_sync_loop") as loop:
 			self.run_cli("start")
 		self.assertEqual(loop.call_args.args[0].path, "/tmp/wn-battery.bin")
 
 	def test_fails_without_battery_sync(self):
-		self.write_config({"battery_sync": False})
+		write_config(self.home.name, {"battery_sync": False})
 		with mock.patch("wn.agent.run_sync_loop") as loop:
 			exit_code, _, stderr = self.run_cli("start")
 		self.assertEqual(exit_code, 1)
@@ -379,11 +368,6 @@ class AgentControlTests(unittest.TestCase):
 		with mock.patch("wn.agent.subprocess.run", launchctl):
 			exit_code = main(["agent"] + list(argv), stdout=stdout, stderr=stderr)
 		return exit_code, stdout.getvalue(), stderr.getvalue()
-
-	def write_config(self, values):
-		os.makedirs(os.path.join(self.home.name, ".config", "wn"), exist_ok=True)
-		with open(os.path.join(self.home.name, ".config", "wn", "config.json"), "w") as config_file:
-			json.dump(values, config_file)
 
 	def install(self):
 		os.makedirs(os.path.dirname(self.plist), exist_ok=True)
@@ -531,7 +515,7 @@ class AgentControlTests(unittest.TestCase):
 		battery_path = os.path.join(self.home.name, "wn-battery.bin")
 		BatteryFile(battery_path, clock=lambda: 1794398400).write(agent.battery_reading(parse_pmset(DISCHARGING, UPDATED)))
 		with running_qmp_server() as qmp:
-			self.write_config({"battery_file": battery_path, "qmp_socket": qmp.address})
+			write_config(self.home.name, {"battery_file": battery_path, "qmp_socket": qmp.address})
 			launchctl = FakeLaunchctl(completed(LAUNCHCTL_PRINT_RUNNING))
 			exit_code, stdout, _ = self.run_cli(launchctl, "status")
 		self.assertEqual(exit_code, 0)
@@ -544,7 +528,7 @@ class AgentControlTests(unittest.TestCase):
 	def test_status_when_nothing_runs(self):
 		address = "tcp:127.0.0.1:{}".format(unused_port())
 		battery_path = os.path.join(self.home.name, "missing.bin")
-		self.write_config({"battery_file": battery_path, "qmp_socket": address})
+		write_config(self.home.name, {"battery_file": battery_path, "qmp_socket": address})
 		exit_code, stdout, _ = self.run_cli(FakeLaunchctl(), "status")
 		self.assertEqual(exit_code, 1)
 		self.assertIn("Installed: no", stdout)
@@ -554,7 +538,7 @@ class AgentControlTests(unittest.TestCase):
 
 	def test_status_reads_the_pid_file(self):
 		self.write_pid_file(os.getpid())
-		self.write_config({"qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
+		write_config(self.home.name, {"qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
 		exit_code, stdout, _ = self.run_cli(FakeLaunchctl(), "status")
 		self.assertEqual(exit_code, 0)
 		self.assertIn("Running: yes, PID {}".format(os.getpid()), stdout)
@@ -562,7 +546,7 @@ class AgentControlTests(unittest.TestCase):
 	def test_status_of_an_empty_battery_file(self):
 		battery_path = os.path.join(self.home.name, "empty.bin")
 		open(battery_path, "wb").close()
-		self.write_config({"battery_file": battery_path, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
+		write_config(self.home.name, {"battery_file": battery_path, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
 		_, stdout, _ = self.run_cli(FakeLaunchctl(), "status")
 		self.assertIn("Battery file: {} (no battery block yet)".format(battery_path), stdout)
 

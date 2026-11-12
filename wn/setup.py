@@ -11,7 +11,7 @@ import time
 from typing import Optional, Tuple
 
 from wn.agent import LOG_PATH, REPOSITORY_DIRECTORY, install_launch_agent
-from wn.backends.utm import UTMBackend, UTMCtlError
+from wn.backends.utm import DEFAULT_VM_NAME, UTMBackend, UTMCtlError
 from wn.battery_file import battery_file_path, prepare_battery_file
 from wn.config import config_path, load_config
 from wn.downloads import fetch_all
@@ -20,7 +20,7 @@ from wn.payload import SECURE_BOOT_CERT, build_payload_iso
 from wn.qcow2 import create_empty_qcow2
 from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import looks_drawn, take_screendump
-from wn.unattend import SETUP_DONE_MARKER, SETUP_DONE_TEXT, SETUP_REBOOTING_TEXT, UnattendOptions, computer_name_for, mac_time_zone
+from wn.unattend import DEFAULT_EDITION, SETUP_DONE_MARKER, SETUP_DONE_TEXT, SETUP_REBOOTING_TEXT, UnattendOptions, computer_name_for, mac_time_zone
 from wn.utm_config import (
 	BUNDLE_SUFFIX,
 	DATA_DIRECTORY_NAME,
@@ -34,10 +34,6 @@ from wn.utm_config import (
 
 UTM_APP_PATH = "/Applications/UTM.app"
 UTM_PROCESS_NAME = "UTM"
-FINAL_AUDIO_ARGS = (
-	"-audiodev coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3,"
-	"out.frequency=48000,out.fixed-settings=on -device intel-hda -device hda-output,audiodev=ca0"
-)
 SETUP_DISPLAY = "virtio-ramfb"
 FINAL_DISPLAY = "virtio-gpu-pci"
 WINDOWS_ISO_IMAGE = "windows11-arm64.iso"
@@ -46,6 +42,7 @@ DISK_IMAGE = DEFAULT_OPTIONS["disk_image"]
 SOFTWARE_NVDA = "nvda"
 SOFTWARE_CHOICES = ((SOFTWARE_NVDA, "NVDA screen reader"),)
 STOPPED_STATE = "stopped"
+DEFAULT_DISK_GIB = 64
 
 UTM_QUIT_TIMEOUT_SECONDS = 30
 UTM_REGISTER_TIMEOUT_SECONDS = 60
@@ -77,10 +74,10 @@ class SetupOptions:
 	password: str = ""
 	cpus: int = DEFAULT_OPTIONS["cpu_count"]
 	memory_mib: int = DEFAULT_OPTIONS["memory_mib"]
-	disk_gib: int = 64
+	disk_gib: int = DEFAULT_DISK_GIB
 	headless: bool = False
 	software: Tuple[str, ...] = (SOFTWARE_NVDA,)
-	edition: str = "Pro"
+	edition: str = DEFAULT_EDITION
 	qmp_port: int = DEFAULT_OPTIONS["qmp_port"]
 	qmp_session_port: Optional[int] = None
 	mac_address: Optional[str] = None
@@ -157,7 +154,7 @@ class Installer:
 			raise SetupError("UTM already has a VM named '{}'. Pick another name, or delete that VM first".format(self.options.name))
 		if os.path.exists(self.bundle):
 			raise SetupError("{} already exists. Remove it first or pick another name".format(self.bundle))
-		running = [name for _, state, name in self.backend.machines() if state != "stopped"]
+		running = [name for _, state, name in self.backend.machines() if state != STOPPED_STATE]
 		if running:
 			raise SetupError("wn setup restarts UTM, which would stop these VMs: {}. Stop them first".format(", ".join(running)))
 
@@ -173,7 +170,6 @@ class Installer:
 			"driver_iso_image": PAYLOAD_IMAGE,
 			"headless": options.headless,
 			"display": SETUP_DISPLAY,
-			"audio_args": FINAL_AUDIO_ARGS,
 			"qmp_port": options.qmp_port,
 			"qmp_session_port": options.qmp_session_port,
 			"battery": options.battery,
@@ -372,7 +368,7 @@ class Installer:
 
 	def print_summary(self, address):
 		self.report("Done")
-		name_option = "" if self.options.name == "Windows" else " (vm_name in {} is '{}')".format(config_path(), self.options.name)
+		name_option = "" if self.options.name == DEFAULT_VM_NAME else " (vm_name in {} is '{}')".format(config_path(), self.options.name)
 		for line in (
 			"",
 			"VM name: {}".format(self.options.name),

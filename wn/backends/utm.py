@@ -5,12 +5,10 @@ import subprocess
 
 from wn.backend import Backend, BackendError, VMStatus
 from wn.qmp import TCP_ADDRESS_PREFIX
-from wn.utm_config import session_port
+from wn.utm_config import DEFAULT_QMP_PORT, QMP_HOST, session_port
 
 DEFAULT_VM_NAME = "Windows"
 DEFAULT_UTMCTL_PATH = "/Applications/UTM.app/Contents/MacOS/utmctl"
-DEFAULT_QMP_PORT = 4444
-QMP_HOST = "127.0.0.1"
 LIST_HEADER_PREFIX = "UUID"
 LIST_COLUMN_COUNT = 3
 VM_NOT_FOUND_MESSAGE = "Error: Virtual machine not found."

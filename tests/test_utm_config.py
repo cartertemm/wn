@@ -213,12 +213,8 @@ class ConfigContentTests(unittest.TestCase):
 		config = build_config(options())
 		arguments = arguments_of(config)
 		self.assertEqual(config["Sound"], [])
-		self.assertTrue(contains_sequence(arguments, ["-audiodev", "coreaudio,id=ca0,out.buffer-length=20000"]))
+		self.assertTrue(contains_sequence(arguments, ["-audiodev", "coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on"]))
 		self.assertTrue(contains_sequence(arguments, ["-device", "intel-hda", "-device", "hda-output,audiodev=ca0"]))
-
-	def test_coreaudio_buffer_length(self):
-		arguments = arguments_of(build_config(options(audio_buffer_length_us=10000)))
-		self.assertIn("coreaudio,id=ca0,out.buffer-length=10000", arguments)
 
 	def test_audio_args_replace_coreaudio_block(self):
 		config = build_config(options(audio_args="-audiodev coreaudio,id=ca0,timer-period=2500 -device usb-audio,audiodev=ca0"))
@@ -331,11 +327,6 @@ class ConfigValidationTests(unittest.TestCase):
 		with self.assertRaises(UTMConfigError) as context:
 			build_config(options(extra_args="-device 'virtio-keyboard-pci"))
 		self.assertIn("extra_args", str(context.exception))
-
-	def test_unknown_option(self):
-		with self.assertRaises(UTMConfigError) as context:
-			build_config(options(cpus=4))
-		self.assertIn("cpus", str(context.exception))
 
 	def test_missing_required_option(self):
 		for key in ("name", "mac_address"):
@@ -487,7 +478,7 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 		self.assertEqual(before, ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off"])
 		self.assertEqual(arguments_of(config), after)
 		self.assertEqual(after[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
-		self.assertIn("coreaudio,id=ca0,out.buffer-length=20000", after)
+		self.assertIn("coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on", after)
 		config["QEMU"]["AdditionalArguments"] = self.original["QEMU"]["AdditionalArguments"]
 		self.assertEqual(config, self.original)
 
@@ -523,11 +514,6 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 		with self.assertRaises(UTMConfigError) as context:
 			update_additional_arguments(os.path.join(self.bundle, "missing.utm"), {}, [])
 		self.assertIn("config.plist", str(context.exception))
-
-	def test_unknown_option(self):
-		with self.assertRaises(UTMConfigError):
-			update_additional_arguments(self.bundle, {"colour": "red"}, [])
-		self.assertEqual(self.read_config(), self.original)
 
 	def test_unknown_block(self):
 		with self.assertRaises(UTMConfigError):

@@ -1,9 +1,9 @@
 import os
-import socket
 import tempfile
 import unittest
 
 from fake_qmp_server import FakeQMPServer, TCPFakeQMPServer, error_reply, event, reply
+from fakes import unused_port
 from wn.qmp import QMPClient, QMPConnectionError, QMPError, TCPQMPClient, qmp_client_for
 
 
@@ -73,14 +73,6 @@ class QMPClientTests(unittest.TestCase):
 		self.assertIn(missing_path, str(context.exception))
 
 
-def unused_tcp_port():
-	probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-	probe.bind(("127.0.0.1", 0))
-	port = probe.getsockname()[1]
-	probe.close()
-	return port
-
-
 class TCPQMPClientTests(unittest.TestCase):
 	def test_handshake_and_execute(self):
 		handlers = {"query-status": lambda request: [reply(request, {"status": "running"})]}
@@ -95,7 +87,7 @@ class TCPQMPClientTests(unittest.TestCase):
 		self.assertEqual((client.host, client.port), ("127.0.0.1", 4444))
 
 	def test_connection_refused(self):
-		port = unused_tcp_port()
+		port = unused_port()
 		with self.assertRaises(QMPConnectionError) as context:
 			TCPQMPClient("tcp:127.0.0.1:{}".format(port)).connect()
 		self.assertIn(str(port), str(context.exception))

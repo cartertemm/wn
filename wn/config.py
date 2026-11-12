@@ -5,9 +5,10 @@ import json
 import os
 from typing import Optional
 
-from wn.backends.utm import DEFAULT_QMP_PORT, DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
+from wn.backends.utm import DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
 from wn.errors import WnError
 from wn.text_input import DEFAULT_KEY_DELAY_MS
+from wn.utm_config import DEFAULT_QMP_PORT
 
 CONFIG_RELATIVE_PATH = os.path.join("~", ".config", "wn", "config.json")
 

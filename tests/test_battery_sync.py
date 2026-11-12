@@ -1,5 +1,4 @@
 import io
-import json
 import os
 import tempfile
 import unittest
@@ -13,6 +12,7 @@ from wn.battery_sync import (
 	encode_block,
 	run_sync_loop,
 )
+from fakes import write_config
 from wn.cli import main
 
 UPDATED = "2026-11-11T12:00:00Z"
@@ -149,9 +149,7 @@ class FileBatteryCommandTests(unittest.TestCase):
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		self.path = os.path.join(self.home.name, "wn-battery.bin")
-		os.makedirs(os.path.join(self.home.name, ".config", "wn"))
-		with open(os.path.join(self.home.name, ".config", "wn", "config.json"), "w") as config_file:
-			json.dump({"battery_file": self.path}, config_file)
+		write_config(self.home.name, {"battery_file": self.path})
 
 	def run_cli(self, *argv):
 		stdout = io.StringIO()

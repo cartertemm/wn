@@ -1,6 +1,23 @@
-"""Test doubles shared by the CLI tests."""
+"""Test doubles and helpers shared by the tests."""
+
+import json
+import os
+import socket
 
 from wn.backend import Backend, VMStatus
+
+
+def write_config(home, values):
+	directory = os.path.join(home, ".config", "wn")
+	os.makedirs(directory, exist_ok=True)
+	with open(os.path.join(directory, "config.json"), "w") as config_file:
+		json.dump(values, config_file)
+
+
+def unused_port():
+	with socket.socket() as probe:
+		probe.bind(("127.0.0.1", 0))
+		return probe.getsockname()[1]
 
 
 class FakeBackend(Backend):

@@ -12,6 +12,7 @@ import time
 
 from wn import __version__, agent, keygrab, mouse
 from wn.backend import create_backend
+from wn.backends.utm import DEFAULT_VM_NAME
 from wn.battery_file import battery_writer, prepare_battery_file
 from wn.battery_sync import run_battery_command
 from wn.config import load_config
@@ -19,7 +20,7 @@ from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
 from wn.qmp import qmp_client_for
-from wn.setup import SOFTWARE_CHOICES, Installer, SetupOptions
+from wn.setup import DEFAULT_DISK_GIB, SOFTWARE_CHOICES, STOPPED_STATE, Installer, SetupOptions
 from wn.text_input import text_to_combos
 from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
 from wn.utm_config import (
@@ -43,14 +44,9 @@ from wn.utm_config import (
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
-DEFAULT_DISK_GIB = 64
-DEFAULT_CPU_COUNT = 8
-DEFAULT_MEMORY_MIB = 8192
 DEFAULT_SCROLL_COUNT = 1
 DEFAULT_STOP_TIMEOUT_SECONDS = 120
 STOP_POLL_SECONDS = 2
-STOPPED_STATE = "stopped"
-DEFAULT_SETUP_VM_NAME = "Windows"
 NO_SOFTWARE_ANSWERS = ("0", "none")
 YES_ANSWERS = ("y", "yes")
 NO_ANSWERS = ("n", "no")
@@ -97,11 +93,11 @@ def build_parser():
 def _add_setup_parser(subcommands):
 	setup = subcommands.add_parser("setup", help="create a Windows 11 VM in UTM and install it with no further input")
 	setup.add_argument("--yes", action="store_true", help="do not ask questions. Use the flags and the defaults")
-	setup.add_argument("--name", default=DEFAULT_SETUP_VM_NAME, help="VM name in UTM (default: %(default)s)")
+	setup.add_argument("--name", default=DEFAULT_VM_NAME, help="VM name in UTM (default: %(default)s)")
 	setup.add_argument("--username", help="Windows user name (default: your Mac user name)")
 	setup.add_argument("--password", default="", help="Windows password (default: none)")
-	setup.add_argument("--cpus", type=int, default=DEFAULT_CPU_COUNT, help="number of CPU cores (default: %(default)s)")
-	setup.add_argument("--memory-mib", type=int, default=DEFAULT_MEMORY_MIB, help="memory in MiB (default: %(default)s)")
+	setup.add_argument("--cpus", type=int, default=DEFAULT_OPTIONS["cpu_count"], help="number of CPU cores (default: %(default)s)")
+	setup.add_argument("--memory-mib", type=int, default=DEFAULT_OPTIONS["memory_mib"], help="memory in MiB (default: %(default)s)")
 	setup.add_argument("--disk-gib", type=int, default=DEFAULT_DISK_GIB, help="disk size in GiB (default: %(default)s)")
 	setup.add_argument("--headless", action="store_true", help="create the VM without a display window")
 	setup.add_argument("--software", default=",".join(name for name, _ in SOFTWARE_CHOICES), help="comma separated software to install, or none (default: %(default)s)")
@@ -185,8 +181,8 @@ def _add_init_vm_parser(subcommands):
 	init_vm = subcommands.add_parser("init-vm", help="create a UTM bundle for a new Windows 11 ARM64 VM")
 	init_vm.add_argument("--name", help="VM name (default: vm_name from the config)")
 	init_vm.add_argument("--disk-gib", type=int, default=DEFAULT_DISK_GIB, help="disk size in GiB (default: %(default)s)")
-	init_vm.add_argument("--cpus", type=int, default=DEFAULT_CPU_COUNT, help="number of CPU cores (default: %(default)s)")
-	init_vm.add_argument("--memory-mib", type=int, default=DEFAULT_MEMORY_MIB, help="memory in MiB (default: %(default)s)")
+	init_vm.add_argument("--cpus", type=int, default=DEFAULT_OPTIONS["cpu_count"], help="number of CPU cores (default: %(default)s)")
+	init_vm.add_argument("--memory-mib", type=int, default=DEFAULT_OPTIONS["memory_mib"], help="memory in MiB (default: %(default)s)")
 	init_vm.add_argument("--iso", metavar="PATH", help="Windows installer ISO to copy into the bundle")
 	init_vm.add_argument("--driver-iso", metavar="PATH", help="driver ISO, such as virtio-win, to copy into the bundle as a second CD")
 	init_vm.add_argument("--machine-properties", default=DEFAULT_OPTIONS["machine_properties"], metavar="PROPERTIES", help="QEMU machine properties for UTM. An empty string keeps UTM's defaults (default: %(default)s)")

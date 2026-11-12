@@ -2,7 +2,6 @@ import io
 import json
 import os
 import plistlib
-import shlex
 import tempfile
 import unittest
 from unittest import mock
@@ -15,7 +14,6 @@ from wn.efivars import EFI_IMAGE_SECURITY_DATABASE_GUID, find, parse_signature_l
 from wn.payload import SECURE_BOOT_CERT
 from wn.qmp import QMPConnectionError
 from wn.setup import (
-	FINAL_AUDIO_ARGS,
 	FINAL_DISPLAY,
 	INSTALL_TIMEOUT_SECONDS,
 	PAYLOAD_IMAGE,
@@ -27,6 +25,7 @@ from wn.setup import (
 	restart_utm,
 )
 from wn.unattend import SETUP_DONE_MARKER
+from wn.utm_config import DEFAULT_AUDIO_ARGUMENTS
 
 
 class FakeClock:
@@ -208,7 +207,7 @@ class RunTests(InstallerTestCase):
 		data = os.listdir(os.path.join(self.bundle_dir, "Windows.utm", "Data"))
 		self.assertEqual(sorted(data), ["disk.qcow2", "efi_vars.fd"])
 		self.assertEqual(config["QEMU"]["MachinePropertyOverride"], "kernel-irqchip=off")
-		audio = shlex.split(FINAL_AUDIO_ARGS)
+		audio = list(DEFAULT_AUDIO_ARGUMENTS)
 		self.assertEqual(config["QEMU"]["AdditionalArguments"][4:4 + len(audio)], audio)
 
 	def test_battery_is_on_by_default(self):

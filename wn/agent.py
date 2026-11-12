@@ -13,7 +13,7 @@ from xml.sax.saxutils import escape
 from wn.appbundle import build_app, executable_path, remove_app
 from wn.backend import create_backend
 from wn.battery_file import BatteryFile, battery_file_path, battery_writer
-from wn.battery_sync import LOG_PREFIX, battery_reading, run_sync_loop, sync_message
+from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, battery_reading, run_sync_loop, sync_message
 from wn.errors import WnError
 from wn.qmp import qmp_client_for
 
@@ -22,7 +22,6 @@ LAUNCHCTL_PATH = "/bin/launchctl"
 AC_POWER_TEXT = "'AC Power'"
 CHARGING_STATES = ("charging", "finishing charge")
 CHARGED_STATE = "charged"
-MINUTES_PER_HOUR = 60
 LAUNCHD_LABEL = "com.wn.agent"
 LAUNCHD_TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launchd", LAUNCHD_LABEL + ".plist")
 LAUNCH_AGENTS_DIRECTORY = os.path.join("~", "Library", "LaunchAgents")
