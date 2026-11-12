@@ -1,4 +1,4 @@
-"""Measure trigger to sound at the Mac mic: python3 latency/measure_audio.py [--count N] [--trigger beep|ding|key|mac]
+"""Measure trigger to sound at the Mac mic: python3 tools/latency/measure_audio.py [--count N] [--trigger beep|ding|key|mac]
 
 Each trial starts bin/record_beep, waits for the mic to settle and for the
 noise floor window, notes t0, triggers a sound, and reads the onset from
@@ -30,7 +30,7 @@ from common import DEFAULT_QMP_ADDRESS, NANOSECONDS_PER_MILLISECOND, REPOSITORY,
 from wn.keys import combo_to_input_events, key_event
 from wn.qmp import qmp_client_for
 
-RECORDER = os.path.join(REPOSITORY, "latency", "bin", "record_beep")
+RECORDER = os.path.join(REPOSITORY, "tools", "latency", "bin", "record_beep")
 RECORD_SECONDS = 2.0
 SETTLE_MS = 250
 FLOOR_MS = 300

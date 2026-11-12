@@ -6,7 +6,7 @@ import socket
 import subprocess
 import sys
 
-REPOSITORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPOSITORY = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPOSITORY)
 
 AGENT_PORT = 47000

@@ -1,4 +1,4 @@
-"""Save a PNG of the guest screen: python3 latency/screendump.py OUT.png
+"""Save a PNG of the guest screen: python3 tools/latency/screendump.py OUT.png
 
 QEMU under UTM can only write screendumps to a relative path, which lands in
 UTM's group container, and this QEMU has no PNG support. This converts the
@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from wn.qmp import qmp_client_for
 

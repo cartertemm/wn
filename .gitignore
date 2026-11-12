@@ -12,6 +12,6 @@ vm/
 *.fd
 .DS_Store
 keygrab/bin/
-latency/bin/
+tools/latency/bin/
 efi/wn-acpi/target/
 efi/keys/*.key

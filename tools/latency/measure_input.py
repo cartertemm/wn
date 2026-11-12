@@ -1,4 +1,4 @@
-"""Measure QMP key press to guest ReadKey: python3 latency/measure_input.py [--count N] [--device ID]
+"""Measure QMP key press to guest ReadKey: python3 tools/latency/measure_input.py [--count N] [--device ID]
 
 Needs latency-agent.ps1 running in a focused guest window. Each trial sends
 "key" to the agent, waits for "ack key", then presses and releases ``a``

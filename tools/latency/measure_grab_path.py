@@ -1,4 +1,4 @@
-"""Measure host-side costs of wn grab without touching the guest: python3 latency/measure_grab_path.py
+"""Measure host-side costs of wn grab without touching the guest: python3 tools/latency/measure_grab_path.py
 
 1. 200 synthetic wn-keygrab JSON lines go through the same parse, translate, and
    QMP execute steps as wn.keygrab, to the fake QMP server from tests/.

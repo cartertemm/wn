@@ -267,7 +267,7 @@ python3 -m unittest discover -s tests
 - `wn/`: the CLI, setup, answer file, UTM config, and QMP code.
 - `tests/`: unit tests with fake QMP, `utmctl`, and key grab helpers.
 - `keygrab/`: the Swift key grab helper and its keycode table.
-- `latency/`: tools that measure input and audio latency.
+- `tools/`: helpers that the core features do not need, such as the input and audio latency tools in `tools/latency/`.
 
 ## License
 
