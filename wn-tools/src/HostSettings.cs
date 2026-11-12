@@ -21,7 +21,11 @@ namespace WnTools
 			var settings = new HostSettings { Port = DefaultPort };
 			string path = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), IniFileName);
 			if (!File.Exists(path))
+			{
+				Log.Debug("No " + path + ", using the default gateway and port " + DefaultPort);
 				return settings;
+			}
+			Log.Debug("Reading " + path);
 			foreach (string rawLine in File.ReadAllLines(path))
 			{
 				string line = rawLine.Trim();
@@ -36,6 +40,7 @@ namespace WnTools
 				else if (key == "port" && int.TryParse(value, out port))
 					settings.Port = port;
 			}
+			Log.Debug(string.Format("Settings: host={0}, port={1}", settings.ConfiguredHost ?? "(default gateway)", settings.Port));
 			return settings;
 		}
 
