@@ -9,7 +9,6 @@ import shutil
 import sys
 
 from wn import __version__, agent, keygrab, mouse
-from wn.attach import attach
 from wn.backend import create_backend
 from wn.battery_file import battery_writer, prepare_battery_file
 from wn.battery_sync import run_battery_command
@@ -70,10 +69,6 @@ def build_parser():
 	_add_key_options(type_text)
 
 	_add_mouse_parser(subcommands)
-
-	attach_parser = subcommands.add_parser("attach", help="send terminal keystrokes to the guest. Press ctrl+] twice to detach")
-	attach_parser.add_argument("--grab", action="store_true", help="use grab mode instead, the same as wn grab")
-	attach_parser.set_defaults(start_released=False, release_hotkey=keygrab.DEFAULT_RELEASE_HOTKEY, dry_run=False)
 
 	grab = subcommands.add_parser("grab", help="send every key press on the Mac keyboard to the guest, including the Windows key")
 	grab.add_argument("--start-released", action="store_true", help="start with the keyboard released, not grabbed")
@@ -320,14 +315,6 @@ def run_grab(context):
 		_grab_with(context, client)
 
 
-def run_attach(context):
-	if context.arguments.grab:
-		run_grab(context)
-		return
-	with context.connect_qmp(session=True) as client:
-		attach(client, context.config.key_delay_ms)
-
-
 def _fill_bundle(bundle, output, options, arguments):
 	data_directory = os.path.join(bundle, DATA_DIRECTORY_NAME)
 	os.makedirs(data_directory)
@@ -533,7 +520,6 @@ COMMANDS = {
 	"key": run_key,
 	"type": run_type,
 	"mouse": run_mouse,
-	"attach": run_attach,
 	"grab": run_grab,
 	"share": run_share,
 	"net": run_net,

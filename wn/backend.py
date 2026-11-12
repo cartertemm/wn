@@ -37,7 +37,7 @@ class Backend(abc.ABC):
 
 	@abc.abstractmethod
 	def qmp_socket_path(self, session=False):
-		"""Return the VM's QMP address. With ``session``, return the one for long-lived clients such as attach and grab."""
+		"""Return the VM's QMP address. With ``session``, return the one for long-lived clients such as grab."""
 
 	def share(self, host_path):
 		raise NotImplementedError("share is not implemented by the {} backend yet".format(type(self).__name__))

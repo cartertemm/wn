@@ -85,7 +85,6 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda,wn-to
 | `key` | `python3 -m wn key ctrl+alt+del` | Presses one or more key combos. |
 | `type` | `python3 -m wn type 'Get-ComputerInfo'` | Types ASCII text with a US layout. |
 | `mouse` | `python3 -m wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls. |
-| `attach` | `python3 -m wn attach` | Sends terminal input to the guest. Press `ctrl+]` twice to detach. |
 | `grab` | `python3 -m wn grab` | Sends every Mac key press to the guest. |
 | `init-vm` | `python3 -m wn init-vm --iso ~/Downloads/Win11_ARM64.iso` | Creates a UTM bundle without installing Windows. |
 | `update-vm-args` | `python3 -m wn update-vm-args` | Rewrites the QEMU arguments of a stopped VM. |
@@ -302,9 +301,9 @@ To remove the battery, stop the VM and run `wn update-vm-args` without
 | `backend` | `utm` | Which backend drives the VM. `utm` is the only one so far. |
 | `utmctl_path` | `/Applications/UTM.app/Contents/MacOS/utmctl` | Path of UTM's `utmctl` tool. |
 | `qmp_port` | `4444` | QMP port on `127.0.0.1` for `key`, `type`, and `mouse`. |
-| `qmp_session_port` | `qmp_port` + 1 | Second QMP port, used by `attach` and `grab`. |
+| `qmp_session_port` | `qmp_port` + 1 | Second QMP port, used by `grab`. |
 | `qmp_socket` | none | QMP address: a Unix socket path or `tcp:HOST:PORT`. When set, every command uses it. |
-| `key_delay_ms` | `20` | Pause after each key is released for `key`, `type`, and `attach`. |
+| `key_delay_ms` | `20` | Pause after each key is released for `key` and `type`. |
 | `screen_size` | none | Guest screen size such as `1280x800`. When set, `wn mouse move` takes pixels. |
 | `keygrab_binary` | `keygrab/bin/wn-keygrab` | Path of the key grab helper. |
 | `keygrab_keycodes` | `keygrab/keycodes.json` | Table that maps macOS keycodes to QEMU key names. |
@@ -326,7 +325,7 @@ it. Change this with `--release-hotkey`, for example `control,shift`. Build
 the helper once with `keygrab/build.sh`, then give your terminal app
 Accessibility permission in System Settings > Privacy & Security >
 Accessibility. Grab mode needs a local session on the Mac. Over SSH, use
-`wn attach`. See `keygrab/README.md` for details.
+`wn key` and `wn type`. See `keygrab/README.md` for details.
 
 **Headless mode.** `--headless` on `setup` or `init-vm` creates the VM with no
 display window. Pass `--headless` to `update-vm-args` too for such a VM.

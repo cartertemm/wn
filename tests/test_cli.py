@@ -240,14 +240,6 @@ class MouseCommandTests(CLITestCase):
 		])
 
 
-class AttachCommandTests(CLITestCase):
-	def test_attach_connects_to_session_socket(self):
-		with mock.patch("wn.cli.attach") as attach:
-			self.assertEqual(self.run_cli("attach")[0], 0)
-		self.assertEqual(self.qmp_log[0], ("connect", "/fake/qmp-session.sock"))
-		attach.assert_called_once()
-
-
 class UTMWiringTests(CLITestCase):
 	def test_key_reaches_utm_qmp_server_over_tcp(self):
 		handlers = {"input-send-event": lambda request: [reply(request, {})]}
@@ -468,12 +460,6 @@ class GrabCommandTests(CLITestCase):
 
 	def test_default_release_hotkey(self):
 		self.run_cli("grab", "--dry-run")
-		self.assertEqual(read_log(self.helper_log)[0], ["--release-hotkey", "control,option,command"])
-
-	def test_attach_grab_uses_grab_mode(self):
-		exit_code, _, stderr = self.run_cli("attach", "--grab")
-		self.assertEqual(exit_code, 0, stderr)
-		self.assertEqual([entry[0] for entry in self.qmp_log], ["connect", "input-send-event", "input-send-event", "close"])
 		self.assertEqual(read_log(self.helper_log)[0], ["--release-hotkey", "control,option,command"])
 
 	def test_missing_helper_is_reported(self):
