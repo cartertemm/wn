@@ -4,7 +4,6 @@ import os
 import plistlib
 import random
 import shlex
-import subprocess
 import uuid
 
 from wn.efivars import EfiVarsError, make_vars_with_cert
@@ -32,7 +31,6 @@ BLOCK_AUDIO = "audio"
 BLOCK_BATTERY = "battery"
 BLOCK_EXTRA = "extra"
 ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_EXTRA)
-DEFAULT_QEMU_IMG_PATH = "/opt/homebrew/bin/qemu-img"
 QMP_HOST = "127.0.0.1"
 DEFAULT_QMP_PORT = 4444
 AUDIODEV_ID = "ca0"
@@ -441,16 +439,3 @@ def detach_drives(bundle_path, image_names):
 		image_path = os.path.join(bundle_path, DATA_DIRECTORY_NAME, image_name)
 		if os.path.exists(image_path):
 			os.remove(image_path)
-
-
-def create_disk_image(path, size_gib, qemu_img_path=DEFAULT_QEMU_IMG_PATH):
-	"""Create an empty qcow2 image of ``size_gib`` GiB. ``qemu_img_path`` is a path or a list of arguments."""
-	command = [qemu_img_path] if isinstance(qemu_img_path, str) else list(qemu_img_path)
-	command += ["create", "-f", "qcow2", path, "{}G".format(size_gib)]
-	try:
-		result = subprocess.run(command, capture_output=True, text=True)
-	except OSError as error:
-		raise UTMConfigError("cannot run qemu-img at {}: {}".format(command[0], error)) from None
-	if result.returncode != 0:
-		detail = result.stderr.strip() or result.stdout.strip() or "no output"
-		raise UTMConfigError("qemu-img create failed with exit code {}: {}".format(result.returncode, detail))

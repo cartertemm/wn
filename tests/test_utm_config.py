@@ -1,7 +1,5 @@
-import json
 import os
 import plistlib
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -12,7 +10,6 @@ from wn.utm_config import (
 	CONFIGURATION_VERSION,
 	EFI_VARS_FILE_NAME,
 	SECURE_VARS_TEMPLATE,
-	DEFAULT_QEMU_IMG_PATH,
 	ARGUMENT_BLOCKS,
 	BLOCK_AUDIO,
 	BLOCK_BATTERY,
@@ -26,7 +23,6 @@ from wn.utm_config import (
 	build_config,
 	default_battery_file,
 	config_plist_bytes,
-	create_disk_image,
 	detach_drives,
 	merge_argument_blocks,
 	set_display_hardware,
@@ -582,53 +578,6 @@ class ArgumentBlockTests(unittest.TestCase):
 	def test_missing_block_goes_before_later_blocks(self):
 		merged = merge_argument_blocks(["-qmp", "a", "-gdb", "x"], {BLOCK_AUDIO: ["-device", "intel-hda"]})
 		self.assertEqual(merged, ["-qmp", "a", "-device", "intel-hda", "-gdb", "x"])
-
-
-FAKE_QEMU_IMG_SOURCE = """
-import json, os, sys
-with open(os.environ["FAKE_QEMU_IMG_LOG"], "w") as log:
-	json.dump(sys.argv[1:], log)
-if os.environ.get("FAKE_QEMU_IMG_FAIL"):
-	print("qemu-img: Could not create: Permission denied", file=sys.stderr)
-	sys.exit(1)
-"""
-
-
-class CreateDiskImageTests(unittest.TestCase):
-	def setUp(self):
-		directory = tempfile.TemporaryDirectory()
-		self.addCleanup(directory.cleanup)
-		self.directory = directory.name
-		self.fake = os.path.join(self.directory, "fake_qemu_img.py")
-		with open(self.fake, "w") as fake_file:
-			fake_file.write(FAKE_QEMU_IMG_SOURCE)
-		self.log = os.path.join(self.directory, "log.json")
-		self.set_environment("FAKE_QEMU_IMG_LOG", self.log)
-
-	def set_environment(self, key, value):
-		previous = os.environ.get(key)
-		os.environ[key] = value
-		self.addCleanup(lambda: os.environ.pop(key) if previous is None else os.environ.__setitem__(key, previous))
-
-	def test_default_path(self):
-		self.assertEqual(DEFAULT_QEMU_IMG_PATH, "/opt/homebrew/bin/qemu-img")
-
-	def test_runs_qemu_img_create(self):
-		image = os.path.join(self.directory, "disk.qcow2")
-		create_disk_image(image, 64, qemu_img_path=[sys.executable, self.fake])
-		with open(self.log) as log:
-			self.assertEqual(json.load(log), ["create", "-f", "qcow2", image, "64G"])
-
-	def test_failure_includes_stderr(self):
-		self.set_environment("FAKE_QEMU_IMG_FAIL", "1")
-		with self.assertRaises(UTMConfigError) as context:
-			create_disk_image(os.path.join(self.directory, "disk.qcow2"), 64, qemu_img_path=[sys.executable, self.fake])
-		self.assertIn("Permission denied", str(context.exception))
-
-	def test_missing_qemu_img(self):
-		with self.assertRaises(UTMConfigError) as context:
-			create_disk_image(os.path.join(self.directory, "disk.qcow2"), 64, qemu_img_path="/no/such/qemu-img")
-		self.assertIn("/no/such/qemu-img", str(context.exception))
 
 
 if __name__ == "__main__":

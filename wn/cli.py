@@ -6,7 +6,6 @@ import getpass
 import json
 import os
 import shlex
-import shutil
 import sys
 import time
 
@@ -30,16 +29,11 @@ from wn.utm_config import (
 	BLOCK_QMP,
 	BLOCK_RAMFB,
 	BUNDLE_SUFFIX,
-	DATA_DIRECTORY_NAME,
 	DEFAULT_BUNDLE_DIRECTORY,
 	DEFAULT_OPTIONS,
-	DEFAULT_QEMU_IMG_PATH,
 	argument_units,
 	battery_file_for_bundle,
-	create_disk_image,
-	random_mac_address,
 	update_additional_arguments,
-	write_bundle,
 )
 
 EXIT_SUCCESS = 0
@@ -82,7 +76,6 @@ def build_parser():
 	share = subcommands.add_parser("share", help="share a host folder with the guest")
 	share.add_argument("host_path")
 	subcommands.add_parser("net", help="show or change VM networking")
-	_add_init_vm_parser(subcommands)
 	_add_update_vm_args_parser(subcommands)
 	_add_setup_parser(subcommands)
 	_add_agent_parser(subcommands)
@@ -170,27 +163,6 @@ def _add_update_vm_args_parser(subcommands):
 	battery.add_argument("--no-battery", action="store_true", help="remove the battery NVDIMM")
 	update.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the audio arguments, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\"")
 	update.add_argument("--extra-args", metavar="ARGS", help="QEMU arguments that replace every argument that is not QMP, ramfb, audio, or battery, such as \"-device virtio-keyboard-pci,id=vkbd\"")
-
-
-def _add_audio_args_option(parser):
-	parser.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the default coreaudio block, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\"")
-	parser.add_argument("--extra-args", metavar="ARGS", help="more QEMU arguments to add at the end, such as \"-device virtio-keyboard-pci,id=vkbd\"")
-
-
-def _add_init_vm_parser(subcommands):
-	init_vm = subcommands.add_parser("init-vm", help="create a UTM bundle for a new Windows 11 ARM64 VM")
-	init_vm.add_argument("--name", help="VM name (default: vm_name from the config)")
-	init_vm.add_argument("--disk-gib", type=int, default=DEFAULT_DISK_GIB, help="disk size in GiB (default: %(default)s)")
-	init_vm.add_argument("--cpus", type=int, default=DEFAULT_OPTIONS["cpu_count"], help="number of CPU cores (default: %(default)s)")
-	init_vm.add_argument("--memory-mib", type=int, default=DEFAULT_OPTIONS["memory_mib"], help="memory in MiB (default: %(default)s)")
-	init_vm.add_argument("--iso", metavar="PATH", help="Windows installer ISO to copy into the bundle")
-	init_vm.add_argument("--driver-iso", metavar="PATH", help="driver ISO, such as virtio-win, to copy into the bundle as a second CD")
-	init_vm.add_argument("--machine-properties", default=DEFAULT_OPTIONS["machine_properties"], metavar="PROPERTIES", help="QEMU machine properties for UTM. An empty string keeps UTM's defaults (default: %(default)s)")
-	init_vm.add_argument("--headless", action="store_true", help="create the VM without a display window")
-	_add_audio_args_option(init_vm)
-	init_vm.add_argument("--mac", help="MAC address (default: a random 52:54:00:xx:xx:xx address)")
-	init_vm.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
-	init_vm.add_argument("--qemu-img", metavar="PATH", default=DEFAULT_QEMU_IMG_PATH, help="qemu-img executable (default: %(default)s)")
 
 
 def _add_key_options(parser):
@@ -342,49 +314,6 @@ def run_grab(context):
 		return
 	with context.connect_qmp(session=True) as client:
 		_grab_with(context, client)
-
-
-def _fill_bundle(bundle, output, options, arguments):
-	data_directory = os.path.join(bundle, DATA_DIRECTORY_NAME)
-	os.makedirs(data_directory)
-	create_disk_image(os.path.join(data_directory, options["disk_image"]), arguments.disk_gib, arguments.qemu_img)
-	for source, image in ((arguments.iso, options["iso_image"]), (arguments.driver_iso, options["driver_iso_image"])):
-		if source:
-			shutil.copyfile(source, os.path.join(data_directory, image))
-	write_bundle(output, options)
-
-
-def run_init_vm(context):
-	arguments = context.arguments
-	name = arguments.name or context.config.vm_name
-	output = os.path.expanduser(arguments.output)
-	bundle = os.path.join(output, name + BUNDLE_SUFFIX)
-	if os.path.exists(bundle):
-		raise WnError("{} already exists. Remove it first or pick another --name".format(bundle))
-	options = {
-		"name": name,
-		"mac_address": arguments.mac or random_mac_address(),
-		"cpu_count": arguments.cpus,
-		"memory_mib": arguments.memory_mib,
-		"disk_image": DEFAULT_OPTIONS["disk_image"],
-		"iso_image": os.path.basename(arguments.iso) if arguments.iso else None,
-		"driver_iso_image": os.path.basename(arguments.driver_iso) if arguments.driver_iso else None,
-		"machine_properties": arguments.machine_properties,
-		"headless": arguments.headless,
-		"audio_args": arguments.audio_args,
-		"extra_args": arguments.extra_args,
-		"qmp_port": context.config.qmp_port,
-		"qmp_session_port": context.config.qmp_session_port,
-	}
-	try:
-		_fill_bundle(bundle, output, options, arguments)
-	except BaseException as error:
-		shutil.rmtree(bundle, ignore_errors=True)
-		if isinstance(error, OSError):
-			raise WnError("cannot create {}: {}".format(bundle, error)) from None
-		raise
-	context.print("Created {}".format(bundle))
-	context.print("Next: open the bundle once in UTM, or run: open {}".format(shlex.quote(bundle)))
 
 
 def run_update_vm_args(context):
@@ -571,7 +500,6 @@ COMMANDS = {
 	"grab": run_grab,
 	"share": run_share,
 	"net": run_net,
-	"init-vm": run_init_vm,
 	"update-vm-args": run_update_vm_args,
 	"setup": run_setup,
 	"agent": run_agent,

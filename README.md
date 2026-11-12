@@ -91,7 +91,6 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda
 | `type` | `python3 -m wn type 'Get-ComputerInfo'` | Types ASCII text with a US layout. |
 | `mouse` | `python3 -m wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls. |
 | `grab` | `python3 -m wn grab` | Sends every Mac key press to the guest. |
-| `init-vm` | `python3 -m wn init-vm --iso ~/Downloads/Win11_ARM64.iso` | Creates a UTM bundle without installing Windows. |
 | `update-vm-args` | `python3 -m wn update-vm-args --battery` | Changes parts of the QEMU arguments of a stopped VM and prints the change. |
 | `agent` | `python3 -m wn agent start` | Writes the Mac's battery status to the native battery in the guest. Takes `start`, `stop`, `status`, `--install`, `--uninstall`, or `--once`. See [Native battery](#native-battery). |
 | `battery` | `python3 -m wn battery status` | Reads or writes the native battery block in guest memory. See [Native battery](#native-battery). |
@@ -229,18 +228,15 @@ the helper once with `keygrab/build.sh`, then give your terminal app
 Accessibility permission in System Settings > Privacy & Security >
 Accessibility. See `keygrab/README.md` for details.
 
-**Headless mode.** `--headless` on `setup` or `init-vm` creates the VM with no
-display window.
+**Headless mode.** `--headless` on `setup` creates the VM with no display
+window.
 
-**QEMU arguments.** `init-vm` and `update-vm-args` take these options:
+**QEMU arguments.** `update-vm-args` takes these options:
 
 - `--audio-args ARGS` replaces the default CoreAudio block (`-audiodev`,
   `intel-hda`, and `hda-output`), for example to change the buffer sizes.
-- `--extra-args ARGS` adds QEMU arguments after everything else, for example
-  `-device virtio-keyboard-pci,id=vkbd`.
-- `--machine-properties PROPS` (`init-vm` only) sets the QEMU machine
-  properties. The default `kernel-irqchip=off` avoids the UTM 5.0.8 reboot
-  hang with 2 or more vCPUs. An empty string keeps UTM's defaults.
+- `--extra-args ARGS` sets the QEMU arguments that come after everything else,
+  for example `-device virtio-keyboard-pci,id=vkbd`.
 
 `update-vm-args` reads the bundle's current arguments and changes only the
 parts that its flags name. Everything else stays as it is:
