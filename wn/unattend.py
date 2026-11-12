@@ -51,6 +51,8 @@ ZONEINFO_MARKER = "zoneinfo/"
 PAYLOAD_TAG = r"wn\payload.tag"
 VIRTIO_FOLDER = "virtio"
 TOOLS_FOLDER = "tools"
+EFI_FOLDER = "efi"
+BATTERY_INSTALLER = "install-wn-acpi.ps1"
 WINPE_DRIVER_FOLDER = "$WinPEDriver$"
 DRIVER_SUBPATH = ("w11", "ARM64")
 FIRST_LOGON_DRIVERS = ("NetKVM", "viogpudo", "vioinput", "viostor", "vioscsi", "vioserial", "Balloon", "viorng")
@@ -111,8 +113,8 @@ def _logged(command):
 	return "{} >> {} 2>&1".format(command, SETUP_LOG)
 
 
-def setup_commands(guest_tools_name, nvda_installer_name=None):
-	"""Return the first-logon commands that finish the VM: drivers, display, guest tools, NVDA, then a reboot."""
+def setup_commands(guest_tools_name, nvda_installer_name=None, battery=True):
+	"""Return the first-logon commands that finish the VM: drivers, display, guest tools, NVDA, battery driver, then a reboot."""
 	driver_folder = "\\".join(DRIVER_SUBPATH)
 	commands = [
 		_on_payload_drive(_logged("pnputil /add-driver %d:\\{}\\{}\\{}\\*.inf /install".format(VIRTIO_FOLDER, driver, driver_folder)))
@@ -124,6 +126,8 @@ def setup_commands(guest_tools_name, nvda_installer_name=None):
 		commands.append(_on_payload_drive(_logged("%d:\\{}\\{} --install-silent --enable-start-on-logon=True".format(TOOLS_FOLDER, nvda_installer_name))))
 		commands.append("cmd /c for /l %i in (1,1,{}) do @if not exist \"{}\" ping -n 3 127.0.0.1 >nul".format(NVDA_INSTALL_WAIT_ROUNDS, NVDA_INSTALLED_PATH))
 		commands.append(_logged("cmd /c reg add \"HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Accessibility\" /v Configuration /t REG_SZ /d nvda_nvda_v1 /f"))
+	if battery:
+		commands.append(_on_payload_drive(_logged("powershell -ExecutionPolicy Bypass -File %d:\\{}\\{}".format(EFI_FOLDER, BATTERY_INSTALLER))))
 	done_task = "schtasks /create /f /tn {name} /sc onstart /ru SYSTEM /tr \"cmd /c echo {done}>{marker} & schtasks /delete /tn {name} /f\"".format(
 		name=DONE_TASK_NAME, done=SETUP_DONE_TEXT, marker=SETUP_DONE_MARKER)
 	commands.append("cmd /c echo {}>{} & {} & shutdown /r /t {}".format(SETUP_REBOOTING_TEXT, SETUP_DONE_MARKER, done_task, REBOOT_DELAY_SECONDS))

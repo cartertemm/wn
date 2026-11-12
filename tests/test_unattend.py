@@ -261,6 +261,19 @@ class SetupCommandTests(unittest.TestCase):
 		commands = setup_commands("utm-guest-tools-0.1.271.exe", None)
 		self.assertNotIn("nvda", "\n".join(commands).lower())
 
+	def test_battery_driver_before_reboot(self):
+		battery = [index for index, command in enumerate(self.commands) if "install-wn-acpi.ps1" in command]
+		self.assertEqual(battery, [len(self.commands) - 2])
+		command = self.commands[battery[0]]
+		self.assertIn(PAYLOAD_TAG, command)
+		self.assertIn("powershell -ExecutionPolicy Bypass -File %d:\\efi\\install-wn-acpi.ps1", command)
+		self.assertTrue(command.endswith(">> C:\\wn-setup.log 2>&1"))
+
+	def test_without_battery(self):
+		commands = setup_commands("utm-guest-tools-0.1.271.exe", "nvda_2026.3.1.exe", battery=False)
+		self.assertNotIn("install-wn-acpi", "\n".join(commands))
+		self.assertEqual(len(commands), len(self.commands) - 1)
+
 	def test_commands_fit_unattend_limit(self):
 		build_unattend(options(first_logon_commands=tuple(self.commands)))
 

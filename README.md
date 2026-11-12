@@ -116,11 +116,16 @@ into that file.
 
 This needs three things, each set up once:
 
-1. The driver, signed with your own Secure Boot key.
-2. That key's certificate in the VM's Secure Boot allowed list (`db`).
+1. The signed driver on the VM's EFI system partition, registered with the
+   firmware as a driver load option.
+2. The certificate of the key that signed it in the VM's Secure Boot allowed
+   list (`db`).
 3. The NVDIMM on the VM, added with `wn update-vm-args --battery`.
 
-**Sign the driver.** Install `osslsigncode` and create a key pair:
+The repository carries the signed driver, `efi/dist/wn-acpi.efi`, and its
+certificate, `efi/dist/wn-sb.cer`, so you do not build or sign anything.
+If you change the driver, sign it with your own key and enroll that key's
+certificate instead. Install `osslsigncode` and create a key pair:
 
 ```sh
 brew install osslsigncode
@@ -128,49 +133,40 @@ mkdir -p efi/keys
 openssl req -new -x509 -newkey rsa:2048 -nodes -subj "/CN=wn Secure Boot/" \
 	-keyout efi/keys/wn-sb.key -out efi/keys/wn-sb.crt -days 3650
 openssl x509 -in efi/keys/wn-sb.crt -outform DER -out efi/keys/wn-sb.cer
-```
-
-Git ignores `efi/keys/*.key`. Keep the private key safe: anything signed with
-it runs in your VM with Secure Boot on. Build and sign the driver:
-
-```sh
 (cd efi/wn-acpi && cargo build --release)
 efi/sign.sh
 ```
 
-`efi/sign.sh` writes `efi/wn-acpi/wn-acpi-signed.efi` and checks the
-signature.
+`efi/sign.sh` writes `efi/dist/wn-acpi.efi` and `efi/dist/wn-sb.cer` and
+checks the signature. Git ignores `efi/keys/*.key`. Keep the private key safe:
+anything signed with it runs in your VM with Secure Boot on.
 
-**Copy the driver and certificate to the VM.** With the VM running:
+**Install the driver.** Setup does this. A first-logon command runs
+`efi\install-wn-acpi.ps1` from the setup disc. It copies the driver and the
+certificate to `\EFI\wn` on the EFI system partition and writes the
+`Driver####` and `DriverOrder` firmware variables. It logs to
+`C:\wn-acpi-install.log`.
+
+For an existing VM, copy the script, the driver, and the certificate into one
+folder in the VM, then run the script as administrator. With the VM running:
 
 ```sh
 U=/Applications/UTM.app/Contents/MacOS/utmctl
-$U file push Windows 'C:\wn-sb.cer' < efi/keys/wn-sb.cer
-$U file push Windows 'C:\wn-acpi.efi' < efi/wn-acpi/wn-acpi-signed.efi
+$U exec Windows --cmd cmd /c mkdir 'C:\wn-acpi'
+$U file push Windows 'C:\wn-acpi\install-wn-acpi.ps1' < efi/guest/install-wn-acpi.ps1
+$U file push Windows 'C:\wn-acpi\wn-acpi.efi' < efi/dist/wn-acpi.efi
+$U file push Windows 'C:\wn-acpi\wn-sb.cer' < efi/dist/wn-sb.cer
+$U exec Windows --cmd powershell -ExecutionPolicy Bypass -File 'C:\wn-acpi\install-wn-acpi.ps1'
 ```
 
-Then, in an administrator Command Prompt in Windows:
+`utmctl exec` runs the script as SYSTEM, which works too. You can run the
+script again at any time. It replaces an existing `wn-acpi` entry and does not
+add a second one.
 
-```bat
-mountvol S: /S
-mkdir S:\EFI\wn
-copy /y C:\wn-sb.cer S:\EFI\wn\wn-sb.cer
-copy /y C:\wn-acpi.efi S:\EFI\wn\wn-acpi.efi
-mountvol S: /D
-```
-
-**Register the driver with the firmware.** Do this once, from the UEFI
-shell. Start the VM and press Esc until the firmware menu opens
-(`python3 -m wn key esc` works too). Choose Boot Manager > EFI Internal
-Shell, press Esc to skip `startup.nsh`, and run:
-
-```
-bcfg driver add 0 FS0:\EFI\wn\wn-acpi.efi "wn-acpi"
-reset
-```
-
-**Enroll the certificate.** Open the firmware menu again and go to Device
-Manager > Secure Boot Configuration:
+**Enroll the certificate.** Setup does this. For an existing VM, enroll it
+from the firmware menu. Start the VM and press Esc until the menu opens
+(`python3 -m wn key esc` works too). Go to Device Manager > Secure Boot
+Configuration:
 
 1. Set Secure Boot Mode to Custom Mode.
 2. Open Custom Secure Boot Options > DB Options > Enroll Signature >

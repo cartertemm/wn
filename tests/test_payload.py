@@ -19,6 +19,7 @@ from wn.unattend import FIRST_LOGON_DRIVERS, PAYLOAD_TAG, SETUP_DRIVERS, WINPE_D
 ISO_SECTOR_SIZE = 2048
 ISO_PRIMARY_DESCRIPTOR_OFFSET = 16 * ISO_SECTOR_SIZE
 HAS_HDIUTIL = shutil.which("hdiutil") is not None
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def write_file(path, content=b"x"):
@@ -63,7 +64,18 @@ class PayloadImageTests(unittest.TestCase):
 		expected = [os.path.join("tools", "nvda_2026.3.1.exe"), os.path.join("tools", "utm-guest-tools-0.1.271.exe"), PAYLOAD_TAG.replace("\\", os.sep)]
 		expected += [os.path.join("virtio", driver, "w11", "ARM64", driver.lower() + ".inf") for driver in FIRST_LOGON_DRIVERS]
 		expected += [os.path.join(WINPE_DRIVER_FOLDER, driver, driver.lower() + ".inf") for driver in SETUP_DRIVERS]
+		expected += [os.path.join("efi", name) for name in ("wn-acpi.efi", "wn-sb.cer", "install-wn-acpi.ps1")]
 		self.assertEqual(listing, sorted(expected))
+
+	def test_battery_files_match_repo(self):
+		stage_payload(self.staging, self.virtio_iso, self.guest_tools_iso, [])
+		for name, repo_path in (("wn-acpi.efi", ("efi", "dist", "wn-acpi.efi")), ("wn-sb.cer", ("efi", "dist", "wn-sb.cer")), ("install-wn-acpi.ps1", ("efi", "guest", "install-wn-acpi.ps1"))):
+			with open(os.path.join(self.staging, "efi", name), "rb") as staged, open(os.path.join(REPO_ROOT, *repo_path), "rb") as source:
+				self.assertEqual(staged.read(), source.read(), name)
+
+	def test_stage_without_battery(self):
+		stage_payload(self.staging, self.virtio_iso, self.guest_tools_iso, [], battery=False)
+		self.assertFalse(os.path.exists(os.path.join(self.staging, "efi")))
 
 	def test_staging_can_be_deleted(self):
 		stage_payload(self.staging, self.virtio_iso, self.guest_tools_iso, [self.nvda])
@@ -101,6 +113,17 @@ class PayloadImageTests(unittest.TestCase):
 		command_lines = [element.text for element in root.iter("{urn:schemas-microsoft-com:unattend}CommandLine")]
 		self.assertTrue(any("utm-guest-tools-0.1.271.exe /S" in line for line in command_lines))
 		self.assertTrue(any("nvda_2026.3.1.exe --install-silent" in line for line in command_lines))
+		self.assertTrue(any("efi\\install-wn-acpi.ps1" in line for line in command_lines))
+
+	def test_build_payload_iso_without_battery(self):
+		image = os.path.join(self.directory.name, "wnsetup.iso")
+		build_payload_iso(image, UnattendOptions(username="carter"), self.virtio_iso, self.guest_tools_iso, None, battery=False)
+		with mounted(image) as mount_point:
+			with open(os.path.join(mount_point, "autounattend.xml"), "rb") as answer_file:
+				root = ET.fromstring(answer_file.read())
+			self.assertFalse(os.path.exists(os.path.join(mount_point, "efi")))
+		command_lines = [element.text for element in root.iter("{urn:schemas-microsoft-com:unattend}CommandLine")]
+		self.assertFalse(any("install-wn-acpi" in line for line in command_lines))
 
 	def test_build_payload_iso_without_nvda(self):
 		image = os.path.join(self.directory.name, "wnsetup.iso")

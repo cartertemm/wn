@@ -10,7 +10,9 @@ import tempfile
 
 from wn.errors import WnError
 from wn.unattend import (
+	BATTERY_INSTALLER,
 	DRIVER_SUBPATH,
+	EFI_FOLDER,
 	FIRST_LOGON_DRIVERS,
 	PAYLOAD_TAG,
 	SETUP_DRIVERS,
@@ -24,6 +26,12 @@ from wn.unattend import (
 VOLUME_NAME = "WNSETUP"
 ANSWER_FILE_NAME = "autounattend.xml"
 GUEST_TOOLS_PATTERN = "utm-guest-tools-*.exe"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BATTERY_FILES = (
+	os.path.join(REPO_ROOT, "efi", "dist", "wn-acpi.efi"),
+	os.path.join(REPO_ROOT, "efi", "dist", "wn-sb.cer"),
+	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_INSTALLER),
+)
 
 
 class PayloadError(WnError):
@@ -80,8 +88,15 @@ def _stage_guest_tools(tools_folder, guest_tools_mount):
 	return installer
 
 
-def stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools=()):
-	"""Fill ``staging`` with the drivers, guest tools, and ``extra_tools``. Return the guest tools installer name.
+def _stage_battery(staging):
+	efi_folder = os.path.join(staging, EFI_FOLDER)
+	os.makedirs(efi_folder, exist_ok=True)
+	for source in BATTERY_FILES:
+		shutil.copyfile(source, os.path.join(efi_folder, os.path.basename(source)))
+
+
+def stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools=(), battery=True):
+	"""Fill ``staging`` with the drivers, guest tools, ``extra_tools``, and the battery driver. Return the guest tools installer name.
 
 	The caller writes ``autounattend.xml`` into ``staging`` before calling ``write_iso_image``.
 	"""
@@ -97,6 +112,8 @@ def stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools=()):
 		installer = _stage_guest_tools(tools_folder, guest_tools_mount)
 	for tool in extra_tools:
 		shutil.copyfile(tool, os.path.join(tools_folder, os.path.basename(tool)))
+	if battery:
+		_stage_battery(staging)
 	return installer
 
 
@@ -112,13 +129,13 @@ def write_iso_image(staging, image_path):
 	return image_path
 
 
-def build_payload_iso(image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer=None):
+def build_payload_iso(image_path, unattend_options, virtio_iso, guest_tools_iso, nvda_installer=None, battery=True):
 	"""Write the complete setup disc: drivers, installers, and an answer file whose first-logon steps install them."""
 	with tempfile.TemporaryDirectory(prefix="wn-payload-") as staging:
 		extra_tools = [nvda_installer] if nvda_installer else []
-		guest_tools_name = stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools)
+		guest_tools_name = stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools, battery)
 		nvda_name = os.path.basename(nvda_installer) if nvda_installer else None
-		commands = tuple(setup_commands(guest_tools_name, nvda_name))
+		commands = tuple(setup_commands(guest_tools_name, nvda_name, battery))
 		answer_file = build_unattend(dataclasses.replace(unattend_options, first_logon_commands=commands))
 		with open(os.path.join(staging, ANSWER_FILE_NAME), "wb") as output:
 			output.write(answer_file)

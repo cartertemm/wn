@@ -15,4 +15,3 @@ keygrab/bin/
 latency/bin/
 efi/wn-acpi/target/
 efi/keys/*.key
-efi/wn-acpi/wn-acpi-signed.efi
