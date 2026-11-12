@@ -107,6 +107,12 @@ def _add_agent_parser(subcommands):
 	modes.add_argument("--once", action="store_true", help="print the battery status as JSON and exit")
 	modes.add_argument("--install", action="store_true", help="start the agent at every login with a launchd agent in ~/Library/LaunchAgents")
 	modes.add_argument("--uninstall", action="store_true", help="remove the launchd agent")
+	actions = agent_parser.add_subparsers(dest="agent_command", metavar="action")
+	start = actions.add_parser("start", help="start the launchd agent if it is installed, else run in the foreground until Ctrl+C")
+	start.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
+	actions.add_parser("stop", help="stop the launchd agent, or the agent running in the foreground")
+	actions.add_parser("status", help="show whether the agent is installed and running. Exits 1 when it is not running")
+	agent_parser.set_defaults(agent_parser=agent_parser)
 
 
 def _add_battery_parser(subcommands):
@@ -492,7 +498,11 @@ def _setup_answers(arguments, stdin, stdout):
 
 
 def run_agent(context):
-	agent.run_agent_command(context.arguments, context.config, context.stdout, context.stderr)
+	arguments = context.arguments
+	has_flag = arguments.once or arguments.install or arguments.uninstall
+	if has_flag == bool(arguments.agent_command):
+		arguments.agent_parser.error("give one of start, stop, status, --install, --uninstall, or --once")
+	return agent.run_agent_command(arguments, context.config, context.stdout, context.stderr)
 
 
 def run_battery(context):
@@ -537,8 +547,8 @@ def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_clien
 	arguments = build_parser().parse_args(argv)
 	try:
 		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin, stderr)
-		COMMANDS[arguments.command](context)
+		exit_code = COMMANDS[arguments.command](context)
 	except (WnError, NotImplementedError) as error:
 		stderr.write("wn: error: {}\n".format(error))
 		return EXIT_FAILURE
-	return EXIT_SUCCESS
+	return EXIT_SUCCESS if exit_code is None else exit_code

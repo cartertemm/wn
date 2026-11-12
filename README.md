@@ -88,7 +88,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda
 | `grab` | `python3 -m wn grab` | Sends every Mac key press to the guest. |
 | `init-vm` | `python3 -m wn init-vm --iso ~/Downloads/Win11_ARM64.iso` | Creates a UTM bundle without installing Windows. |
 | `update-vm-args` | `python3 -m wn update-vm-args` | Rewrites the QEMU arguments of a stopped VM. |
-| `agent` | `python3 -m wn agent` | Writes the Mac's battery status to the native battery in the guest. See [Native battery](#native-battery). |
+| `agent` | `python3 -m wn agent start` | Writes the Mac's battery status to the native battery in the guest. Takes `start`, `stop`, `status`, `--install`, `--uninstall`, or `--once`. See [Native battery](#native-battery). |
 | `battery` | `python3 -m wn battery status` | Reads or writes the native battery block in guest memory. See [Native battery](#native-battery). |
 
 `key`, `type`, and `mouse` take `--dry-run` to print the QMP commands as JSON
@@ -200,20 +200,35 @@ that folder, so QEMU gets the bare file name. Quit UTM and open it again so
 it reads the new arguments, then start the VM. Run the command again after
 you change the VM's memory size in UTM.
 
-`wn agent` checks the battery every 5 seconds. It writes the file at once
-when the status changes, and every 30 seconds otherwise. Windows sees each
-write within about a second. If the file is missing, the agent logs it and
-tries again. `wn agent --once` prints the battery status as JSON and writes
-the file once.
+`wn agent start` checks the battery every 5 seconds. It writes the file at
+once when the status changes, and every 30 seconds otherwise. Windows sees
+each write within about a second. If the file is missing, the agent logs it
+and tries again. Without the launch agent below, `wn agent start` runs in the
+terminal until you press Ctrl+C. `wn agent --once` prints the battery status
+as JSON and writes the file once.
 
-To start `wn agent` when you log in, run this on the Mac. It adds a launch
-agent:
+To start the agent when you log in, run this on the Mac. It adds a launch
+agent that launchd keeps running and logs to `~/Library/Logs/wn-agent.log`:
 
 ```sh
 python3 -m wn agent --install
 ```
 
 To turn autostart off, run `python3 -m wn agent --uninstall`.
+
+Control the agent with these commands:
+
+```sh
+python3 -m wn agent status
+python3 -m wn agent stop
+python3 -m wn agent start
+```
+
+`status` shows whether the launch agent is installed, whether the agent runs
+and its PID, the QMP address and whether the VM answers there, and when the
+battery file was last written. It exits with 1 when the agent is not running.
+`stop` unloads the launch agent until you log in again or run `start`. If the
+agent runs in a terminal, `stop` sends it SIGTERM.
 
 Use `wn battery` to check the block by hand:
 

@@ -10,6 +10,8 @@
 		<string>-m</string>
 		<string>wn</string>
 		<string>agent</string>
+		<string>start</string>
+		<string>--foreground</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>@WORKING_DIRECTORY@</string>
