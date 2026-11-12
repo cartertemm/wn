@@ -3,16 +3,18 @@ import json
 import os
 import plistlib
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
 
 from fake_keygrab_helper import read_log, write_fake_helper
-from fake_qmp_server import TCPFakeQMPServer, reply
+from fake_qmp_server import TCPFakeQMPServer, error_reply, reply
 from fakes import FakeBackend, RecordingQMPClient, write_config
 from wn.cli import main
 from wn.keys import combo_to_input_events
+from wn.utm_config import UTM_GROUP_CONTAINER
 
 
 class CLITestCase(unittest.TestCase):
@@ -313,6 +315,56 @@ class UTMWiringTests(CLITestCase):
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual([request["execute"] for request in server.received], ["qmp_capabilities", "input-send-event", "input-send-event"])
 		self.assertEqual([request["arguments"] for request in server.received[1:]], list(combo_to_input_events("win+r")))
+
+	def screendump_handlers(self):
+		container = os.path.expanduser(UTM_GROUP_CONTAINER)
+		os.makedirs(container)
+
+		def screendump(request):
+			with open(os.path.join(container, request["arguments"]["filename"]), "wb") as dump:
+				dump.write(b"P6\n1 1\n255\n\x00\x00\x00")
+			return [reply(request, {})]
+		return {"screendump": screendump}
+
+	def screenshot(self, server, converter):
+		write_config(self.home.name, {"backend": "utm", "qmp_port": server.port})
+		with mock.patch("wn.screendump.subprocess.run", side_effect=converter):
+			return self.run_real_cli("screenshot", os.path.join(self.home.name, "screen.png"))
+
+	def test_screenshot_writes_png_and_prints_its_path(self):
+		output = os.path.join(self.home.name, "screen.png")
+		commands = []
+		def converter(command, **_):
+			commands.append(command)
+			return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+		with TCPFakeQMPServer(self.screendump_handlers()) as server:
+			exit_code, stdout, stderr = self.screenshot(server, converter)
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(stdout, output + "\n")
+		self.assertEqual([request["execute"] for request in server.received], ["qmp_capabilities", "screendump"])
+		self.assertEqual(commands[0][-2:], ["--out", output])
+
+	def test_screenshot_reports_a_qmp_error(self):
+		handlers = {"screendump": lambda request: [error_reply(request, "GenericError", "no display")]}
+		with TCPFakeQMPServer(handlers) as server:
+			exit_code, _, stderr = self.screenshot(server, lambda command, **_: self.fail("nothing to convert"))
+		self.assertEqual(exit_code, 1)
+		self.assertIn("wn: error:", stderr)
+		self.assertIn("no display", stderr)
+
+	def test_screenshot_reports_a_conversion_error(self):
+		def converter(command, **_):
+			return subprocess.CompletedProcess(command, 1, stdout="", stderr="Error: unable to write")
+		with TCPFakeQMPServer(self.screendump_handlers()) as server:
+			exit_code, _, stderr = self.screenshot(server, converter)
+		self.assertEqual(exit_code, 1)
+		self.assertIn("sips could not write", stderr)
+		self.assertIn("Error: unable to write", stderr)
+
+	def test_screenshot_needs_an_output_path(self):
+		with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit) as caught:
+			self.run_cli("screenshot")
+		self.assertEqual(caught.exception.code, 2)
 
 	def test_status_reports_missing_utmctl(self):
 		write_config(self.home.name, {"utmctl_path": "/no/such/utmctl"})

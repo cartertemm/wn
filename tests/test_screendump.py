@@ -1,8 +1,11 @@
 import os
+import subprocess
 import tempfile
 import unittest
 
-from wn.screendump import DRAWN_MINIMUM_COLORS, distinct_colors, looks_drawn, take_screendump
+from wn.screendump import DRAWN_MINIMUM_COLORS, ScreenshotError, distinct_colors, looks_drawn, save_screenshot, take_screendump
+
+BLACK_PIXEL_PPM = b"P6\n1 1\n255\n\x00\x00\x00"
 
 
 def ppm(width, height, pixel_for):
@@ -51,6 +54,64 @@ class TakeScreendumpTests(unittest.TestCase):
 			self.assertNotIn(os.sep, client.call[1]["filename"])
 			self.assertTrue(os.path.exists(destination))
 			self.assertEqual(os.listdir(container), [])
+
+
+class DumpingClient:
+	def __init__(self, container):
+		self.container = container
+
+	def execute(self, command, arguments):
+		with open(os.path.join(self.container, arguments["filename"]), "wb") as dump:
+			dump.write(BLACK_PIXEL_PPM)
+
+
+class EmptyClient:
+	def execute(self, command, arguments):
+		return {}
+
+
+class SaveScreenshotTests(unittest.TestCase):
+	def setUp(self):
+		container = tempfile.TemporaryDirectory()
+		self.addCleanup(container.cleanup)
+		self.container = container.name
+		self.commands = []
+
+	def converter(self, returncode=0, stderr=""):
+		def run(command, **_):
+			self.commands.append(command)
+			with open(command[4], "rb") as ppm_file:
+				self.converted = ppm_file.read()
+			return subprocess.CompletedProcess(command, returncode, stdout="", stderr=stderr)
+		return run
+
+	def test_converts_the_screendump_to_png(self):
+		path = save_screenshot(DumpingClient(self.container), "/out/screen.png", self.container, self.converter())
+		self.assertEqual(path, "/out/screen.png")
+		command = self.commands[0]
+		self.assertEqual(command[:4] + command[5:], ["sips", "-s", "format", "png", "--out", "/out/screen.png"])
+		self.assertEqual(self.converted, BLACK_PIXEL_PPM)
+		self.assertFalse(os.path.exists(command[4]))
+		self.assertEqual(os.listdir(self.container), [])
+
+	def test_conversion_failure(self):
+		with self.assertRaises(ScreenshotError) as caught:
+			save_screenshot(DumpingClient(self.container), "/out/screen.png", self.container, self.converter(returncode=1, stderr="Error: cannot write"))
+		self.assertIn("Error: cannot write", str(caught.exception))
+		self.assertFalse(os.path.exists(self.commands[0][4]))
+
+	def test_missing_sips(self):
+		def run(command, **_):
+			raise FileNotFoundError("No such file or directory: 'sips'")
+		with self.assertRaises(ScreenshotError) as caught:
+			save_screenshot(DumpingClient(self.container), "/out/screen.png", self.container, run)
+		self.assertIn("cannot run sips", str(caught.exception))
+
+	def test_missing_screendump_file(self):
+		with self.assertRaises(ScreenshotError) as caught:
+			save_screenshot(EmptyClient(), "/out/screen.png", self.container, self.converter())
+		self.assertIn("cannot read the screen capture", str(caught.exception))
+		self.assertEqual(self.commands, [])
 
 
 if __name__ == "__main__":

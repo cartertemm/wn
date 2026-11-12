@@ -90,6 +90,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda
 | `key` | `python3 -m wn key ctrl+alt+del` | Presses one or more key combos. |
 | `type` | `python3 -m wn type 'Get-ComputerInfo'` | Types ASCII text with a US layout. |
 | `mouse` | `python3 -m wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls. |
+| `screenshot` | `python3 -m wn screenshot screen.png` | Saves the guest screen as a PNG file and prints its path. |
 | `grab` | `python3 -m wn grab` | Sends every Mac key press to the guest. |
 | `update-vm-args` | `python3 -m wn update-vm-args --battery` | Changes parts of the QEMU arguments of a stopped VM and prints the change. |
 | `agent` | `python3 -m wn agent start` | Writes the Mac's battery status to the native battery in the guest. Takes `start`, `stop`, `status`, `--install`, `--uninstall`, or `--once`. See [Native battery](#native-battery). |

@@ -19,6 +19,7 @@ from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
 from wn.qmp import qmp_client_for
+from wn.screendump import save_screenshot
 from wn.setup import DEFAULT_DISK_GIB, SOFTWARE_CHOICES, STOPPED_STATE, Installer, SetupOptions
 from wn.text_input import text_to_combos
 from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
@@ -68,6 +69,9 @@ def build_parser():
 	_add_key_options(type_text)
 
 	_add_mouse_parser(subcommands)
+
+	screenshot = subcommands.add_parser("screenshot", help="save the guest screen as a PNG file")
+	screenshot.add_argument("output", metavar="OUTPUT", help="path of the image to write. It is always PNG, whatever the extension")
 
 	grab = subcommands.add_parser("grab", help="send every key press on the Mac keyboard to the guest, including the Windows key")
 	grab.add_argument("--start-released", action="store_true", help="start with the keyboard released, not grabbed")
@@ -285,6 +289,12 @@ def run_mouse(context):
 	_send_or_print_steps(context, _mouse_steps(context))
 
 
+def run_screenshot(context):
+	with context.connect_qmp() as client:
+		path = save_screenshot(client, os.path.abspath(context.arguments.output))
+	context.print(path)
+
+
 class DryRunQMPClient:
 	def __init__(self, print_line):
 		self._print_line = print_line
@@ -497,6 +507,7 @@ COMMANDS = {
 	"key": run_key,
 	"type": run_type,
 	"mouse": run_mouse,
+	"screenshot": run_screenshot,
 	"grab": run_grab,
 	"share": run_share,
 	"net": run_net,
