@@ -110,6 +110,30 @@ Audio is tuned for low latency. On an M4 Pro, the time from a key press to
 NVDA speech was about 115 ms. Most of that time is spent inside the Windows
 audio stack.
 
+## Microphone
+
+Windows gets the Mac's default input device as "Microphone". The input goes
+through a second sound codec (`hda-micro`) on UTM's SPICE audio, because
+UTM's CoreAudio backend has no input. The first time a Windows app records,
+macOS asks whether UTM can use the microphone. Click **Allow**. If you
+clicked **Don't Allow**, turn UTM on in System Settings > Privacy & Security
+> Microphone.
+
+The Mac microphone is in use only while a Windows app records. With
+Bluetooth headphones such as AirPods, recording can switch them to headset
+mode, which lowers the sound quality until the recording stops.
+
+The microphone codec also has a speaker. At the first sign in, `wn setup`
+runs `wn/guest/hide-mic-speaker.ps1`, which disables that speaker so Windows
+keeps playing sound on the low latency CoreAudio codec. For a VM made before
+this change, run `wn update-vm-args --audio-args` with the default arguments
+in `wn/utm_config.py`, quit and open UTM, start the VM, and then run the
+script in Windows as administrator:
+
+```
+powershell -ExecutionPolicy Bypass -File hide-mic-speaker.ps1
+```
+
 ## Native battery
 
 Windows shows the Mac's battery in its own battery icon, in Settings, in
@@ -234,8 +258,9 @@ window.
 
 **QEMU arguments.** `update-vm-args` takes these options:
 
-- `--audio-args ARGS` replaces the default CoreAudio block (`-audiodev`,
-  `intel-hda`, and `hda-output`), for example to change the buffer sizes.
+- `--audio-args ARGS` replaces the default audio block (`-audiodev`,
+  `intel-hda`, `hda-output`, and the `hda-micro` microphone codec), for
+  example to change the buffer sizes.
 - `--extra-args ARGS` sets the QEMU arguments that come after everything else,
   for example `-device virtio-keyboard-pci,id=vkbd`.
 

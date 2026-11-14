@@ -52,6 +52,7 @@ PAYLOAD_TAG = r"wn\payload.tag"
 VIRTIO_FOLDER = "virtio"
 TOOLS_FOLDER = "tools"
 EFI_FOLDER = "efi"
+MIC_SPEAKER_SCRIPT = "hide-mic-speaker.ps1"
 BATTERY_INSTALLER = "install-wn-acpi.ps1"
 BATTERY_NOTIFY_INSTALLER = "install-wn-battery-notify.ps1"
 BATTERY_NOTIFY_SOURCE = "wn-battery-notify.cs"
@@ -116,7 +117,7 @@ def _logged(command):
 
 
 def setup_commands(guest_tools_name, nvda_installer_name=None, battery=True):
-	"""Return the first-logon commands that finish the VM: drivers, display, guest tools, NVDA, battery driver and service, then a reboot."""
+	"""Return the first-logon commands that finish the VM: drivers, display, guest tools, NVDA, audio, battery driver and service, then a reboot."""
 	driver_folder = "\\".join(DRIVER_SUBPATH)
 	commands = [
 		_on_payload_drive(_logged("pnputil /add-driver %d:\\{}\\{}\\{}\\*.inf /install".format(VIRTIO_FOLDER, driver, driver_folder)))
@@ -128,6 +129,7 @@ def setup_commands(guest_tools_name, nvda_installer_name=None, battery=True):
 		commands.append(_on_payload_drive(_logged("%d:\\{}\\{} --install-silent --enable-start-on-logon=True".format(TOOLS_FOLDER, nvda_installer_name))))
 		commands.append("cmd /c for /l %i in (1,1,{}) do @if not exist \"{}\" ping -n 3 127.0.0.1 >nul".format(NVDA_INSTALL_WAIT_ROUNDS, NVDA_INSTALLED_PATH))
 		commands.append(_logged("cmd /c reg add \"HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Accessibility\" /v Configuration /t REG_SZ /d nvda_nvda_v1 /f"))
+	commands.append(_on_payload_drive(_logged("powershell -ExecutionPolicy Bypass -File %d:\\{}\\{}".format(TOOLS_FOLDER, MIC_SPEAKER_SCRIPT))))
 	if battery:
 		for installer in (BATTERY_INSTALLER, BATTERY_NOTIFY_INSTALLER):
 			commands.append(_on_payload_drive(_logged("powershell -ExecutionPolicy Bypass -File %d:\\{}\\{}".format(EFI_FOLDER, installer))))

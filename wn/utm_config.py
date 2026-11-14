@@ -34,10 +34,12 @@ ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_EXT
 QMP_HOST = "127.0.0.1"
 DEFAULT_QMP_PORT = 4444
 AUDIODEV_ID = "ca0"
+SPICE_AUDIODEV_ID = "audio0"
 DEFAULT_AUDIO_ARGUMENTS = (
 	"-audiodev", "coreaudio,id={},timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on".format(AUDIODEV_ID),
 	"-device", "intel-hda",
 	"-device", "hda-output,audiodev={}".format(AUDIODEV_ID),
+	"-device", "hda-micro,audiodev={}".format(SPICE_AUDIODEV_ID),
 )
 MAXIMUM_USB_SHARE = 3
 INTERFACE_VERSION = 1

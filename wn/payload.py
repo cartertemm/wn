@@ -16,6 +16,7 @@ from wn.unattend import (
 	DRIVER_SUBPATH,
 	EFI_FOLDER,
 	FIRST_LOGON_DRIVERS,
+	MIC_SPEAKER_SCRIPT,
 	PAYLOAD_TAG,
 	SETUP_DRIVERS,
 	TOOLS_FOLDER,
@@ -29,6 +30,7 @@ VOLUME_NAME = "WNSETUP"
 ANSWER_FILE_NAME = "autounattend.xml"
 GUEST_TOOLS_PATTERN = "utm-guest-tools-*.exe"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MIC_SPEAKER_SCRIPT_PATH = os.path.join(REPO_ROOT, "wn", "guest", MIC_SPEAKER_SCRIPT)
 SECURE_BOOT_CERT = os.path.join(REPO_ROOT, "efi", "dist", "wn-sb.cer")
 BATTERY_FILES = (
 	os.path.join(REPO_ROOT, "efi", "dist", "wn-acpi.efi"),
@@ -101,7 +103,7 @@ def _stage_battery(staging):
 
 
 def stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools=(), battery=True):
-	"""Fill ``staging`` with the drivers, guest tools, ``extra_tools``, and the battery driver. Return the guest tools installer name.
+	"""Fill ``staging`` with the drivers, guest tools, ``extra_tools``, the mic speaker script, and the battery driver. Return the guest tools installer name.
 
 	The caller writes ``autounattend.xml`` into ``staging`` before calling ``write_iso_image``.
 	"""
@@ -115,7 +117,7 @@ def stage_payload(staging, virtio_iso, guest_tools_iso, extra_tools=(), battery=
 		_stage_drivers(staging, virtio_mount)
 	with mounted(guest_tools_iso) as guest_tools_mount:
 		installer = _stage_guest_tools(tools_folder, guest_tools_mount)
-	for tool in extra_tools:
+	for tool in list(extra_tools) + [MIC_SPEAKER_SCRIPT_PATH]:
 		shutil.copyfile(tool, os.path.join(tools_folder, os.path.basename(tool)))
 	if battery:
 		_stage_battery(staging)

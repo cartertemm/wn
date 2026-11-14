@@ -61,7 +61,7 @@ class PayloadImageTests(unittest.TestCase):
 		guest_tools_name = stage_payload(self.staging, self.virtio_iso, self.guest_tools_iso, [self.nvda])
 		self.assertEqual(guest_tools_name, "utm-guest-tools-0.1.271.exe")
 		listing = sorted(os.path.relpath(os.path.join(folder, name), self.staging) for folder, _, names in os.walk(self.staging) for name in names)
-		expected = [os.path.join("tools", "nvda_2026.3.1.exe"), os.path.join("tools", "utm-guest-tools-0.1.271.exe"), PAYLOAD_TAG.replace("\\", os.sep)]
+		expected = [os.path.join("tools", "nvda_2026.3.1.exe"), os.path.join("tools", "utm-guest-tools-0.1.271.exe"), os.path.join("tools", "hide-mic-speaker.ps1"), PAYLOAD_TAG.replace("\\", os.sep)]
 		expected += [os.path.join("virtio", driver, "w11", "ARM64", driver.lower() + ".inf") for driver in FIRST_LOGON_DRIVERS]
 		expected += [os.path.join(WINPE_DRIVER_FOLDER, driver, driver.lower() + ".inf") for driver in SETUP_DRIVERS]
 		expected += [os.path.join("efi", name) for name in ("wn-acpi.efi", "wn-sb.cer", "install-wn-acpi.ps1", "install-wn-battery-notify.ps1", "wn-battery-notify.cs")]
@@ -130,7 +130,7 @@ class PayloadImageTests(unittest.TestCase):
 		image = os.path.join(self.directory.name, "wnsetup.iso")
 		build_payload_iso(image, UnattendOptions(username="carter"), self.virtio_iso, self.guest_tools_iso, None)
 		with mounted(image) as mount_point:
-			self.assertEqual(os.listdir(os.path.join(mount_point, "tools")), ["utm-guest-tools-0.1.271.exe"])
+			self.assertEqual(sorted(os.listdir(os.path.join(mount_point, "tools"))), ["hide-mic-speaker.ps1", "utm-guest-tools-0.1.271.exe"])
 
 	def test_refuses_existing_image(self):
 		image = os.path.join(self.directory.name, "payload.iso")

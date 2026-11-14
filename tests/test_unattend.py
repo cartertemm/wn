@@ -277,6 +277,14 @@ class SetupCommandTests(unittest.TestCase):
 		self.assertIn("powershell -ExecutionPolicy Bypass -File %d:\\efi\\install-wn-battery-notify.ps1", command)
 		self.assertTrue(command.endswith(">> C:\\wn-setup.log 2>&1"))
 
+	def test_mic_speaker_script_before_battery(self):
+		scripts = [index for index, command in enumerate(self.commands) if "hide-mic-speaker.ps1" in command]
+		self.assertEqual(scripts, [len(self.commands) - 4])
+		command = self.commands[scripts[0]]
+		self.assertIn(PAYLOAD_TAG, command)
+		self.assertIn("powershell -ExecutionPolicy Bypass -File %d:\\tools\\hide-mic-speaker.ps1", command)
+		self.assertTrue(command.endswith(">> C:\\wn-setup.log 2>&1"))
+
 	def test_without_battery(self):
 		commands = setup_commands("utm-guest-tools-0.1.271.exe", "nvda_2026.3.1.exe", battery=False)
 		joined = "\n".join(commands)

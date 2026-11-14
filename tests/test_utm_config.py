@@ -210,7 +210,7 @@ class ConfigContentTests(unittest.TestCase):
 		arguments = arguments_of(config)
 		self.assertEqual(config["Sound"], [])
 		self.assertTrue(contains_sequence(arguments, ["-audiodev", "coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on"]))
-		self.assertTrue(contains_sequence(arguments, ["-device", "intel-hda", "-device", "hda-output,audiodev=ca0"]))
+		self.assertTrue(contains_sequence(arguments, ["-device", "intel-hda", "-device", "hda-output,audiodev=ca0", "-device", "hda-micro,audiodev=audio0"]))
 
 	def test_audio_args_replace_coreaudio_block(self):
 		config = build_config(options(audio_args="-audiodev coreaudio,id=ca0,timer-period=2500 -device usb-audio,audiodev=ca0"))
