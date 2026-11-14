@@ -42,6 +42,7 @@ EXIT_FAILURE = 1
 DEFAULT_SCROLL_COUNT = 1
 DEFAULT_STOP_TIMEOUT_SECONDS = 120
 STOP_POLL_SECONDS = 2
+FORCE_STOP_TIMEOUT_SECONDS = 10
 WAKE_DISPLAY_KEY = "shift"
 WAKE_DISPLAY_SECONDS = 2
 NO_SOFTWARE_ANSWERS = ("0", "none")
@@ -58,7 +59,10 @@ def build_parser():
 	subcommands.add_parser("start", help="start the VM")
 	stop = subcommands.add_parser("stop", help="shut down the VM")
 	stop.add_argument("--force", action="store_true", help="power off at once instead of a clean shutdown")
-	stop.add_argument("--timeout", type=int, default=DEFAULT_STOP_TIMEOUT_SECONDS, metavar="SECONDS", help="how long to wait for Windows to shut down (default: %(default)s)")
+	stop.add_argument("--timeout", type=int, metavar="SECONDS", help="how long to wait for Windows to shut down (default: {})".format(DEFAULT_STOP_TIMEOUT_SECONDS))
+	stop.add_argument("--no-wait", action="store_true", help="request the shutdown and return at once")
+	stop.add_argument("--force-after-timeout", action="store_true", help="power off if Windows is still running after the timeout")
+	stop.set_defaults(stop_parser=stop)
 	subcommands.add_parser("status", help="show whether the VM is running")
 	subcommands.add_parser("ip", help="print the guest IP address")
 
@@ -210,20 +214,44 @@ def run_start(context):
 
 def run_stop(context):
 	arguments = context.arguments
+	if arguments.no_wait and (arguments.force_after_timeout or arguments.timeout is not None):
+		arguments.stop_parser.error("--no-wait cannot be used with --timeout or --force-after-timeout")
 	if arguments.force:
 		context.backend.stop(force=True)
 		return
 	_wake_display(context)
 	context.backend.stop()
-	deadline = time.monotonic() + arguments.timeout
+	if arguments.no_wait:
+		context.print("{}: shutdown requested".format(context.config.vm_name))
+		return
+	timeout = DEFAULT_STOP_TIMEOUT_SECONDS if arguments.timeout is None else arguments.timeout
+	status = _wait_until_stopped(context, timeout, announce=True)
+	if status.state == STOPPED_STATE:
+		context.print("{}: stopped".format(status.name))
+		return
+	if not arguments.force_after_timeout:
+		context.stderr.write("wn: error: {} is still {} {} s after the shutdown request. Windows may be busy or showing a dialog. Check the screen, run wn stop --force to power off now, or use wn stop --force-after-timeout next time\n".format(status.name, status.state, timeout))
+		return EXIT_FAILURE
+	context.backend.stop(force=True)
+	context.print("{}: still {} after {} s, powered off".format(status.name, status.state, timeout))
+	status = _wait_until_stopped(context, FORCE_STOP_TIMEOUT_SECONDS)
+	if status.state == STOPPED_STATE:
+		context.print("{}: stopped".format(status.name))
+		return
+	context.stderr.write("wn: error: {} is still {} after the power off\n".format(status.name, status.state))
+	return EXIT_FAILURE
+
+
+def _wait_until_stopped(context, timeout, announce=False):
+	"""Poll the VM until it has stopped or the timeout passes, and return the last status."""
+	deadline = time.monotonic() + timeout
 	while True:
 		status = context.backend.status()
-		if status.state == STOPPED_STATE:
-			context.print("{}: stopped".format(status.name))
-			return
-		if time.monotonic() >= deadline:
-			context.stderr.write("wn: error: {} is still {} {} s after the shutdown request. Windows may be busy or showing a dialog. Check the screen, or run wn stop --force to power off\n".format(status.name, status.state, arguments.timeout))
-			return EXIT_FAILURE
+		if status.state == STOPPED_STATE or time.monotonic() >= deadline:
+			return status
+		if announce:
+			context.print("{}: waiting up to {} s for Windows to shut down".format(status.name, timeout))
+			announce = False
 		time.sleep(STOP_POLL_SECONDS)
 
 

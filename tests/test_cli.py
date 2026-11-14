@@ -74,6 +74,12 @@ class LifecycleCommandTests(CLITestCase):
 		self.assertIn("wn: warning: cannot wake the display", stderr.getvalue())
 		self.assertEqual(self.backend.calls, [("qmp_socket_path", False), ("stop", False), ("status",)])
 
+	def test_stop_no_wait(self):
+		exit_code, stdout, _ = self.run_cli("stop", "--no-wait")
+		self.assertEqual(exit_code, 0)
+		self.assertEqual(stdout, "Windows: shutdown requested\n")
+		self.assertEqual(self.backend.calls, [("qmp_socket_path", False), ("stop", False)])
+
 	def test_stop_force(self):
 		self.run_cli("stop", "--force")
 		self.assertEqual(self.backend.calls, [("stop", True)])
@@ -151,7 +157,7 @@ class StopCommandTests(CLITestCase):
 		self.write_vm(status="started", request_stop_lists=3)
 		exit_code, stdout, stderr = self.run_real_cli("stop")
 		self.assertEqual(exit_code, 0, stderr)
-		self.assertEqual(stdout, "Windows: stopped\n")
+		self.assertEqual(stdout, "Windows: waiting up to 120 s for Windows to shut down\nWindows: stopped\n")
 		self.assertEqual(self.vm_state()["last_stop_flags"], ["--request"])
 		self.assertIn("cannot wake the display", stderr)
 		self.assertEqual(self.now[0], 4.0)
@@ -162,8 +168,43 @@ class StopCommandTests(CLITestCase):
 		self.assertEqual(exit_code, 1)
 		self.assertIn("Windows is still running 120 s after the shutdown request", stderr)
 		self.assertIn("wn stop --force", stderr)
+		self.assertIn("--force-after-timeout", stderr)
+		self.assertEqual(stdout, "Windows: waiting up to 120 s for Windows to shut down\n")
 		self.assertEqual(self.vm_state()["status"], "started")
 		self.assertGreaterEqual(self.now[0], 120)
+
+	def test_force_after_timeout_powers_off(self):
+		self.write_vm(status="started", request_stop_lists=-1)
+		exit_code, stdout, stderr = self.run_real_cli("stop", "--timeout", "10", "--force-after-timeout")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(stdout, "Windows: waiting up to 10 s for Windows to shut down\nWindows: still running after 10 s, powered off\nWindows: stopped\n")
+		self.assertEqual(self.vm_state()["last_stop_flags"], ["--force"])
+		self.assertEqual(self.vm_state()["status"], "stopped")
+
+	def test_force_after_timeout_does_nothing_extra_when_windows_stops(self):
+		self.write_vm(status="started", request_stop_lists=3)
+		exit_code, stdout, stderr = self.run_real_cli("stop", "--force-after-timeout")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(stdout, "Windows: waiting up to 120 s for Windows to shut down\nWindows: stopped\n")
+		self.assertEqual(self.vm_state()["last_stop_flags"], ["--request"])
+
+	def test_no_wait_returns_after_the_request(self):
+		self.write_vm(status="started", request_stop_lists=-1)
+		exit_code, stdout, stderr = self.run_real_cli("stop", "--no-wait")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(stdout, "Windows: shutdown requested\n")
+		self.assertEqual(self.vm_state()["last_stop_flags"], ["--request"])
+		self.assertIn("cannot wake the display", stderr)
+		self.assertEqual(self.now[0], 0.0)
+
+	def test_no_wait_rejects_wait_options(self):
+		for extra in (["--timeout", "10"], ["--force-after-timeout"]):
+			with self.subTest(extra=extra), mock.patch("sys.stderr", io.StringIO()) as stderr:
+				with self.assertRaises(SystemExit) as context:
+					self.run_real_cli("stop", "--no-wait", *extra)
+				self.assertEqual(context.exception.code, 2)
+				self.assertIn("--no-wait cannot be used", stderr.getvalue())
+				self.assertNotIn("last_stop_flags", self.vm_state())
 
 	def test_timeout_option(self):
 		self.write_vm(status="started", request_stop_lists=-1)

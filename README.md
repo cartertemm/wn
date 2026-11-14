@@ -86,7 +86,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda
 | Command | Example | What it does |
 |---|---|---|
 | `start` | `python3 -m wn start` | Starts the VM. |
-| `stop` | `python3 -m wn stop` | Presses Shift to turn the display on, because Windows ignores the power button while the display is off. Then it shuts down Windows and waits until the VM has stopped, up to `--timeout` seconds (120). Exits with 1 if it is still running then. `--force` powers off at once. |
+| `stop` | `python3 -m wn stop` | Presses Shift to turn the display on, because Windows ignores the power button while the display is off. Then it shuts down Windows and waits until the VM has stopped, up to `--timeout` seconds (120). Exits with 1 if it is still running then. `--force-after-timeout` powers off instead when the wait runs out. `--no-wait` sends the shutdown and returns at once. `--force` powers off at once. |
 | `status` | `python3 -m wn status` | Prints `Windows: running` or `Windows: stopped`. |
 | `ip` | `python3 -m wn ip` | Prints the guest IP address. |
 | `key` | `python3 -m wn key ctrl+alt+del` | Presses one or more key combos. |
