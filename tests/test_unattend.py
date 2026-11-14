@@ -263,16 +263,26 @@ class SetupCommandTests(unittest.TestCase):
 
 	def test_battery_driver_before_reboot(self):
 		battery = [index for index, command in enumerate(self.commands) if "install-wn-acpi.ps1" in command]
-		self.assertEqual(battery, [len(self.commands) - 2])
+		self.assertEqual(battery, [len(self.commands) - 3])
 		command = self.commands[battery[0]]
 		self.assertIn(PAYLOAD_TAG, command)
 		self.assertIn("powershell -ExecutionPolicy Bypass -File %d:\\efi\\install-wn-acpi.ps1", command)
 		self.assertTrue(command.endswith(">> C:\\wn-setup.log 2>&1"))
 
+	def test_battery_service_after_driver(self):
+		service = [index for index, command in enumerate(self.commands) if "install-wn-battery-notify.ps1" in command]
+		self.assertEqual(service, [len(self.commands) - 2])
+		command = self.commands[service[0]]
+		self.assertIn(PAYLOAD_TAG, command)
+		self.assertIn("powershell -ExecutionPolicy Bypass -File %d:\\efi\\install-wn-battery-notify.ps1", command)
+		self.assertTrue(command.endswith(">> C:\\wn-setup.log 2>&1"))
+
 	def test_without_battery(self):
 		commands = setup_commands("utm-guest-tools-0.1.271.exe", "nvda_2026.3.1.exe", battery=False)
-		self.assertNotIn("install-wn-acpi", "\n".join(commands))
-		self.assertEqual(len(commands), len(self.commands) - 1)
+		joined = "\n".join(commands)
+		self.assertNotIn("install-wn-acpi", joined)
+		self.assertNotIn("install-wn-battery-notify", joined)
+		self.assertEqual(len(commands), len(self.commands) - 2)
 
 	def test_commands_fit_unattend_limit(self):
 		build_unattend(options(first_logon_commands=tuple(self.commands)))

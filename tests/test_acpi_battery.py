@@ -9,6 +9,7 @@ from wn import acpi_battery
 from wn.acpi_battery import (
 	HEADER_LENGTH,
 	PLACEHOLDER_ADDRESS,
+	WMI_BLOCK_GUID,
 	build_ssdt,
 	eisa_id,
 	field_length,
@@ -112,7 +113,7 @@ class SsdtTests(unittest.TestCase):
 			found.append(self.table[offset + 2 + size:offset + 2 + size + 4])
 			self.assertLessEqual(offset + 2 + length, len(self.table))
 			offset = self.table.find(DEVICE_OP, offset + 2)
-		self.assertEqual(found, [b"BAT0", b"ACAD"])
+		self.assertEqual(found, [b"BAT0", b"ACAD", b"WNWM"])
 
 	def test_hids(self):
 		self.assertIn(b"\x08_HID\x0c\x41\xd0\x0c\x0a", self.table)
@@ -123,6 +124,19 @@ class SsdtTests(unittest.TestCase):
 			self.assertIn(name, self.table)
 		self.assertIn(b"_BIF", self.table)
 		self.assertIn(b"_PCL", self.table)
+
+	def test_wmi_data_block(self):
+		self.assertIn(b"\x08_HID\x0c\x41\xd0\x0c\x14", self.table)
+		guid_entry = WMI_BLOCK_GUID.bytes_le + b"AA\x01\x00"
+		self.assertIn(b"\x08_WDG\x11\x17\x0a\x14" + guid_entry, self.table)
+		self.assertIn(b"\x14\x45\x06WQAA\x09", self.table)
+
+	def test_wmi_query_notifies_on_change(self):
+		self.assertIn(b"\xa0\x1e\x92\x93FLGSLFLG", self.table)
+		self.assertIn(b"\x86ACAD\x0a\x80", self.table)
+		self.assertIn(b"\x92\x93RATELRAT", self.table)
+		self.assertIn(b"\x92\x93REMNLREM", self.table)
+		self.assertIn(b"\xa0\x09\x60\x86BAT0\x0a\x80\xa4\x60", self.table)
 
 
 class MainTests(unittest.TestCase):

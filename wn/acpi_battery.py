@@ -2,11 +2,14 @@
 
 The table reads a shared data block through a SystemMemory OperationRegion. Its base address is the
 QWord ``PLACEHOLDER_ADDRESS``, which the wn-acpi UEFI driver replaces with the address it allocated.
-The AML encoding follows the ACPI 6.5 specification, chapter 20.
+An ACPI-WMI device (WNWM) has one data block. Each query of it notifies BAT0 and ACAD when the block
+changed since the last query, so Windows reads the battery again. The AML encoding follows the ACPI 6.5
+specification, chapter 20.
 """
 
 import struct
 import sys
+import uuid
 
 from wn.battery_sync import DESIGN_VOLTAGE_MV, FLAG_CHARGING, FLAG_DISCHARGING, FULL_CAPACITY_MWH
 
@@ -24,12 +27,14 @@ REGION_LENGTH = 64
 ZERO_OP = 0x00
 ONE_OP = 0x01
 NAME_OP = 0x08
+ONES_OP = 0xFF
 BYTE_PREFIX = 0x0A
 WORD_PREFIX = 0x0B
 DWORD_PREFIX = 0x0C
 STRING_PREFIX = 0x0D
 QWORD_PREFIX = 0x0E
 SCOPE_OP = 0x10
+BUFFER_OP = 0x11
 PACKAGE_OP = 0x12
 METHOD_OP = 0x14
 ROOT_CHAR = b"\\"
@@ -39,7 +44,11 @@ STORE_OP = 0x70
 SHIFT_RIGHT_OP = 0x7A
 AND_OP = 0x7B
 OR_OP = 0x7D
+NOTIFY_OP = 0x86
 INDEX_OP = 0x88
+LNOT_OP = 0x92
+LEQUAL_OP = 0x93
+IF_OP = 0xA0
 RETURN_OP = 0xA4
 EXT_OP_PREFIX = 0x5B
 OP_REGION_OP = 0x80
@@ -65,6 +74,13 @@ RECHARGEABLE = 1
 
 CHARGING_SHIFT = 1
 DISCHARGING_SHIFT = 3
+
+WMI_BLOCK_GUID = uuid.UUID("dacc92c7-b762-4ee1-a96c-de99be6cc7b6")
+WMI_OBJECT_ID = b"AA"
+WMI_INSTANCE_COUNT = 1
+WMI_FLAGS = 0
+STATUS_CHANGE = 0x80
+WATCHED_FIELDS = (("FLGS", "LFLG"), ("RATE", "LRAT"), ("REMN", "LREM"))
 
 DATA_FIELDS = ("MAGC", "VERS", "FLGS", "PCNT", "RATE", "REMN", "FULL", "DMV_")
 BST_INDEX_STATE = 0
@@ -184,6 +200,22 @@ def field(region, flags, units):
 	return _with_pkg_length(bytes([EXT_OP_PREFIX, FIELD_OP]), body)
 
 
+def buffer(data):
+	return _with_pkg_length(bytes([BUFFER_OP]), integer(len(data)) + data)
+
+
+def if_(predicate, *terms):
+	return _with_pkg_length(bytes([IF_OP]), predicate + b"".join(terms))
+
+
+def lnot_equal(left, right):
+	return bytes([LNOT_OP, LEQUAL_OP]) + left + right
+
+
+def notify(path, value):
+	return bytes([NOTIFY_OP]) + name_string(path) + integer(value)
+
+
 def return_(value):
 	return bytes([RETURN_OP]) + value
 
@@ -260,6 +292,33 @@ def _ac_adapter():
 	)
 
 
+def _wmi_device():
+	"""Return WNWM, whose data block query WQAA notifies BAT0 and ACAD of changes in the shared block."""
+	local0 = bytes([LOCAL0_OP])
+	changes = []
+	for field_name, copy_name in WATCHED_FIELDS:
+		action = [store(name_string(field_name), name_string(copy_name)), store(integer(1), local0)]
+		if field_name == "FLGS":
+			action.append(notify("ACAD", STATUS_CHANGE))
+		changes.append(if_(lnot_equal(name_string(field_name), name_string(copy_name)), *action))
+	guid_entry = WMI_BLOCK_GUID.bytes_le + WMI_OBJECT_ID + bytes([WMI_INSTANCE_COUNT, WMI_FLAGS])
+	return device(
+		"WNWM",
+		name("_HID", integer(eisa_id("PNP0C14"))),
+		name("_UID", string("WN")),
+		name("_WDG", buffer(guid_entry)),
+		*[name(copy_name, bytes([ONES_OP])) for _, copy_name in WATCHED_FIELDS],
+		method(
+			"WQAA",
+			1,
+			store(integer(0), local0),
+			*changes,
+			if_(local0, notify("BAT0", STATUS_CHANGE)),
+			return_(local0),
+		),
+	)
+
+
 def _data_block():
 	return (
 		operation_region("WNBT", SYSTEM_MEMORY, qword(PLACEHOLDER_ADDRESS), integer(REGION_LENGTH))
@@ -284,7 +343,7 @@ def _header(body_length):
 
 def build_ssdt():
 	"""Return the complete SSDT as bytes, with a valid checksum."""
-	body = scope("\\_SB", _data_block(), _battery(), _ac_adapter())
+	body = scope("\\_SB", _data_block(), _battery(), _ac_adapter(), _wmi_device())
 	table = bytearray(_header(len(body)) + body)
 	table[9] = (-sum(table)) & 0xFF
 	return bytes(table)

@@ -11,6 +11,8 @@ import tempfile
 from wn.errors import WnError
 from wn.unattend import (
 	BATTERY_INSTALLER,
+	BATTERY_NOTIFY_INSTALLER,
+	BATTERY_NOTIFY_SOURCE,
 	DRIVER_SUBPATH,
 	EFI_FOLDER,
 	FIRST_LOGON_DRIVERS,
@@ -32,6 +34,8 @@ BATTERY_FILES = (
 	os.path.join(REPO_ROOT, "efi", "dist", "wn-acpi.efi"),
 	SECURE_BOOT_CERT,
 	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_INSTALLER),
+	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_NOTIFY_INSTALLER),
+	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_NOTIFY_SOURCE),
 )
 
 
