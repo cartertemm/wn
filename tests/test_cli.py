@@ -17,6 +17,11 @@ from wn.qmp import QMPConnectionError
 from wn.utm_config import UTM_GROUP_CONTAINER, qmp_socket_file
 
 
+class TerminalInput(io.StringIO):
+	def isatty(self):
+		return True
+
+
 class CLITestCase(unittest.TestCase):
 	def setUp(self):
 		self.home = short_temporary_directory()
@@ -30,13 +35,13 @@ class CLITestCase(unittest.TestCase):
 		sleep_patcher.start()
 		self.addCleanup(sleep_patcher.stop)
 
-	def run_real_cli(self, *argv):
+	def run_real_cli(self, *argv, stdin=None):
 		stdout = io.StringIO()
 		stderr = io.StringIO()
-		exit_code = main(list(argv), stdout=stdout, stderr=stderr)
+		exit_code = main(list(argv), stdout=stdout, stderr=stderr, stdin=stdin)
 		return exit_code, stdout.getvalue(), stderr.getvalue()
 
-	def run_cli(self, *argv):
+	def run_cli(self, *argv, stdin=None):
 		stdout = io.StringIO()
 		stderr = io.StringIO()
 		exit_code = main(
@@ -45,6 +50,7 @@ class CLITestCase(unittest.TestCase):
 			qmp_client_factory=RecordingQMPClient(self.qmp_log),
 			stdout=stdout,
 			stderr=stderr,
+			stdin=stdin,
 		)
 		return exit_code, stdout.getvalue(), stderr.getvalue()
 
@@ -81,9 +87,39 @@ class LifecycleCommandTests(CLITestCase):
 		self.assertEqual(self.backend.calls, [("qmp_socket_path", False), ("stop", False)])
 
 	def test_stop_force(self):
-		self.run_cli("stop", "--force")
+		self.run_cli("stop", "--force", "--yes")
 		self.assertEqual(self.backend.calls, [("stop", True)])
 		self.assertEqual(self.qmp_log, [])
+
+	def test_stop_force_asks_first(self):
+		for answer in ("y\n", "yes\n", "YES\n"):
+			with self.subTest(answer=answer):
+				self.backend.calls = []
+				exit_code, stdout, _ = self.run_cli("stop", "--force", stdin=TerminalInput(answer))
+				self.assertEqual(exit_code, 0)
+				self.assertEqual(stdout, "Power off Windows without shutting it down? Unsaved work is lost. [y/N]: ")
+				self.assertEqual(self.backend.calls, [("stop", True)])
+
+	def test_stop_force_declined(self):
+		for answer in ("n\n", "\n", "maybe\n"):
+			with self.subTest(answer=answer):
+				exit_code, stdout, _ = self.run_cli("stop", "--force", stdin=TerminalInput(answer))
+				self.assertEqual(exit_code, 1)
+				self.assertEqual(stdout, "Power off Windows without shutting it down? Unsaved work is lost. [y/N]: Windows: not powered off\n")
+				self.assertEqual(self.backend.calls, [])
+
+	def test_stop_force_without_terminal_needs_yes(self):
+		exit_code, stdout, stderr = self.run_cli("stop", "--force", stdin=io.StringIO("y\n"))
+		self.assertEqual(exit_code, 1)
+		self.assertEqual(stdout, "")
+		self.assertIn("Add --yes", stderr)
+		self.assertEqual(self.backend.calls, [])
+
+	def test_stop_force_yes_does_not_ask(self):
+		exit_code, stdout, _ = self.run_cli("stop", "--force", "--yes", stdin=TerminalInput(""))
+		self.assertEqual(exit_code, 0)
+		self.assertEqual(stdout, "")
+		self.assertEqual(self.backend.calls, [("stop", True)])
 
 	def test_status(self):
 		exit_code, stdout, _ = self.run_cli("status")
@@ -175,7 +211,7 @@ class StopCommandTests(CLITestCase):
 
 	def test_force_after_timeout_powers_off(self):
 		self.write_vm(status="started", request_stop_lists=-1)
-		exit_code, stdout, stderr = self.run_real_cli("stop", "--timeout", "10", "--force-after-timeout")
+		exit_code, stdout, stderr = self.run_real_cli("stop", "--timeout", "10", "--force-after-timeout", stdin=io.StringIO())
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual(stdout, "Windows: waiting up to 10 s for Windows to shut down\nWindows: still running after 10 s, powered off\nWindows: stopped\n")
 		self.assertEqual(self.vm_state()["last_stop_flags"], ["--force"])
@@ -215,7 +251,7 @@ class StopCommandTests(CLITestCase):
 
 	def test_force_powers_off_without_waiting(self):
 		self.write_vm(status="started", request_stop_lists=-1)
-		exit_code, stdout, stderr = self.run_real_cli("stop", "--force")
+		exit_code, stdout, stderr = self.run_real_cli("stop", "--force", "--yes")
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual(stdout, "")
 		self.assertEqual(self.vm_state()["last_stop_flags"], ["--force"])

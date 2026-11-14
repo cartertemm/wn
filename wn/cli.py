@@ -62,6 +62,7 @@ def build_parser():
 	stop.add_argument("--timeout", type=int, metavar="SECONDS", help="how long to wait for Windows to shut down (default: {})".format(DEFAULT_STOP_TIMEOUT_SECONDS))
 	stop.add_argument("--no-wait", action="store_true", help="request the shutdown and return at once")
 	stop.add_argument("--force-after-timeout", action="store_true", help="power off if Windows is still running after the timeout")
+	stop.add_argument("--yes", action="store_true", help="with --force, power off without asking first")
 	stop.set_defaults(stop_parser=stop)
 	subcommands.add_parser("status", help="show whether the VM is running")
 	subcommands.add_parser("ip", help="print the guest IP address")
@@ -217,6 +218,9 @@ def run_stop(context):
 	if arguments.no_wait and (arguments.force_after_timeout or arguments.timeout is not None):
 		arguments.stop_parser.error("--no-wait cannot be used with --timeout or --force-after-timeout")
 	if arguments.force:
+		if not arguments.yes and not _confirm_power_off(context):
+			context.print("{}: not powered off".format(context.config.vm_name))
+			return EXIT_FAILURE
 		context.backend.stop(force=True)
 		return
 	_wake_display(context)
@@ -253,6 +257,13 @@ def _wait_until_stopped(context, timeout, announce=False):
 			context.print("{}: waiting up to {} s for Windows to shut down".format(status.name, timeout))
 			announce = False
 		time.sleep(STOP_POLL_SECONDS)
+
+
+def _confirm_power_off(context):
+	if not context.stdin.isatty():
+		raise WnError("cannot ask before powering off because input is not a terminal. Add --yes to power off without asking")
+	question = "Power off {} without shutting it down? Unsaved work is lost.".format(context.config.vm_name)
+	return Prompter(context.stdin, context.stdout).ask(question, False, lambda answer: answer.lower() in YES_ANSWERS, default_text="y/N")
 
 
 def _wake_display(context):
