@@ -151,6 +151,11 @@ class SpecializeTests(unittest.TestCase):
 		self.assertTrue(any("BypassNRO" in path for path in paths))
 		self.assertTrue(any("DisablePrivacyExperience" in path for path in paths))
 
+	def test_device_encryption_prevented(self):
+		deployment = component(parse(), "specialize", "Microsoft-Windows-Deployment")
+		paths = [text(command, "u:Path") for command in deployment.findall("u:RunSynchronous/u:RunSynchronousCommand", NS)]
+		self.assertIn(r"reg add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f", paths)
+
 
 class OOBETests(unittest.TestCase):
 	def setUp(self):

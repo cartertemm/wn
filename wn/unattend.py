@@ -234,6 +234,7 @@ def _specialize(root, options):
 	for order, path in enumerate((
 		r"reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f",
 		r"reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE /v DisablePrivacyExperience /t REG_DWORD /d 1 /f",
+		r"reg add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f",
 	), start=1):
 		_add_values(_add(commands, "RunSynchronousCommand", list_item=True), [("Order", order), ("Path", path)])
 
