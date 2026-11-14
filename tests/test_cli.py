@@ -5,21 +5,20 @@ import plistlib
 import stat
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
 from fake_keygrab_helper import read_log, write_fake_helper
-from fake_qmp_server import TCPFakeQMPServer, error_reply, reply
-from fakes import FakeBackend, RecordingQMPClient, write_config
+from fake_qmp_server import FakeQMPServer, error_reply, reply
+from fakes import FakeBackend, RecordingQMPClient, short_temporary_directory, write_config
 from wn.cli import main
 from wn.keys import combo_to_input_events
-from wn.utm_config import UTM_GROUP_CONTAINER
+from wn.utm_config import UTM_GROUP_CONTAINER, qmp_socket_file
 
 
 class CLITestCase(unittest.TestCase):
 	def setUp(self):
-		self.home = tempfile.TemporaryDirectory()
+		self.home = short_temporary_directory()
 		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
 		patcher.start()
 		self.addCleanup(patcher.stop)
@@ -307,10 +306,14 @@ class MouseCommandTests(CLITestCase):
 
 
 class UTMWiringTests(CLITestCase):
-	def test_key_reaches_utm_qmp_server_over_tcp(self):
+	def vm_qmp_server(self, handlers):
+		os.makedirs(os.path.expanduser(UTM_GROUP_CONTAINER), exist_ok=True)
+		return FakeQMPServer(handlers, socket_path=qmp_socket_file("Windows"))
+
+	def test_key_reaches_the_vm_qmp_socket(self):
 		handlers = {"input-send-event": lambda request: [reply(request, {})]}
-		with TCPFakeQMPServer(handlers) as server:
-			write_config(self.home.name, {"backend": "utm", "qmp_port": server.port})
+		with self.vm_qmp_server(handlers) as server:
+			write_config(self.home.name, {"backend": "utm", "vm_name": "Windows"})
 			exit_code, _, stderr = self.run_real_cli("key", "win+r")
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual([request["execute"] for request in server.received], ["qmp_capabilities", "input-send-event", "input-send-event"])
@@ -318,7 +321,7 @@ class UTMWiringTests(CLITestCase):
 
 	def screendump_handlers(self):
 		container = os.path.expanduser(UTM_GROUP_CONTAINER)
-		os.makedirs(container)
+		os.makedirs(container, exist_ok=True)
 
 		def screendump(request):
 			with open(os.path.join(container, request["arguments"]["filename"]), "wb") as dump:
@@ -327,7 +330,7 @@ class UTMWiringTests(CLITestCase):
 		return {"screendump": screendump}
 
 	def screenshot(self, server, converter):
-		write_config(self.home.name, {"backend": "utm", "qmp_port": server.port})
+		write_config(self.home.name, {"backend": "utm", "vm_name": "Windows"})
 		with mock.patch("wn.screendump.subprocess.run", side_effect=converter):
 			return self.run_real_cli("screenshot", os.path.join(self.home.name, "screen.png"))
 
@@ -337,7 +340,7 @@ class UTMWiringTests(CLITestCase):
 		def converter(command, **_):
 			commands.append(command)
 			return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-		with TCPFakeQMPServer(self.screendump_handlers()) as server:
+		with self.vm_qmp_server(self.screendump_handlers()) as server:
 			exit_code, stdout, stderr = self.screenshot(server, converter)
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual(stdout, output + "\n")
@@ -346,7 +349,7 @@ class UTMWiringTests(CLITestCase):
 
 	def test_screenshot_reports_a_qmp_error(self):
 		handlers = {"screendump": lambda request: [error_reply(request, "GenericError", "no display")]}
-		with TCPFakeQMPServer(handlers) as server:
+		with self.vm_qmp_server(handlers) as server:
 			exit_code, _, stderr = self.screenshot(server, lambda command, **_: self.fail("nothing to convert"))
 		self.assertEqual(exit_code, 1)
 		self.assertIn("wn: error:", stderr)
@@ -355,7 +358,7 @@ class UTMWiringTests(CLITestCase):
 	def test_screenshot_reports_a_conversion_error(self):
 		def converter(command, **_):
 			return subprocess.CompletedProcess(command, 1, stdout="", stderr="Error: unable to write")
-		with TCPFakeQMPServer(self.screendump_handlers()) as server:
+		with self.vm_qmp_server(self.screendump_handlers()) as server:
 			exit_code, _, stderr = self.screenshot(server, converter)
 		self.assertEqual(exit_code, 1)
 		self.assertIn("sips could not write", stderr)
@@ -456,13 +459,13 @@ class UpdateVMArgsTests(CLITestCase):
 		with open(self.plist_path, "rb") as plist_file:
 			return plistlib.load(plist_file)
 
-	def test_adds_session_qmp_server(self):
+	def test_qmp_moves_the_servers_to_unix_sockets(self):
 		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--qmp")
 		self.assertEqual(exit_code, 0, stderr)
 		config = self.read_plist()
-		self.assertEqual(config["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS[:2] + ["-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"] + OLD_ARGUMENTS[2:])
+		self.assertEqual(config["QEMU"]["AdditionalArguments"], ["-qmp", "unix:wn-Windows.qmp,server=on,wait=off", "-qmp", "unix:wn-Windows-session.qmp,server=on,wait=off"] + OLD_ARGUMENTS[2:])
 		self.assertTrue(config["QEMU"]["UEFIBoot"])
-		self.assertIn("4445", stdout)
+		self.assertIn("wn-Windows-session.qmp", stdout)
 
 	def test_audio_args_replace_audio_block(self):
 		audio_args = "-audiodev coreaudio,id=ca0,timer-period=2500 -device intel-hda -device hda-output,audiodev=ca0"

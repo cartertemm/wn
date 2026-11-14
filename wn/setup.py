@@ -25,6 +25,7 @@ from wn.utm_config import (
 	BUNDLE_SUFFIX,
 	DATA_DIRECTORY_NAME,
 	DEFAULT_OPTIONS,
+	check_qmp_socket_files,
 	default_battery_file,
 	detach_drives,
 	random_mac_address,
@@ -78,8 +79,6 @@ class SetupOptions:
 	headless: bool = False
 	software: Tuple[str, ...] = (SOFTWARE_NVDA,)
 	edition: str = DEFAULT_EDITION
-	qmp_port: int = DEFAULT_OPTIONS["qmp_port"]
-	qmp_session_port: Optional[int] = None
 	mac_address: Optional[str] = None
 	battery: bool = True
 	battery_file: Optional[str] = None
@@ -109,7 +108,7 @@ class Installer:
 			qmp_client_factory=qmp_client_for, clock=time.monotonic, sleep=time.sleep, install_agent=install_agent):
 		self.options = options
 		self.output = output
-		self.backend = backend or UTMBackend({"vm_name": options.name, "qmp_port": options.qmp_port, "qmp_session_port": options.qmp_session_port})
+		self.backend = backend or UTMBackend({"vm_name": options.name})
 		self.fetch = fetch
 		self.build_payload = build_payload
 		self.restart = restart
@@ -150,6 +149,7 @@ class Installer:
 	def check_ready(self):
 		if not os.path.isdir(UTM_APP_PATH):
 			raise SetupError("UTM is not installed. Get it from https://mac.getutm.app and put it in /Applications")
+		check_qmp_socket_files(self.options.name)
 		if self.backend.exists():
 			raise SetupError("UTM already has a VM named '{}'. Pick another name, or delete that VM first".format(self.options.name))
 		if os.path.exists(self.bundle):
@@ -170,8 +170,6 @@ class Installer:
 			"driver_iso_image": PAYLOAD_IMAGE,
 			"headless": options.headless,
 			"display": SETUP_DISPLAY,
-			"qmp_port": options.qmp_port,
-			"qmp_session_port": options.qmp_session_port,
 			"battery": options.battery,
 			"battery_file": self.battery_file if options.battery else None,
 			"secure_boot_cert": SECURE_BOOT_CERT if options.battery else None,
@@ -346,7 +344,7 @@ class Installer:
 		if os.path.exists(path):
 			return
 		os.makedirs(os.path.dirname(path), exist_ok=True)
-		values = {"backend": "utm", "vm_name": self.options.name, "qmp_port": self.options.qmp_port}
+		values = {"backend": "utm", "vm_name": self.options.name}
 		with open(path, "w") as config_file:
 			json.dump(values, config_file, indent="\t")
 			config_file.write("\n")

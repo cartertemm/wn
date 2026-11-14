@@ -2,10 +2,10 @@ import io
 import json
 import os
 import plistlib
-import tempfile
 import unittest
 from unittest import mock
 
+from fakes import short_temporary_directory
 from test_efivars import secure_flash
 from wn.backend import VMStatus
 from wn.backends.utm import UTMCtlError
@@ -25,7 +25,7 @@ from wn.setup import (
 	restart_utm,
 )
 from wn.unattend import SETUP_DONE_MARKER
-from wn.utm_config import DEFAULT_AUDIO_ARGUMENTS
+from wn.utm_config import DEFAULT_AUDIO_ARGUMENTS, UTMConfigError
 
 
 class FakeClock:
@@ -121,7 +121,7 @@ class FakeQMP:
 
 class InstallerTestCase(unittest.TestCase):
 	def setUp(self):
-		self.directory = tempfile.TemporaryDirectory()
+		self.directory = short_temporary_directory()
 		self.addCleanup(self.directory.cleanup)
 		root = self.directory.name
 		home_patch = mock.patch.dict(os.environ, {"HOME": root})
@@ -298,9 +298,9 @@ class RunTests(InstallerTestCase):
 		self.assertIsNone(self.payload_calls[0][3])
 
 	def test_writes_config_when_absent(self):
-		self.installer(name="Windows", qmp_port=4444).run()
+		self.installer(name="Windows").run()
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
-			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows", "qmp_port": 4444})
+			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows"})
 
 	def test_keeps_existing_config(self):
 		path = os.path.join(self.directory.name, ".config", "wn", "config.json")
@@ -325,6 +325,11 @@ class FailureTests(InstallerTestCase):
 		self.backend.known = True
 		with self.assertRaises(SetupError):
 			self.installer().run()
+		self.assertEqual(self.fetch_calls, [])
+
+	def test_vm_name_too_long_for_the_qmp_sockets(self):
+		with self.assertRaises(UTMConfigError):
+			self.installer(name="W" * 100).run()
 		self.assertEqual(self.fetch_calls, [])
 
 	def test_other_vm_running(self):

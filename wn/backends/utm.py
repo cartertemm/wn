@@ -1,11 +1,10 @@
-"""Control a UTM 5 QEMU virtual machine with utmctl, and reach its extra QMP server over TCP."""
+"""Control a UTM 5 QEMU virtual machine with utmctl, and reach its extra QMP servers over Unix sockets."""
 
 import ipaddress
 import subprocess
 
 from wn.backend import Backend, BackendError, VMStatus
-from wn.qmp import TCP_ADDRESS_PREFIX
-from wn.utm_config import DEFAULT_QMP_PORT, QMP_HOST, session_port
+from wn.utm_config import qmp_socket_file
 
 DEFAULT_VM_NAME = "Windows"
 DEFAULT_UTMCTL_PATH = "/Applications/UTM.app/Contents/MacOS/utmctl"
@@ -61,7 +60,7 @@ def parse_list_output(output):
 
 
 class UTMBackend(Backend):
-	"""Drives one UTM VM through utmctl. Config keys: ``vm_name``, ``utmctl_path``, ``qmp_port``, ``qmp_session_port``.
+	"""Drives one UTM VM through utmctl. Config keys: ``vm_name`` and ``utmctl_path``.
 
 	``utmctl_path`` is a path, or a list of arguments that runs utmctl.
 	"""
@@ -69,8 +68,6 @@ class UTMBackend(Backend):
 	def __init__(self, config):
 		self.vm_name = _setting(config, "vm_name", DEFAULT_VM_NAME)
 		self.utmctl_command = _as_command(_setting(config, "utmctl_path", DEFAULT_UTMCTL_PATH))
-		self.qmp_port = _setting(config, "qmp_port", DEFAULT_QMP_PORT)
-		self.qmp_session_port = session_port(self.qmp_port, _setting(config, "qmp_session_port", None))
 
 	def start(self):
 		self._run_for_vm("start", self.vm_name)
@@ -110,8 +107,7 @@ class UTMBackend(Backend):
 		return self._run_for_vm("file", "pull", self.vm_name, guest_path)
 
 	def qmp_socket_path(self, session=False):
-		port = self.qmp_session_port if session else self.qmp_port
-		return "{}{}:{}".format(TCP_ADDRESS_PREFIX, QMP_HOST, port)
+		return qmp_socket_file(self.vm_name, session)
 
 	@staticmethod
 	def _map_state(utm_state):

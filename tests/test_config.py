@@ -94,32 +94,24 @@ class ConfigTests(unittest.TestCase):
 		config = load_config()
 		self.assertEqual(config.vm_name, "Windows")
 		self.assertEqual(config.utmctl_path, "/Applications/UTM.app/Contents/MacOS/utmctl")
-		self.assertEqual(config.qmp_port, 4444)
 
 	def test_utm_settings_are_loaded(self):
-		self.write_config(json.dumps({"utmctl_path": "~/bin/utmctl", "qmp_port": 4500}))
+		self.write_config(json.dumps({"utmctl_path": "~/bin/utmctl"}))
 		config = load_config()
 		self.assertEqual(config.utmctl_path, os.path.join(self.home.name, "bin", "utmctl"))
-		self.assertEqual(config.qmp_port, 4500)
 
-	def test_session_port_and_screen_size_default_to_none(self):
+	def test_screen_size_defaults_to_none(self):
+		self.assertIsNone(load_config().screen_size)
+
+	def test_screen_size_is_loaded(self):
+		self.write_config(json.dumps({"screen_size": "1920x1080"}))
+		self.assertEqual(load_config().screen_size, "1920x1080")
+
+	def test_old_qmp_port_settings_are_ignored(self):
+		self.write_config(json.dumps({"vm_name": "Win11", "qmp_port": 4444, "qmp_session_port": 4445}))
 		config = load_config()
-		self.assertIsNone(config.qmp_session_port)
-		self.assertIsNone(config.screen_size)
-
-	def test_session_port_and_screen_size_are_loaded(self):
-		self.write_config(json.dumps({"qmp_session_port": 4600, "screen_size": "1920x1080"}))
-		config = load_config()
-		self.assertEqual(config.qmp_session_port, 4600)
-		self.assertEqual(config.screen_size, "1920x1080")
-
-	def test_qmp_port_must_be_int(self):
-		for value in ("4444", True, 4444.0):
-			with self.subTest(value=value):
-				self.write_config(json.dumps({"qmp_port": value}))
-				with self.assertRaises(ConfigError) as context:
-					load_config()
-				self.assertIn("qmp_port", str(context.exception))
+		self.assertEqual(config.vm_name, "Win11")
+		self.assertFalse(hasattr(config, "qmp_port"))
 
 	def test_utmctl_path_must_be_string(self):
 		self.write_config(json.dumps({"utmctl_path": None}))

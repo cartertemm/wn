@@ -3,10 +3,10 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from wn.backend import Backend, VMStatus
 from wn.backends.utm import (
-	DEFAULT_QMP_PORT,
 	DEFAULT_UTMCTL_PATH,
 	UnknownVMError,
 	UTMBackend,
@@ -201,44 +201,32 @@ class UTMBackendConfigTests(unittest.TestCase):
 		backend = UTMBackend({})
 		self.assertEqual(backend.vm_name, "Windows")
 		self.assertEqual(backend.utmctl_command, [DEFAULT_UTMCTL_PATH])
-		self.assertEqual(backend.qmp_port, DEFAULT_QMP_PORT)
 		self.assertEqual(DEFAULT_UTMCTL_PATH, "/Applications/UTM.app/Contents/MacOS/utmctl")
-		self.assertEqual(DEFAULT_QMP_PORT, 4444)
 
 	def test_reads_attributes_from_config_object(self):
 		class ConfigObject:
 			vm_name = "Win11"
-			qmp_port = 5555
 
 		backend = UTMBackend(ConfigObject())
 		self.assertEqual(backend.vm_name, "Win11")
-		self.assertEqual(backend.qmp_port, 5555)
 		self.assertEqual(backend.utmctl_command, [DEFAULT_UTMCTL_PATH])
 
 	def test_reads_wn_config(self):
-		backend = UTMBackend(Config(vm_name="Win11", utmctl_path="/opt/utmctl", qmp_port=4500))
+		backend = UTMBackend(Config(vm_name="Win11", utmctl_path="/opt/utmctl"))
 		self.assertEqual(backend.vm_name, "Win11")
 		self.assertEqual(backend.utmctl_command, ["/opt/utmctl"])
-		self.assertEqual(backend.qmp_port, 4500)
 
 	def test_wn_config_defaults_match_backend_defaults(self):
 		backend = UTMBackend(Config())
 		self.assertEqual(backend.vm_name, "Windows")
 		self.assertEqual(backend.utmctl_command, [DEFAULT_UTMCTL_PATH])
-		self.assertEqual(backend.qmp_socket_path(), "tcp:127.0.0.1:4444")
 
-	def test_qmp_socket_path_is_tcp_address(self):
-		self.assertEqual(UTMBackend({}).qmp_socket_path(), "tcp:127.0.0.1:4444")
-		self.assertEqual(UTMBackend({"qmp_port": 4500}).qmp_socket_path(), "tcp:127.0.0.1:4500")
-
-	def test_session_socket_defaults_to_next_port(self):
-		self.assertEqual(UTMBackend({}).qmp_socket_path(session=True), "tcp:127.0.0.1:4445")
-		self.assertEqual(UTMBackend({"qmp_port": 4500}).qmp_socket_path(session=True), "tcp:127.0.0.1:4501")
-
-	def test_session_port_from_config(self):
-		backend = UTMBackend(Config(qmp_port=4500, qmp_session_port=4600))
-		self.assertEqual(backend.qmp_socket_path(session=True), "tcp:127.0.0.1:4600")
-		self.assertEqual(backend.qmp_socket_path(), "tcp:127.0.0.1:4500")
+	def test_qmp_sockets_are_named_after_the_vm(self):
+		container = "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM"
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			self.assertEqual(UTMBackend({}).qmp_socket_path(), container + "/wn-Windows.qmp")
+			self.assertEqual(UTMBackend({}).qmp_socket_path(session=True), container + "/wn-Windows-session.qmp")
+			self.assertEqual(UTMBackend({"vm_name": "Win11"}).qmp_socket_path(), container + "/wn-Win11.qmp")
 
 
 if __name__ == "__main__":

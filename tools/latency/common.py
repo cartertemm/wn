@@ -9,9 +9,12 @@ import sys
 REPOSITORY = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPOSITORY)
 
+from wn.backends.utm import DEFAULT_VM_NAME
+from wn.utm_config import qmp_socket_file
+
 AGENT_PORT = 47000
 REPLY_PORT = 47001
-DEFAULT_QMP_ADDRESS = "tcp:127.0.0.1:4444"
+DEFAULT_QMP_ADDRESS = qmp_socket_file(DEFAULT_VM_NAME)
 NANOSECONDS_PER_MILLISECOND = 1000000
 PERCENTILE_90 = 0.9
 

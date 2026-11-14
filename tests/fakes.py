@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import tempfile
 
 from wn.backend import Backend, VMStatus
 
@@ -12,6 +13,14 @@ def write_config(home, values):
 	os.makedirs(directory, exist_ok=True)
 	with open(os.path.join(directory, "config.json"), "w") as config_file:
 		json.dump(values, config_file)
+
+
+SHORT_TEMPORARY_ROOT = "/tmp"
+
+
+def short_temporary_directory():
+	"""Return a temporary directory short enough for a home whose QMP socket paths fit in sun_path."""
+	return tempfile.TemporaryDirectory(dir=SHORT_TEMPORARY_ROOT)
 
 
 def unused_port():

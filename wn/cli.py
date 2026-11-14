@@ -160,7 +160,7 @@ def _add_update_vm_args_parser(subcommands):
 	update = subcommands.add_parser("update-vm-args", help="change parts of the QEMU additional arguments of an existing UTM bundle. Stop the VM first",
 		description="Each flag replaces one part of the AdditionalArguments. Every argument that no flag names stays as it is.")
 	update.add_argument("--bundle", metavar="PATH", help="the .utm bundle (default: vm_name.utm in UTM's documents folder)")
-	update.add_argument("--qmp", action="store_true", help="write the QMP servers again from qmp_port and qmp_session_port in the config")
+	update.add_argument("--qmp", action="store_true", help="write the QMP servers again, as Unix sockets in the UTM group container")
 	update.add_argument("--headless", action="store_true", help="add the ramfb display that a VM with no display window needs")
 	battery = update.add_mutually_exclusive_group()
 	battery.add_argument("--battery", action="store_true", help="map the battery file into the guest as an NVDIMM, for the wn-acpi firmware driver")
@@ -341,8 +341,6 @@ def run_update_vm_args(context):
 		(BLOCK_EXTRA, arguments.extra_args is not None),
 	) if named]
 	before, after = update_additional_arguments(bundle, {
-		"qmp_port": config.qmp_port,
-		"qmp_session_port": config.qmp_session_port,
 		"headless": arguments.headless,
 		"audio_args": arguments.audio_args,
 		"extra_args": arguments.extra_args,
@@ -490,8 +488,6 @@ def run_setup(context):
 	options = SetupOptions(
 		bundle_dir=arguments.output,
 		downloads_dir=arguments.downloads_dir,
-		qmp_port=context.config.qmp_port,
-		qmp_session_port=context.config.qmp_session_port,
 		battery=not arguments.no_battery,
 		battery_file=context.config.battery_file,
 		**answers

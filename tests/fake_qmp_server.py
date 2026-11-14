@@ -27,12 +27,12 @@ class FakeQMPServer:
 	to build responses, and add ``event(...)`` messages around them to test interleaving.
 	"""
 
-	def __init__(self, handlers=None, events_after_greeting=()):
+	def __init__(self, handlers=None, events_after_greeting=(), socket_path=None):
 		self.handlers = handlers or {}
 		self.events_after_greeting = list(events_after_greeting)
 		self.received = []
 		self._directory = tempfile.mkdtemp(prefix="wnqmp")
-		self.socket_path = os.path.join(self._directory, "qmp.sock")
+		self.socket_path = socket_path or os.path.join(self._directory, "qmp.sock")
 		self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 		self._listener.bind(self.socket_path)
 		self._listener.listen(1)
@@ -46,6 +46,8 @@ class FakeQMPServer:
 	def __exit__(self, *exc_info):
 		self._listener.close()
 		self._thread.join(ACCEPT_TIMEOUT_SECONDS)
+		if os.path.lexists(self.socket_path):
+			os.remove(self.socket_path)
 		shutil.rmtree(self._directory, ignore_errors=True)
 
 	def _serve(self):

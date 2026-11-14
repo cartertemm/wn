@@ -8,7 +8,6 @@ from typing import Optional
 from wn.backends.utm import DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
 from wn.errors import WnError
 from wn.text_input import DEFAULT_KEY_DELAY_MS
-from wn.utm_config import DEFAULT_QMP_PORT
 
 CONFIG_RELATIVE_PATH = os.path.join("~", ".config", "wn", "config.json")
 
@@ -22,8 +21,6 @@ class Config:
 	vm_name: str = DEFAULT_VM_NAME
 	backend: str = "utm"
 	utmctl_path: str = DEFAULT_UTMCTL_PATH
-	qmp_port: int = DEFAULT_QMP_PORT
-	qmp_session_port: Optional[int] = None
 	qmp_socket: Optional[str] = None
 	key_delay_ms: int = DEFAULT_KEY_DELAY_MS
 	keygrab_binary: Optional[str] = None
@@ -38,8 +35,6 @@ FIELD_TYPES = {
 	"vm_name": (str,),
 	"backend": (str,),
 	"utmctl_path": (str,),
-	"qmp_port": (int,),
-	"qmp_session_port": (int, type(None)),
 	"qmp_socket": (str, type(None)),
 	"key_delay_ms": (int,),
 	"keygrab_binary": (str, type(None)),
@@ -49,6 +44,7 @@ FIELD_TYPES = {
 	"battery_sync": (bool,),
 	"battery_file": (str, type(None)),
 }
+OBSOLETE_FIELDS = ("qmp_port", "qmp_session_port")
 PATH_FIELDS = ("utmctl_path", "qmp_socket", "keygrab_binary", "keygrab_keycodes", "battery_file")
 
 
@@ -83,6 +79,8 @@ def load_config(path=None):
 	if not os.path.exists(path):
 		return Config()
 	values = _read_json(path)
+	if isinstance(values, dict):
+		values = {key: value for key, value in values.items() if key not in OBSOLETE_FIELDS}
 	_validate(path, values)
 	for field in PATH_FIELDS:
 		if values.get(field):

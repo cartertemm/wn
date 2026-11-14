@@ -30,10 +30,9 @@ class BackendTests(unittest.TestCase):
 
 	def test_utm_backend_is_registered(self):
 		from wn.backends.utm import UTMBackend
-		backend = create_backend(Config(backend="utm", vm_name="Win11", qmp_port=4500))
+		backend = create_backend(Config(backend="utm", vm_name="Win11"))
 		self.assertIsInstance(backend, UTMBackend)
 		self.assertEqual(backend.vm_name, "Win11")
-		self.assertEqual(backend.qmp_port, 4500)
 
 	def test_utm_is_the_default_backend(self):
 		self.assertEqual(type(create_backend(Config())).__name__, "UTMBackend")

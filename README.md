@@ -231,9 +231,7 @@ on.
 | `vm_name` | `Windows` | Name of the VM in UTM. |
 | `backend` | `utm` | Which backend drives the VM. `utm` is the only one so far. |
 | `utmctl_path` | `/Applications/UTM.app/Contents/MacOS/utmctl` | Path of UTM's `utmctl` tool. |
-| `qmp_port` | `4444` | QMP port on `127.0.0.1` for `key`, `type`, and `mouse`. |
-| `qmp_session_port` | `qmp_port` + 1 | Second QMP port, used by `grab`. |
-| `qmp_socket` | none | QMP address: a Unix socket path or `tcp:HOST:PORT`. When set, every command uses it. |
+| `qmp_socket` | none | QMP address: a Unix socket path or `tcp:HOST:PORT`. When set, every command uses it instead of the VM's own sockets. |
 | `key_delay_ms` | `20` | Pause after each key is released for `key` and `type`. |
 | `screen_size` | none | Guest screen size such as `1280x800`. When set, `wn mouse move` takes pixels. |
 | `keygrab_binary` | `keygrab/bin/wn-keygrab` | Path of the key grab helper. |
@@ -241,6 +239,18 @@ on.
 | `keygrab_send_repeats` | `true` | Send auto-repeat key presses in `grab` mode. |
 | `battery_sync` | `true` | Write the Mac's battery status to the native battery block from `wn agent`. |
 | `battery_file` | `~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<vm_name>.bin` | Battery file that QEMU maps into the guest. UTM's QEMU can open it only in that folder. |
+
+`wn` talks to QEMU through two QMP Unix sockets in
+`~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/`: `wn-<vm_name>.qmp`
+for `key`, `type`, `mouse`, and `screenshot`, and `wn-<vm_name>-session.qmp`
+for `grab`. That folder is open only to your user, so other users and web
+pages cannot reach them. macOS limits a socket path to 103 bytes, so a long VM
+name or home folder can be too long; `wn` says so when it is.
+
+VMs made before this change listen on TCP ports 4444 and 4445 instead. To
+move one to the sockets, stop the VM, run `python3 -m wn update-vm-args --qmp`,
+quit UTM, and open it again. `wn` ignores the old `qmp_port` and
+`qmp_session_port` settings, so you can delete them from the config.
 
 ## Advanced
 
@@ -269,7 +279,7 @@ parts that its flags name. Everything else stays as it is:
 
 | Flag | Part it replaces |
 |---|---|
-| `--qmp` | The QMP servers, from `qmp_port` and `qmp_session_port` |
+| `--qmp` | The QMP servers, as Unix sockets |
 | `--headless` | Adds `-device ramfb` |
 | `--audio-args ARGS` | The audio arguments |
 | `--battery`, `--no-battery` | The battery NVDIMM |

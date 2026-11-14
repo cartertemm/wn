@@ -25,6 +25,7 @@ from wn.utm_config import (
 	config_plist_bytes,
 	detach_drives,
 	merge_argument_blocks,
+	qmp_socket_file,
 	set_display_hardware,
 	update_additional_arguments,
 	write_bundle,
@@ -142,25 +143,28 @@ class ConfigContentTests(unittest.TestCase):
 		self.assertIs(qemu["TPMDevice"], False)
 		self.assertIs(qemu["UEFIBoot"], False)
 
-	def test_qmp_server_argument(self):
-		self.assertEqual(arguments_of(build_config(options()))[:4], [
-			"-qmp", "tcp:127.0.0.1:4444,server=on,wait=off",
-			"-qmp", "tcp:127.0.0.1:4445,server=on,wait=off",
-		])
-		self.assertEqual(arguments_of(build_config(options(qmp_port=4500)))[:4], [
-			"-qmp", "tcp:127.0.0.1:4500,server=on,wait=off",
-			"-qmp", "tcp:127.0.0.1:4501,server=on,wait=off",
+	def test_qmp_servers_are_unix_sockets_named_after_the_vm(self):
+		self.assertEqual(arguments_of(build_config(options()))[:4], QMP_ARGUMENTS)
+		self.assertEqual(arguments_of(build_config(options(name="Other")))[:4], [
+			"-qmp", "unix:wn-Other.qmp,server=on,wait=off",
+			"-qmp", "unix:wn-Other-session.qmp,server=on,wait=off",
 		])
 
-	def test_qmp_session_port(self):
-		self.assertEqual(arguments_of(build_config(options(qmp_session_port=5000)))[:4], [
-			"-qmp", "tcp:127.0.0.1:4444,server=on,wait=off",
-			"-qmp", "tcp:127.0.0.1:5000,server=on,wait=off",
-		])
+	def test_qmp_socket_files_are_in_the_group_container(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			self.assertEqual(qmp_socket_file("Win11"), "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-Win11.qmp")
+			self.assertEqual(qmp_socket_file("Win11", session=True), "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-Win11-session.qmp")
 
-	def test_qmp_ports_must_differ(self):
+	def test_qmp_socket_path_must_fit_in_sun_path(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			build_config(options(name="W" * 28))
+			with self.assertRaises(UTMConfigError) as context:
+				build_config(options(name="W" * 29))
+		self.assertIn("shorter VM name", str(context.exception))
+
+	def test_vm_name_must_not_contain_commas(self):
 		with self.assertRaises(UTMConfigError):
-			build_config(options(qmp_session_port=4444))
+			build_config(options(name="Win,11"))
 
 	def test_drives(self):
 		cd, disk = build_config(options())["Drive"]
@@ -232,7 +236,7 @@ class ConfigContentTests(unittest.TestCase):
 
 	def test_qmp_comes_first_in_arguments(self):
 		arguments = arguments_of(build_config(options(headless=True)))
-		self.assertEqual(arguments[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
+		self.assertEqual(arguments[:4], QMP_ARGUMENTS)
 
 	def test_each_build_gets_new_uuids(self):
 		first = build_config(options())
@@ -469,11 +473,11 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 			return plistlib.load(plist_file)
 
 	def test_rewrites_only_additional_arguments(self):
-		before, after = update_additional_arguments(self.bundle, {"qmp_port": 4444}, ARGUMENT_BLOCKS)
+		before, after = update_additional_arguments(self.bundle, {}, ARGUMENT_BLOCKS)
 		config = self.read_config()
 		self.assertEqual(before, ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off"])
 		self.assertEqual(arguments_of(config), after)
-		self.assertEqual(after[:4], ["-qmp", "tcp:127.0.0.1:4444,server=on,wait=off", "-qmp", "tcp:127.0.0.1:4445,server=on,wait=off"])
+		self.assertEqual(after[:4], QMP_ARGUMENTS)
 		self.assertIn("coreaudio,id=ca0,timer-period=2500,out.buffer-length=5000,out.buffer-count=3,out.frequency=48000,out.fixed-settings=on", after)
 		config["QEMU"]["AdditionalArguments"] = self.original["QEMU"]["AdditionalArguments"]
 		self.assertEqual(config, self.original)
@@ -546,11 +550,17 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 		_, after = update_additional_arguments(self.bundle, {}, [BLOCK_BATTERY])
 		self.assertEqual(after, CUSTOM_ARGUMENTS)
 
-	def test_qmp_block_keeps_its_place(self):
+	def test_qmp_block_replaces_the_tcp_servers_in_place(self):
 		self.set_arguments(CUSTOM_ARGUMENTS)
-		_, after = update_additional_arguments(self.bundle, {"qmp_port": 5000}, [BLOCK_QMP])
-		self.assertEqual(after[:4], ["-qmp", "tcp:127.0.0.1:5000,server=on,wait=off", "-qmp", "tcp:127.0.0.1:5001,server=on,wait=off"])
+		_, after = update_additional_arguments(self.bundle, {}, [BLOCK_QMP])
+		self.assertEqual(after[:4], QMP_ARGUMENTS)
 		self.assertEqual(after[4:], CUSTOM_ARGUMENTS[4:])
+
+
+QMP_ARGUMENTS = [
+	"-qmp", "unix:wn-Win11.qmp,server=on,wait=off",
+	"-qmp", "unix:wn-Win11-session.qmp,server=on,wait=off",
+]
 
 
 CUSTOM_ARGUMENTS = [

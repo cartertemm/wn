@@ -31,8 +31,9 @@ BLOCK_AUDIO = "audio"
 BLOCK_BATTERY = "battery"
 BLOCK_EXTRA = "extra"
 ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_EXTRA)
-QMP_HOST = "127.0.0.1"
-DEFAULT_QMP_PORT = 4444
+QMP_SOCKET_NAME = "wn-{}.qmp"
+QMP_SESSION_SOCKET_NAME = "wn-{}-session.qmp"
+UNIX_SOCKET_PATH_LIMIT = 103
 AUDIODEV_ID = "ca0"
 SPICE_AUDIODEV_ID = "audio0"
 DEFAULT_AUDIO_ARGUMENTS = (
@@ -43,7 +44,6 @@ DEFAULT_AUDIO_ARGUMENTS = (
 )
 MAXIMUM_USB_SHARE = 3
 INTERFACE_VERSION = 1
-QMP_SESSION_PORT_OFFSET = 1
 QEMU_MAC_PREFIX = "52:54:00"
 MAC_SUFFIX_OCTET_COUNT = 3
 OCTET_VALUES = 256
@@ -58,8 +58,6 @@ DEFAULT_OPTIONS = {
 	"display": "virtio-ramfb",
 	"machine_properties": "kernel-irqchip=off",
 	"headless": False,
-	"qmp_port": DEFAULT_QMP_PORT,
-	"qmp_session_port": None,
 	"audio_args": None,
 	"extra_args": None,
 	"battery": False,
@@ -83,9 +81,20 @@ def _new_uuid():
 	return str(uuid.uuid4()).upper()
 
 
-def session_port(qmp_port, qmp_session_port=None):
-	"""Return the QMP port for long-lived clients: ``qmp_session_port``, or the port after ``qmp_port``."""
-	return qmp_port + QMP_SESSION_PORT_OFFSET if qmp_session_port is None else qmp_session_port
+def qmp_socket_file(vm_name, session=False):
+	"""Return the VM's QMP socket in the UTM group container. With ``session``, return the one for long-lived clients such as grab."""
+	template = QMP_SESSION_SOCKET_NAME if session else QMP_SOCKET_NAME
+	return os.path.join(os.path.expanduser(UTM_GROUP_CONTAINER), template.format(vm_name))
+
+
+def check_qmp_socket_files(vm_name):
+	"""Raise UTMConfigError when QEMU cannot take the VM's QMP socket paths."""
+	if "," in vm_name:
+		raise UTMConfigError("the VM name must not contain commas: {}".format(vm_name))
+	for session in (False, True):
+		path = qmp_socket_file(vm_name, session)
+		if len(os.fsencode(path)) > UNIX_SOCKET_PATH_LIMIT:
+			raise UTMConfigError("the QMP socket path {} is longer than the {} bytes macOS allows. Pick a shorter VM name".format(path, UNIX_SOCKET_PATH_LIMIT))
 
 
 def _resolve_argument_options(options):
@@ -105,9 +114,7 @@ def _resolve_argument_options(options):
 			raise UTMConfigError("the battery option needs battery_file")
 		if any(character in _qemu_battery_path(resolved["battery_file"]) for character in BATTERY_FILE_FORBIDDEN):
 			raise UTMConfigError("battery_file must not contain spaces or commas: {}".format(resolved["battery_file"]))
-	resolved["qmp_session_port"] = session_port(resolved["qmp_port"], resolved["qmp_session_port"])
-	if resolved["qmp_session_port"] == resolved["qmp_port"]:
-		raise UTMConfigError("qmp_session_port must differ from qmp_port {}".format(resolved["qmp_port"]))
+	check_qmp_socket_files(resolved["name"])
 	return resolved
 
 
@@ -121,8 +128,9 @@ def _resolve_options(options):
 	return resolved
 
 
-def _qmp_server(port):
-	return ["-qmp", "tcp:{}:{},server=on,wait=off".format(QMP_HOST, port)]
+def _qmp_server(vm_name, session=False):
+	"""QEMU runs in the UTM group container, so the socket gets a bare name there."""
+	return ["-qmp", "unix:{},server=on,wait=off".format(os.path.basename(qmp_socket_file(vm_name, session)))]
 
 
 def default_battery_file(vm_name):
@@ -130,11 +138,15 @@ def default_battery_file(vm_name):
 	return os.path.join(os.path.expanduser(UTM_GROUP_CONTAINER), BATTERY_FILE_NAME.format(vm_name))
 
 
-def battery_file_for_bundle(bundle_path):
+def _bundle_vm_name(bundle_path):
 	name = os.path.basename(os.path.normpath(bundle_path))
 	if name.endswith(BUNDLE_SUFFIX):
 		name = name[:-len(BUNDLE_SUFFIX)]
-	return default_battery_file(name)
+	return name
+
+
+def battery_file_for_bundle(bundle_path):
+	return default_battery_file(_bundle_vm_name(bundle_path))
 
 
 def _qemu_battery_path(battery_file):
@@ -162,7 +174,7 @@ def _audio_arguments(options):
 def _argument_blocks(options):
 	"""Return the AdditionalArguments as ``{block: arguments}``, one entry for each name in ARGUMENT_BLOCKS."""
 	return {
-		BLOCK_QMP: _qmp_server(options["qmp_port"]) + _qmp_server(options["qmp_session_port"]),
+		BLOCK_QMP: _qmp_server(options["name"]) + _qmp_server(options["name"], session=True),
 		BLOCK_RAMFB: list(RAMFB_ARGUMENTS) if options["headless"] else [],
 		BLOCK_AUDIO: _audio_arguments(options),
 		BLOCK_BATTERY: _battery_arguments(options) if options["battery"] else [],
@@ -391,16 +403,19 @@ def update_additional_arguments(bundle_path, options, blocks):
 	"""Replace the ``blocks`` (names from ARGUMENT_BLOCKS) in an existing bundle's AdditionalArguments.
 
 	``options`` takes the same argument options as ``build_config``, such as
-	``qmp_port``, ``qmp_session_port``, ``headless``, ``audio_args``, ``battery``, ``battery_file``, and
-	``extra_args``. Only the named blocks are built from them; every other argument stays as it is, and
-	BLOCK_EXTRA means every argument that is in no other block. With ``battery``, the memory size comes from
-	the bundle, and ``battery_file`` defaults to wn-battery-<name>.bin in the UTM group container. Nothing else
-	in config.plist changes, and the file is not written when the arguments stay the same.
+	``headless``, ``audio_args``, ``battery``, ``battery_file``, and ``extra_args``. Only the named blocks
+	are built from them; every other argument stays as it is, and BLOCK_EXTRA means every argument that is in
+	no other block. ``name`` defaults to the bundle name, and names the QMP sockets. With ``battery``, the
+	memory size comes from the bundle, and ``battery_file`` defaults to wn-battery-<name>.bin in the UTM group
+	container. Nothing else in config.plist changes, and the file is not written when the arguments stay the
+	same.
 	Return the arguments before and after.
 	"""
 	unknown = sorted(set(blocks) - set(ARGUMENT_BLOCKS))
 	if unknown:
 		raise UTMConfigError("unknown argument blocks: {}".format(", ".join(unknown)))
+	if not options.get("name"):
+		options = dict(options, name=_bundle_vm_name(bundle_path))
 	if options.get("battery") and not options.get("battery_file"):
 		options = dict(options, battery_file=battery_file_for_bundle(bundle_path))
 	resolved = _resolve_argument_options(options)
