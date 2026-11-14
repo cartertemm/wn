@@ -61,8 +61,10 @@ Then it works on its own:
 2. Builds a setup disc with the answer file, the drivers, and the installers,
    and creates the UTM bundle.
 3. Restarts UTM so it finds the new VM, then starts the VM.
-4. Waits while Windows installs. At the first sign in, Windows installs the
-   drivers, the guest tools, and NVDA if you chose it, then restarts once.
+4. Waits while Windows installs. Setup turns off Fast Startup. At the first
+   sign in, Windows installs the drivers, the guest tools, and NVDA if you
+   chose it, sets the power button to shut down, sets the display to never
+   turn off, then restarts once.
 5. Shuts down the VM, removes the install discs, switches the display to
    virtio-gpu, and starts it again.
 6. Writes `~/.config/wn/config.json` if it does not exist.
@@ -84,7 +86,7 @@ python3 -m wn setup --yes --name Windows --username carter --software nvda
 | Command | Example | What it does |
 |---|---|---|
 | `start` | `python3 -m wn start` | Starts the VM. |
-| `stop` | `python3 -m wn stop` | Shuts down Windows and waits until the VM has stopped, up to `--timeout` seconds (120). Exits with 1 if it is still running then. `--force` powers off at once. |
+| `stop` | `python3 -m wn stop` | Presses Shift to turn the display on, because Windows ignores the power button while the display is off. Then it shuts down Windows and waits until the VM has stopped, up to `--timeout` seconds (120). Exits with 1 if it is still running then. `--force` powers off at once. |
 | `status` | `python3 -m wn status` | Prints `Windows: running` or `Windows: stopped`. |
 | `ip` | `python3 -m wn ip` | Prints the guest IP address. |
 | `key` | `python3 -m wn key ctrl+alt+del` | Presses one or more key combos. |

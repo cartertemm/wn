@@ -70,6 +70,15 @@ NVDA_INSTALLED_PATH = r"C:\Program Files\NVDA\nvda.exe"
 NVDA_INSTALL_WAIT_ROUNDS = 60
 DISPLAY_SETTLE_PINGS = 11
 REBOOT_DELAY_SECONDS = 5
+POWER_BUTTON_SHUT_DOWN = 3
+DISPLAY_NEVER_OFF = 0
+POWER_SETTINGS = (
+	"/setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION {}".format(POWER_BUTTON_SHUT_DOWN),
+	"/setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION {}".format(POWER_BUTTON_SHUT_DOWN),
+	"/setactive SCHEME_CURRENT",
+	"/change monitor-timeout-ac {}".format(DISPLAY_NEVER_OFF),
+	"/change monitor-timeout-dc {}".format(DISPLAY_NEVER_OFF),
+)
 
 
 class UnattendError(WnError):
@@ -117,7 +126,7 @@ def _logged(command):
 
 
 def setup_commands(guest_tools_name, nvda_installer_name=None, battery=True):
-	"""Return the first-logon commands that finish the VM: drivers, display, guest tools, NVDA, audio, battery driver and service, then a reboot."""
+	"""Return the first-logon commands that finish the VM: drivers, display, guest tools, NVDA, power settings, audio, battery driver and service, then a reboot."""
 	driver_folder = "\\".join(DRIVER_SUBPATH)
 	commands = [
 		_on_payload_drive(_logged("pnputil /add-driver %d:\\{}\\{}\\{}\\*.inf /install".format(VIRTIO_FOLDER, driver, driver_folder)))
@@ -129,6 +138,7 @@ def setup_commands(guest_tools_name, nvda_installer_name=None, battery=True):
 		commands.append(_on_payload_drive(_logged("%d:\\{}\\{} --install-silent --enable-start-on-logon=True".format(TOOLS_FOLDER, nvda_installer_name))))
 		commands.append("cmd /c for /l %i in (1,1,{}) do @if not exist \"{}\" ping -n 3 127.0.0.1 >nul".format(NVDA_INSTALL_WAIT_ROUNDS, NVDA_INSTALLED_PATH))
 		commands.append(_logged("cmd /c reg add \"HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Accessibility\" /v Configuration /t REG_SZ /d nvda_nvda_v1 /f"))
+	commands += [_logged("cmd /c powercfg {}".format(setting)) for setting in POWER_SETTINGS]
 	commands.append(_on_payload_drive(_logged("powershell -ExecutionPolicy Bypass -File %d:\\{}\\{}".format(TOOLS_FOLDER, MIC_SPEAKER_SCRIPT))))
 	if battery:
 		for installer in (BATTERY_INSTALLER, BATTERY_NOTIFY_INSTALLER):
@@ -235,6 +245,7 @@ def _specialize(root, options):
 		r"reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f",
 		r"reg add HKLM\SOFTWARE\Policies\Microsoft\Windows\OOBE /v DisablePrivacyExperience /t REG_DWORD /d 1 /f",
 		r"reg add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f",
+		r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f',
 	), start=1):
 		_add_values(_add(commands, "RunSynchronousCommand", list_item=True), [("Order", order), ("Path", path)])
 

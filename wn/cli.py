@@ -18,7 +18,7 @@ from wn.config import load_config
 from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
-from wn.qmp import qmp_client_for
+from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import save_screenshot
 from wn.setup import DEFAULT_DISK_GIB, SOFTWARE_CHOICES, STOPPED_STATE, Installer, SetupOptions
 from wn.text_input import text_to_combos
@@ -42,6 +42,8 @@ EXIT_FAILURE = 1
 DEFAULT_SCROLL_COUNT = 1
 DEFAULT_STOP_TIMEOUT_SECONDS = 120
 STOP_POLL_SECONDS = 2
+WAKE_DISPLAY_KEY = "shift"
+WAKE_DISPLAY_SECONDS = 2
 NO_SOFTWARE_ANSWERS = ("0", "none")
 YES_ANSWERS = ("y", "yes")
 NO_ANSWERS = ("n", "no")
@@ -211,6 +213,7 @@ def run_stop(context):
 	if arguments.force:
 		context.backend.stop(force=True)
 		return
+	_wake_display(context)
 	context.backend.stop()
 	deadline = time.monotonic() + arguments.timeout
 	while True:
@@ -222,6 +225,17 @@ def run_stop(context):
 			context.stderr.write("wn: error: {} is still {} {} s after the shutdown request. Windows may be busy or showing a dialog. Check the screen, or run wn stop --force to power off\n".format(status.name, status.state, arguments.timeout))
 			return EXIT_FAILURE
 		time.sleep(STOP_POLL_SECONDS)
+
+
+def _wake_display(context):
+	"""Press a key so Windows turns the display on. Windows ignores the power button while the display is off."""
+	try:
+		with context.connect_qmp() as client:
+			send_input_steps(client, combos_to_input_steps([WAKE_DISPLAY_KEY], delay_ms=0))
+	except (QMPConnectionError, QMPError) as error:
+		context.stderr.write("wn: warning: cannot wake the display before the shutdown request: {}\n".format(error))
+		return
+	time.sleep(WAKE_DISPLAY_SECONDS)
 
 
 def run_status(context):

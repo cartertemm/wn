@@ -13,6 +13,7 @@ from fake_qmp_server import FakeQMPServer, error_reply, reply
 from fakes import FakeBackend, RecordingQMPClient, short_temporary_directory, write_config
 from wn.cli import main
 from wn.keys import combo_to_input_events
+from wn.qmp import QMPConnectionError
 from wn.utm_config import UTM_GROUP_CONTAINER, qmp_socket_file
 
 
@@ -55,11 +56,28 @@ class LifecycleCommandTests(CLITestCase):
 
 	def test_stop(self):
 		self.run_cli("stop")
-		self.assertEqual(self.backend.calls, [("stop", False), ("status",)])
+		self.assertEqual(self.backend.calls, [("qmp_socket_path", False), ("stop", False), ("status",)])
+
+	def test_stop_presses_shift_first_so_the_display_is_on(self):
+		with mock.patch("wn.cli.time.sleep") as sleep:
+			exit_code, _, stderr = self.run_cli("stop")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.qmp_log, [("connect", "/fake/qmp.sock")] + [("input-send-event", arguments) for arguments in combo_to_input_events("shift")] + [("close",)])
+		sleep.assert_any_call(2)
+
+	def test_stop_sends_the_power_button_when_qmp_is_unreachable(self):
+		def unreachable(address):
+			raise QMPConnectionError("cannot connect to QMP socket {}".format(address))
+		stderr = io.StringIO()
+		exit_code = main(["stop"], backend_factory=lambda config: self.backend, qmp_client_factory=unreachable, stdout=io.StringIO(), stderr=stderr)
+		self.assertEqual(exit_code, 0)
+		self.assertIn("wn: warning: cannot wake the display", stderr.getvalue())
+		self.assertEqual(self.backend.calls, [("qmp_socket_path", False), ("stop", False), ("status",)])
 
 	def test_stop_force(self):
 		self.run_cli("stop", "--force")
 		self.assertEqual(self.backend.calls, [("stop", True)])
+		self.assertEqual(self.qmp_log, [])
 
 	def test_status(self):
 		exit_code, stdout, _ = self.run_cli("status")
@@ -135,6 +153,7 @@ class StopCommandTests(CLITestCase):
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertEqual(stdout, "Windows: stopped\n")
 		self.assertEqual(self.vm_state()["last_stop_flags"], ["--request"])
+		self.assertIn("cannot wake the display", stderr)
 		self.assertEqual(self.now[0], 4.0)
 
 	def test_fails_when_windows_keeps_running(self):

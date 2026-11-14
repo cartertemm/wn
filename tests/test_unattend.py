@@ -157,6 +157,12 @@ class SpecializeTests(unittest.TestCase):
 		self.assertIn(r"reg add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f", paths)
 
 
+	def test_fast_startup_off(self):
+		deployment = component(parse(), "specialize", "Microsoft-Windows-Deployment")
+		paths = [text(command, "u:Path") for command in deployment.findall("u:RunSynchronous/u:RunSynchronousCommand", NS)]
+		self.assertIn(r'reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f', paths)
+
+
 class OOBETests(unittest.TestCase):
 	def setUp(self):
 		self.shell = component(parse(options(password="s3cret")), "oobeSystem", "Microsoft-Windows-Shell-Setup")
@@ -289,6 +295,17 @@ class SetupCommandTests(unittest.TestCase):
 		self.assertIn(PAYLOAD_TAG, command)
 		self.assertIn("powershell -ExecutionPolicy Bypass -File %d:\\tools\\hide-mic-speaker.ps1", command)
 		self.assertTrue(command.endswith(">> C:\\wn-setup.log 2>&1"))
+
+	def test_power_settings_before_mic_speaker_script(self):
+		power = [command for command in self.commands if "powercfg" in command]
+		self.assertEqual(power, [
+			"cmd /c powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 3 >> C:\\wn-setup.log 2>&1",
+			"cmd /c powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 3 >> C:\\wn-setup.log 2>&1",
+			"cmd /c powercfg /setactive SCHEME_CURRENT >> C:\\wn-setup.log 2>&1",
+			"cmd /c powercfg /change monitor-timeout-ac 0 >> C:\\wn-setup.log 2>&1",
+			"cmd /c powercfg /change monitor-timeout-dc 0 >> C:\\wn-setup.log 2>&1",
+		])
+		self.assertEqual(self.commands.index(power[-1]), len(self.commands) - 5)
 
 	def test_without_battery(self):
 		commands = setup_commands("utm-guest-tools-0.1.271.exe", "nvda_2026.3.1.exe", battery=False)
