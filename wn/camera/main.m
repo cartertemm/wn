@@ -67,6 +67,7 @@ struct camera {
 	struct uvc_request_queue queue;
 	bool plugged;
 	bool capture_on;
+	bool capture_recovering;
 	uint8_t capture_frame_index;
 	uint64_t frame_sequence;
 	uint64_t frames_sent;
@@ -229,6 +230,8 @@ static void start_capture(struct camera *camera)
 		camera->capture_started_at = camera->capture_attempted_at;
 		camera->frames_sent = 0;
 	}
+	if (!changed)
+		camera->capture_recovering = true;
 	camera->capture_on = true;
 	camera->capture_frame_index = frame_index;
 	if (changed)
@@ -241,6 +244,7 @@ static void stop_capture(struct camera *camera)
 		return;
 	capture_stop();
 	camera->capture_on = false;
+	camera->capture_recovering = false;
 	camera_log("camera off, sent %llu frames in %.1f s", (unsigned long long)camera->frames_sent, now_seconds() - camera->capture_started_at);
 }
 
@@ -432,6 +436,9 @@ static void send_frames(struct camera *camera)
 			if (!capture_copy_frame(uvc_stream_reserve(&camera->stream, frame_size), uvc_frame_width(frame_index), uvc_frame_height(frame_index), &camera->frame_sequence))
 				return;
 			uvc_stream_load(&camera->stream, frame_size);
+			if (camera->capture_recovering)
+				camera_log("camera recovered");
+			camera->capture_recovering = false;
 		}
 		uvc_queue_pop(&camera->queue, NULL);
 		room = request.length < UVC_PAYLOAD_MAX ? request.length : UVC_PAYLOAD_MAX;
