@@ -691,6 +691,33 @@ class CameraSupervisorTests(unittest.TestCase):
 		supervisor.run()
 		self.assertIn("camera: cannot start /missing/wn-camera", self.log.getvalue())
 
+	def test_reports_a_missing_binary_once(self):
+		supervisor = CameraSupervisor(["/missing/wn-camera"], self.log, mock.Mock(side_effect=FileNotFoundError(2, "No such file or directory")))
+		waits = []
+
+		def wait(seconds):
+			waits.append(seconds)
+			if len(waits) == 3:
+				supervisor.stopping.set()
+
+		supervisor.wait = wait
+		supervisor.run()
+		self.assertEqual(self.log.getvalue().count("cannot start"), 1)
+
+	def test_reports_a_missing_binary_again_after_it_ran(self):
+		results = [FileNotFoundError(2, "No such file or directory"), FakeCameraProcess(), FileNotFoundError(2, "No such file or directory")]
+		supervisor = CameraSupervisor(["/missing/wn-camera"], self.log, mock.Mock(side_effect=results))
+		waits = []
+
+		def wait(seconds):
+			waits.append(seconds)
+			if len(waits) == 3:
+				supervisor.stopping.set()
+
+		supervisor.wait = wait
+		supervisor.run()
+		self.assertEqual(self.log.getvalue().count("cannot start"), 2)
+
 	def test_stop_sends_sigterm_and_waits(self):
 		supervisor = CameraSupervisor(["/bin/sleep", "30"], self.log)
 		supervisor.start()

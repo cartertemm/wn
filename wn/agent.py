@@ -252,7 +252,7 @@ def camera_command(config):
 class CameraSupervisor:
 	"""Runs wn-camera as a child, starts it again 5 s after it exits, and stops it with the agent.
 
-	wn-camera inherits the agent's stdout and stderr, so its lines land in the agent log.
+	wn-camera inherits the agent's stdout and stderr, so its lines land in the agent log. The supervisor logs a message only when it differs from the last one.
 	"""
 
 	def __init__(self, command, log, popen=subprocess.Popen, wait=None):
@@ -264,8 +264,12 @@ class CameraSupervisor:
 		self.lock = threading.Lock()
 		self.process = None
 		self.thread = None
+		self.last_message = None
 
 	def _write(self, message):
+		if message == self.last_message:
+			return
+		self.last_message = message
 		self.log.write(CAMERA_LOG_PREFIX + message + "\n")
 		self.log.flush()
 
