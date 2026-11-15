@@ -168,8 +168,8 @@ class Installer:
 			self.finish_bundle(display=None)
 		address = self.wait_for_ip()
 		self.write_config_if_absent()
-		update_config_file({"camera": self.options.camera})
 		if self.options.battery or self.options.camera:
+			update_config_file({"camera": self.options.camera, "battery_sync": self.options.battery})
 			self.start_agent()
 		self.print_summary(address)
 		return address

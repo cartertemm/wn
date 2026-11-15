@@ -300,7 +300,21 @@ class RunTests(InstallerTestCase):
 		self.assertFalse(any("wncam" in argument for argument in arguments))
 		self.assertNotIn("Click Allow", self.output.getvalue())
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
-			self.assertFalse(json.load(config_file)["camera"])
+			config = json.load(config_file)
+		self.assertFalse(config["camera"])
+		self.assertTrue(config["battery_sync"])
+
+	def test_camera_without_battery_turns_battery_sync_off(self):
+		self.installer(battery=False).run()
+		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
+			config = json.load(config_file)
+		self.assertTrue(config["camera"])
+		self.assertFalse(config["battery_sync"])
+
+	def test_no_battery_and_no_camera_leave_the_agent_settings_alone(self):
+		self.installer(battery=False, camera=False).run()
+		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
+			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows"})
 
 	def test_falls_back_to_plain_ramfb_when_desktop_stays_blank(self):
 		self.desktop_drawn.return_value = False
@@ -335,7 +349,7 @@ class RunTests(InstallerTestCase):
 	def test_writes_config_when_absent(self):
 		self.installer(name="Windows").run()
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
-			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows", "camera": True})
+			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows", "camera": True, "battery_sync": True})
 
 	def test_keeps_existing_config(self):
 		path = os.path.join(self.directory.name, ".config", "wn", "config.json")
@@ -344,7 +358,7 @@ class RunTests(InstallerTestCase):
 			config_file.write('{"key_delay_ms": 30}')
 		self.installer().run()
 		with open(path) as config_file:
-			self.assertEqual(json.load(config_file), {"key_delay_ms": 30, "camera": True})
+			self.assertEqual(json.load(config_file), {"key_delay_ms": 30, "camera": True, "battery_sync": True})
 
 	def test_progress_lines_have_elapsed_time(self):
 		self.installer().run()
