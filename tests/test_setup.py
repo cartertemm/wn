@@ -337,6 +337,29 @@ class FailureTests(InstallerTestCase):
 			self.installer().run()
 		self.assertIn("Linux", str(context.exception))
 
+	def test_vm_started_during_download_blocks_the_restart(self):
+		def fetch_then_start_vm(*arguments, **keywords):
+			self.backend.machines = lambda: [("UUID", "started", "Linux")]
+			return self.fetch(*arguments, **keywords)
+		installer = self.installer()
+		installer.fetch = fetch_then_start_vm
+		with self.assertRaises(SetupError) as context:
+			installer.run()
+		self.assertIn("Linux", str(context.exception))
+		self.assertEqual(self.restarts, [])
+
+	def test_vm_started_during_install_blocks_the_second_restart(self):
+		original_stop = self.backend.stop
+
+		def stop_then_start_other_vm(force=False):
+			original_stop(force)
+			self.backend.machines = lambda: [("UUID", "stopped", "Windows"), ("UUID2", "started", "Linux")]
+		self.backend.stop = stop_then_start_other_vm
+		with self.assertRaises(SetupError) as context:
+			self.installer().run()
+		self.assertIn("Linux", str(context.exception))
+		self.assertEqual(len(self.restarts), 1)
+
 	def test_existing_bundle(self):
 		os.makedirs(os.path.join(self.bundle_dir, "Windows.utm"))
 		with self.assertRaises(SetupError):

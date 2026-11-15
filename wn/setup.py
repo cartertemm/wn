@@ -154,9 +154,12 @@ class Installer:
 			raise SetupError("UTM already has a VM named '{}'. Pick another name, or delete that VM first".format(self.options.name))
 		if os.path.exists(self.bundle):
 			raise SetupError("{} already exists. Remove it first or pick another name".format(self.bundle))
+		self.check_no_running_vms("Stop them first")
+
+	def check_no_running_vms(self, advice):
 		running = [name for _, state, name in self.backend.machines() if state != STOPPED_STATE]
 		if running:
-			raise SetupError("wn setup restarts UTM, which would stop these VMs: {}. Stop them first".format(", ".join(running)))
+			raise SetupError("wn setup restarts UTM, which would stop these VMs: {}. {}".format(", ".join(running), advice))
 
 	def create_bundle(self, downloads):
 		self.report("Creating the VM bundle {}".format(self.bundle))
@@ -200,6 +203,7 @@ class Installer:
 		)
 
 	def restart_utm_and_wait(self):
+		self.check_no_running_vms("Setup stopped before it restarted UTM, so {} is not finished. Stop them, remove it, and run wn setup again".format(self.bundle))
 		self.restart()
 		deadline = self.clock() + UTM_REGISTER_TIMEOUT_SECONDS
 		while True:
