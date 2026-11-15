@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import os
+import tempfile
 from typing import Optional
 
 from wn.backends.utm import DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
@@ -97,7 +98,14 @@ def update_config_file(values, path=None):
 	if not isinstance(current, dict):
 		raise ConfigError("{} must contain a JSON object".format(path))
 	current.update(values)
-	os.makedirs(os.path.dirname(path), exist_ok=True)
-	with open(path, "w") as config_file:
-		json.dump(current, config_file, indent="\t")
-		config_file.write("\n")
+	directory = os.path.dirname(path)
+	os.makedirs(directory, exist_ok=True)
+	with tempfile.NamedTemporaryFile("w", dir=directory, prefix=".config-", suffix=".json", delete=False) as config_file:
+		try:
+			json.dump(current, config_file, indent="\t")
+			config_file.write("\n")
+		except BaseException:
+			config_file.close()
+			os.unlink(config_file.name)
+			raise
+	os.replace(config_file.name, path)

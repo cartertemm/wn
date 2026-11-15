@@ -161,6 +161,15 @@ class ConfigTests(unittest.TestCase):
 		with open(config_path()) as config_file:
 			self.assertEqual(json.load(config_file), {"vm_name": "Win11", "camera": False})
 
+	def test_update_keeps_the_old_file_when_the_write_fails(self):
+		self.write_config(json.dumps({"camera": True}))
+		with mock.patch("wn.config.json.dump", side_effect=OSError("disk full")):
+			with self.assertRaises(OSError):
+				update_config_file({"camera": False})
+		with open(config_path()) as config_file:
+			self.assertEqual(json.load(config_file), {"camera": True})
+		self.assertEqual(os.listdir(os.path.dirname(config_path())), ["config.json"])
+
 	def test_update_refuses_a_file_that_is_not_an_object(self):
 		self.write_config("[]")
 		with self.assertRaises(ConfigError):
