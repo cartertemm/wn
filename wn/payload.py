@@ -31,10 +31,9 @@ ANSWER_FILE_NAME = "autounattend.xml"
 GUEST_TOOLS_PATTERN = "utm-guest-tools-*.exe"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIC_SPEAKER_SCRIPT_PATH = os.path.join(REPO_ROOT, "wn", "guest", MIC_SPEAKER_SCRIPT)
-SECURE_BOOT_CERT = os.path.join(REPO_ROOT, "efi", "dist", "wn-sb.cer")
+BATTERY_DRIVER = os.path.join(REPO_ROOT, "efi", "dist", "wn-acpi.efi")
 BATTERY_FILES = (
-	os.path.join(REPO_ROOT, "efi", "dist", "wn-acpi.efi"),
-	SECURE_BOOT_CERT,
+	BATTERY_DRIVER,
 	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_INSTALLER),
 	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_NOTIFY_INSTALLER),
 	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_NOTIFY_SOURCE),

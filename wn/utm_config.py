@@ -6,7 +6,7 @@ import random
 import shlex
 import uuid
 
-from wn.efivars import EfiVarsError, make_vars_with_cert
+from wn.efivars import make_vars_with_driver_hash
 from wn.errors import WnError
 
 CONFIGURATION_VERSION = 4
@@ -64,7 +64,7 @@ DEFAULT_OPTIONS = {
 	"battery_file": None,
 	"tpm": True,
 	"uefi": True,
-	"secure_boot_cert": None,
+	"secure_boot_driver": None,
 }
 
 
@@ -123,8 +123,8 @@ def _resolve_options(options):
 	if missing:
 		raise UTMConfigError("missing VM options: {}".format(", ".join(missing)))
 	resolved = _resolve_argument_options(options)
-	if resolved["secure_boot_cert"] and not (resolved["tpm"] and resolved["uefi"]):
-		raise UTMConfigError("secure_boot_cert needs tpm and uefi, because UTM turns on Secure Boot only for UEFI VMs with a TPM")
+	if resolved["secure_boot_driver"] and not (resolved["tpm"] and resolved["uefi"]):
+		raise UTMConfigError("secure_boot_driver needs tpm and uefi, because UTM turns on Secure Boot only for UEFI VMs with a TPM")
 	return resolved
 
 
@@ -345,8 +345,8 @@ def config_plist_bytes(config):
 def write_bundle(path, options):
 	"""Create ``<path>/<name>.utm`` with config.plist and an empty Data directory. Return the bundle path.
 
-	With ``secure_boot_cert`` (a DER certificate file), Data also gets efi_vars.fd made from UTM's Secure Boot
-	template with the certificate added to db. UTM copies its template only when efi_vars.fd is missing, so
+	With ``secure_boot_driver`` (a UEFI driver file), Data also gets efi_vars.fd made from UTM's Secure Boot
+	template with the driver's Authenticode hash added to db. UTM copies its template only when efi_vars.fd is missing, so
 	this file is the one the VM uses. The caller places the disk image and ISO in Data afterwards.
 	"""
 	bundle = os.path.join(path, options.get("name", "") + BUNDLE_SUFFIX)
@@ -360,8 +360,8 @@ def write_bundle(path, options):
 		os.makedirs(os.path.join(bundle, DATA_DIRECTORY_NAME), exist_ok=True)
 	except OSError as error:
 		raise UTMConfigError("cannot write UTM bundle {}: {}".format(bundle, error)) from None
-	if options.get("secure_boot_cert"):
-		prepare_vars_file(bundle, options["secure_boot_cert"])
+	if options.get("secure_boot_driver"):
+		prepare_vars_file(bundle, options["secure_boot_driver"])
 	try:
 		with open(config_path, "wb") as config_file:
 			config_file.write(config_plist_bytes(config))
@@ -370,14 +370,14 @@ def write_bundle(path, options):
 	return bundle
 
 
-def prepare_vars_file(bundle_path, cert_path):
-	"""Write the bundle's Data/efi_vars.fd from UTM's Secure Boot template with ``cert_path`` enrolled in db."""
+def prepare_vars_file(bundle_path, driver_path):
+	"""Write the bundle's Data/efi_vars.fd from UTM's Secure Boot template with the hash of ``driver_path`` enrolled in db."""
 	vars_path = os.path.join(bundle_path, DATA_DIRECTORY_NAME, EFI_VARS_FILE_NAME)
 	try:
-		make_vars_with_cert(SECURE_VARS_TEMPLATE, cert_path, vars_path)
+		make_vars_with_driver_hash(SECURE_VARS_TEMPLATE, driver_path, vars_path)
 	except FileExistsError:
 		raise UTMConfigError("{} already exists. Remove it first to write new UEFI variables".format(vars_path)) from None
-	except (OSError, EfiVarsError) as error:
+	except (OSError, WnError) as error:
 		raise UTMConfigError("cannot write {}: {}".format(vars_path, error)) from None
 
 

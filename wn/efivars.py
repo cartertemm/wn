@@ -1,4 +1,4 @@
-"""Read and edit an EDK2 UEFI variable store, and enroll a certificate in the Secure Boot ``db``.
+"""Read and edit an EDK2 UEFI variable store, and enroll an image hash in the Secure Boot ``db``.
 
 The store is the pflash image that UTM keeps as ``Data/efi_vars.fd``: a qcow2 file (UTM's templates
 use compressed clusters) holding a 64 MiB flash image. The flash starts with the NvStorage firmware
@@ -9,6 +9,7 @@ import struct
 import uuid
 import zlib
 
+from wn.authenticode import file_authenticode_sha256
 from wn.errors import WnError
 from wn.qcow2 import CLUSTER_BITS, CLUSTER_SIZE, HEADER_FORMAT, HEADER_LENGTH, QCOW2_MAGIC, QCOW2_VERSION, REFCOUNT_ORDER
 
@@ -17,6 +18,7 @@ AUTHENTICATED_VARIABLE_STORE_GUID = uuid.UUID("aaf32c78-947b-439a-a180-2e144ec37
 EFI_GLOBAL_VARIABLE_GUID = uuid.UUID("8be4df61-93ca-11d2-aa0d-00e098032b8c")
 EFI_IMAGE_SECURITY_DATABASE_GUID = uuid.UUID("d719b2cb-3d3a-4596-a3bc-dad00e67656f")
 EFI_CERT_X509_GUID = uuid.UUID("a5c059a1-94e4-4aa7-87b5-ab155c2bf072")
+EFI_CERT_SHA256_GUID = uuid.UUID("c1c41626-504c-4092-aca9-41f936934328")
 WN_SIGNATURE_OWNER_GUID = uuid.UUID("499a14e3-3137-4091-89f0-a878e452d314")
 
 FV_SIGNATURE = b"_FVH"
@@ -190,11 +192,11 @@ def parse_signature_lists(data):
 	return lists
 
 
-def enroll_db_cert(flash, cert_der, owner_guid=WN_SIGNATURE_OWNER_GUID):
-	"""Return a copy of ``flash`` whose ``db`` ends with one X.509 signature list holding ``cert_der``."""
+def enroll_db_hash(flash, digest, owner_guid=WN_SIGNATURE_OWNER_GUID):
+	"""Return a copy of ``flash`` whose ``db`` ends with one SHA-256 signature list holding the image ``digest``."""
 	db = find(flash, "db", EFI_IMAGE_SECURITY_DATABASE_GUID)
 	existing = db.data if db is not None else b""
-	new_list = signature_list(EFI_CERT_X509_GUID, owner_guid, cert_der)
+	new_list = signature_list(EFI_CERT_SHA256_GUID, owner_guid, digest)
 	return set_variable_data(flash, "db", EFI_IMAGE_SECURITY_DATABASE_GUID, existing + new_list, attributes=DB_ATTRIBUTES)
 
 
@@ -275,10 +277,8 @@ def qcow2_image(flash):
 	return bytes(image)
 
 
-def make_vars_with_cert(template_path, cert_path, out_path, owner_guid=WN_SIGNATURE_OWNER_GUID):
-	"""Write ``out_path`` as a qcow2 copy of the template with the DER certificate added to ``db``. Refuse to overwrite."""
-	with open(cert_path, "rb") as cert_file:
-		cert = cert_file.read()
-	flash = enroll_db_cert(read_flash(template_path), cert, owner_guid)
+def make_vars_with_driver_hash(template_path, driver_path, out_path, owner_guid=WN_SIGNATURE_OWNER_GUID):
+	"""Write ``out_path`` as a qcow2 copy of the template with the driver's Authenticode hash added to ``db``. Refuse to overwrite."""
+	flash = enroll_db_hash(read_flash(template_path), file_authenticode_sha256(driver_path), owner_guid)
 	with open(out_path, "xb") as out_file:
 		out_file.write(qcow2_image(flash))

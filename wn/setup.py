@@ -16,7 +16,7 @@ from wn.battery_file import battery_file_path, prepare_battery_file
 from wn.config import config_path, load_config
 from wn.downloads import fetch_all
 from wn.errors import WnError
-from wn.payload import SECURE_BOOT_CERT, build_payload_iso
+from wn.payload import BATTERY_DRIVER, build_payload_iso
 from wn.qcow2 import create_empty_qcow2
 from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import looks_drawn, take_screendump
@@ -172,7 +172,7 @@ class Installer:
 			"display": SETUP_DISPLAY,
 			"battery": options.battery,
 			"battery_file": self.battery_file if options.battery else None,
-			"secure_boot_cert": SECURE_BOOT_CERT if options.battery else None,
+			"secure_boot_driver": BATTERY_DRIVER if options.battery else None,
 		}
 		try:
 			write_bundle(os.path.dirname(self.bundle), bundle_options)

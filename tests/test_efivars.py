@@ -5,9 +5,11 @@ import unittest
 import uuid
 import zlib
 
+from wn.authenticode import file_authenticode_sha256
 from wn.efivars import (
 	AUTHENTICATED_VARIABLE_STORE_GUID,
 	DB_ATTRIBUTES,
+	EFI_CERT_SHA256_GUID,
 	EFI_CERT_X509_GUID,
 	EFI_GLOBAL_VARIABLE_GUID,
 	EFI_IMAGE_SECURITY_DATABASE_GUID,
@@ -17,9 +19,9 @@ from wn.efivars import (
 	WN_SIGNATURE_OWNER_GUID,
 	EfiVarsError,
 	encode_variable,
-	enroll_db_cert,
+	enroll_db_hash,
 	find,
-	make_vars_with_cert,
+	make_vars_with_driver_hash,
 	parse_signature_lists,
 	parse_store,
 	qcow2_image,
@@ -38,6 +40,8 @@ TIMESTAMP = bytes([0xE9, 0x07, 0x08, 0x0B, 0x04, 0x2D, 0x01]) + bytes(9)
 MICROSOFT_OWNER = uuid.UUID("77fa9abd-0359-4d32-bd60-28f4e78f784b")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UTM_SECURE_VARS = "/Applications/UTM.app/Contents/Resources/qemu/edk2-arm-secure-vars.fd"
+DRIVER = os.path.join(REPO, "efi", "dist", "wn-acpi.efi")
+OUR_HASH = bytes(range(32))
 
 
 def fv_header(fv_length=FV_LENGTH):
@@ -66,6 +70,10 @@ def synthetic_flash(records):
 
 def x509_list(owner, cert):
 	return signature_list(EFI_CERT_X509_GUID, owner, cert)
+
+
+def sha256_list(owner, digest):
+	return signature_list(EFI_CERT_SHA256_GUID, owner, digest)
 
 
 MICROSOFT_DB = x509_list(MICROSOFT_OWNER, b"microsoft cert") + x509_list(MICROSOFT_OWNER, b"other cert!")
@@ -196,16 +204,16 @@ class SignatureListTests(unittest.TestCase):
 
 
 class EnrollTests(unittest.TestCase):
-	def test_appends_one_x509_list_to_db(self):
-		updated = enroll_db_cert(secure_flash(), b"our cert", WN_SIGNATURE_OWNER_GUID)
+	def test_appends_one_sha256_list_to_db(self):
+		updated = enroll_db_hash(secure_flash(), OUR_HASH, WN_SIGNATURE_OWNER_GUID)
 		db = find(updated, "db", EFI_IMAGE_SECURITY_DATABASE_GUID)
-		self.assertEqual(db.data, MICROSOFT_DB + x509_list(WN_SIGNATURE_OWNER_GUID, b"our cert"))
+		self.assertEqual(db.data, MICROSOFT_DB + sha256_list(WN_SIGNATURE_OWNER_GUID, OUR_HASH))
 		self.assertEqual(db.attributes, DB_ATTRIBUTES)
 
 	def test_creates_db_in_a_blank_store(self):
-		updated = enroll_db_cert(synthetic_flash([]), b"our cert", WN_SIGNATURE_OWNER_GUID)
+		updated = enroll_db_hash(synthetic_flash([]), OUR_HASH, WN_SIGNATURE_OWNER_GUID)
 		db = find(updated, "db", EFI_IMAGE_SECURITY_DATABASE_GUID)
-		self.assertEqual(db.data, x509_list(WN_SIGNATURE_OWNER_GUID, b"our cert"))
+		self.assertEqual(db.data, sha256_list(WN_SIGNATURE_OWNER_GUID, OUR_HASH))
 		self.assertEqual(db.attributes, DB_ATTRIBUTES)
 
 
@@ -258,24 +266,21 @@ class MakeVarsTests(unittest.TestCase):
 		self.addCleanup(directory.cleanup)
 		self.directory = directory.name
 		self.template = os.path.join(self.directory, "template.fd")
-		self.cert = os.path.join(self.directory, "wn.cer")
 		self.out = os.path.join(self.directory, "efi_vars.fd")
 		with open(self.template, "wb") as template_file:
 			template_file.write(qcow2_image(secure_flash()))
-		with open(self.cert, "wb") as cert_file:
-			cert_file.write(b"our cert")
 
-	def test_writes_qcow2_with_the_cert(self):
-		make_vars_with_cert(self.template, self.cert, self.out)
+	def test_writes_qcow2_with_the_driver_hash(self):
+		make_vars_with_driver_hash(self.template, DRIVER, self.out)
 		with open(self.out, "rb") as out_file:
 			self.assertEqual(out_file.read(4), b"QFI\xfb")
 		db = find(read_flash(self.out), "db", EFI_IMAGE_SECURITY_DATABASE_GUID)
-		self.assertEqual(parse_signature_lists(db.data)[-1], (EFI_CERT_X509_GUID, [(WN_SIGNATURE_OWNER_GUID, b"our cert")]))
+		self.assertEqual(parse_signature_lists(db.data)[-1], (EFI_CERT_SHA256_GUID, [(WN_SIGNATURE_OWNER_GUID, file_authenticode_sha256(DRIVER))]))
 
 	def test_refuses_to_overwrite(self):
 		open(self.out, "w").close()
 		with self.assertRaises(FileExistsError):
-			make_vars_with_cert(self.template, self.cert, self.out)
+			make_vars_with_driver_hash(self.template, DRIVER, self.out)
 
 
 @unittest.skipUnless(os.path.exists(UTM_SECURE_VARS), "UTM is not installed")
@@ -287,11 +292,10 @@ class UtmTemplateTests(unittest.TestCase):
 
 	def test_enroll_into_template(self):
 		flash = read_flash(UTM_SECURE_VARS)
-		with open(os.path.join(REPO, "efi", "dist", "wn-sb.cer"), "rb") as cert_file:
-			cert = cert_file.read()
+		digest = file_authenticode_sha256(DRIVER)
 		before = find(flash, "db", EFI_IMAGE_SECURITY_DATABASE_GUID).data
-		after = find(enroll_db_cert(flash, cert, WN_SIGNATURE_OWNER_GUID), "db", EFI_IMAGE_SECURITY_DATABASE_GUID).data
-		self.assertEqual(after, before + x509_list(WN_SIGNATURE_OWNER_GUID, cert))
+		after = find(enroll_db_hash(flash, digest, WN_SIGNATURE_OWNER_GUID), "db", EFI_IMAGE_SECURITY_DATABASE_GUID).data
+		self.assertEqual(after, before + sha256_list(WN_SIGNATURE_OWNER_GUID, digest))
 
 
 if __name__ == "__main__":

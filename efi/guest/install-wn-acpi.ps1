@@ -1,11 +1,10 @@
-# Copies the signed wn-acpi UEFI driver to the EFI System Partition and registers it as a Driver#### load option.
-# Run as administrator or as SYSTEM. wn-acpi.efi and wn-sb.cer must be in the same folder as this script.
+# Copies the wn-acpi UEFI driver to the EFI System Partition and registers it as a Driver#### load option.
+# Run as administrator or as SYSTEM. wn-acpi.efi must be in the same folder as this script.
 
 $ErrorActionPreference = 'Stop'
 
 $LogPath = 'C:\wn-acpi-install.log'
 $DriverFile = 'wn-acpi.efi'
-$CertificateFile = 'wn-sb.cer'
 $EspFolder = 'EFI\wn'
 $EfiFilePath = '\EFI\wn\wn-acpi.efi'
 $Description = 'wn-acpi'
@@ -147,10 +146,8 @@ function Copy-ToEsp([string]$SourceFolder) {
 	try {
 		$target = Join-Path "$drive\" $EspFolder
 		New-Item -ItemType Directory -Force -Path $target | Out-Null
-		foreach ($file in $DriverFile, $CertificateFile) {
-			Copy-Item -Force -Path (Join-Path $SourceFolder $file) -Destination (Join-Path $target $file)
-			Write-Log ('copied {0} to {1} ({2} bytes)' -f $file, $target, (Get-Item (Join-Path $target $file)).Length)
-		}
+		Copy-Item -Force -Path (Join-Path $SourceFolder $DriverFile) -Destination (Join-Path $target $DriverFile)
+		Write-Log ('copied {0} to {1} ({2} bytes)' -f $DriverFile, $target, (Get-Item (Join-Path $target $DriverFile)).Length)
 	} finally {
 		& mountvol.exe $drive /D
 		Write-Log "unmounted $drive"

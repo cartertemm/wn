@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from test_efivars import MICROSOFT_DB, secure_flash, x509_list
+from test_efivars import DRIVER, MICROSOFT_DB, secure_flash, sha256_list
+from wn.authenticode import file_authenticode_sha256
 from wn.efivars import EFI_IMAGE_SECURITY_DATABASE_GUID, WN_SIGNATURE_OWNER_GUID, find, qcow2_image, read_flash
 from wn.utm_config import (
 	CONFIGURATION_VERSION,
@@ -368,17 +369,14 @@ class WriteBundleTests(unittest.TestCase):
 		self.assertEqual(os.listdir(data), ["disk.qcow2"])
 
 
-class SecureBootCertTests(unittest.TestCase):
+class SecureBootDriverTests(unittest.TestCase):
 	def setUp(self):
 		directory = tempfile.TemporaryDirectory()
 		self.addCleanup(directory.cleanup)
 		self.directory = directory.name
 		self.template = os.path.join(self.directory, "edk2-arm-secure-vars.fd")
-		self.cert = os.path.join(self.directory, "wn-sb.cer")
 		with open(self.template, "wb") as template_file:
 			template_file.write(qcow2_image(secure_flash()))
-		with open(self.cert, "wb") as cert_file:
-			cert_file.write(b"our cert")
 		patcher = mock.patch("wn.utm_config.SECURE_VARS_TEMPLATE", self.template)
 		patcher.start()
 		self.addCleanup(patcher.stop)
@@ -386,18 +384,18 @@ class SecureBootCertTests(unittest.TestCase):
 	def test_template_is_utm_secure_vars(self):
 		self.assertEqual(SECURE_VARS_TEMPLATE, "/Applications/UTM.app/Contents/Resources/qemu/edk2-arm-secure-vars.fd")
 
-	def test_writes_efi_vars_with_the_cert(self):
-		bundle = write_bundle(self.directory, options(secure_boot_cert=self.cert))
+	def test_writes_efi_vars_with_the_driver_hash(self):
+		bundle = write_bundle(self.directory, options(secure_boot_driver=DRIVER))
 		vars_path = os.path.join(bundle, "Data", EFI_VARS_FILE_NAME)
 		self.assertEqual(EFI_VARS_FILE_NAME, "efi_vars.fd")
 		db = find(read_flash(vars_path), "db", EFI_IMAGE_SECURITY_DATABASE_GUID)
-		self.assertEqual(db.data, MICROSOFT_DB + x509_list(WN_SIGNATURE_OWNER_GUID, b"our cert"))
+		self.assertEqual(db.data, MICROSOFT_DB + sha256_list(WN_SIGNATURE_OWNER_GUID, file_authenticode_sha256(DRIVER)))
 
 	def test_config_is_unchanged(self):
-		bundle = write_bundle(self.directory, options(secure_boot_cert=self.cert))
+		bundle = write_bundle(self.directory, options(secure_boot_driver=DRIVER))
 		with open(os.path.join(bundle, "config.plist"), "rb") as plist_file:
 			config = plistlib.load(plist_file)
-		self.assertNotIn(self.cert, config_plist_bytes(config).decode())
+		self.assertNotIn(DRIVER, config_plist_bytes(config).decode())
 		self.assertTrue(config["QEMU"]["TPMDevice"])
 
 	def test_no_vars_file_without_the_option(self):
@@ -407,21 +405,30 @@ class SecureBootCertTests(unittest.TestCase):
 	def test_needs_tpm_and_uefi(self):
 		for overrides in ({"tpm": False}, {"uefi": False}):
 			with self.assertRaises(UTMConfigError) as context:
-				build_config(options(secure_boot_cert=self.cert, **overrides))
-			self.assertIn("secure_boot_cert", str(context.exception))
+				build_config(options(secure_boot_driver=DRIVER, **overrides))
+			self.assertIn("secure_boot_driver", str(context.exception))
 
 	def test_refuses_to_overwrite_vars(self):
 		data = os.path.join(self.directory, "Win11.utm", "Data")
 		os.makedirs(data)
 		open(os.path.join(data, EFI_VARS_FILE_NAME), "w").close()
 		with self.assertRaises(UTMConfigError) as context:
-			write_bundle(self.directory, options(secure_boot_cert=self.cert))
+			write_bundle(self.directory, options(secure_boot_driver=DRIVER))
 		self.assertIn(EFI_VARS_FILE_NAME, str(context.exception))
 
-	def test_missing_cert(self):
+	def test_missing_driver(self):
 		with self.assertRaises(UTMConfigError) as context:
-			write_bundle(self.directory, options(secure_boot_cert=os.path.join(self.directory, "missing.cer")))
-		self.assertIn("missing.cer", str(context.exception))
+			write_bundle(self.directory, options(secure_boot_driver=os.path.join(self.directory, "missing.efi")))
+		self.assertIn("missing.efi", str(context.exception))
+		self.assertFalse(os.path.exists(os.path.join(self.directory, "Win11.utm", "config.plist")))
+
+	def test_driver_that_is_not_a_pe_image(self):
+		not_a_driver = os.path.join(self.directory, "wn-acpi.efi")
+		with open(not_a_driver, "wb") as driver_file:
+			driver_file.write(b"not a driver")
+		with self.assertRaises(UTMConfigError) as context:
+			write_bundle(self.directory, options(secure_boot_driver=not_a_driver))
+		self.assertIn("PE/COFF", str(context.exception))
 		self.assertFalse(os.path.exists(os.path.join(self.directory, "Win11.utm", "config.plist")))
 
 

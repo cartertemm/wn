@@ -64,12 +64,12 @@ class PayloadImageTests(unittest.TestCase):
 		expected = [os.path.join("tools", "nvda_2026.3.1.exe"), os.path.join("tools", "utm-guest-tools-0.1.271.exe"), os.path.join("tools", "hide-mic-speaker.ps1"), PAYLOAD_TAG.replace("\\", os.sep)]
 		expected += [os.path.join("virtio", driver, "w11", "ARM64", driver.lower() + ".inf") for driver in FIRST_LOGON_DRIVERS]
 		expected += [os.path.join(WINPE_DRIVER_FOLDER, driver, driver.lower() + ".inf") for driver in SETUP_DRIVERS]
-		expected += [os.path.join("efi", name) for name in ("wn-acpi.efi", "wn-sb.cer", "install-wn-acpi.ps1", "install-wn-battery-notify.ps1", "wn-battery-notify.cs")]
+		expected += [os.path.join("efi", name) for name in ("wn-acpi.efi", "install-wn-acpi.ps1", "install-wn-battery-notify.ps1", "wn-battery-notify.cs")]
 		self.assertEqual(listing, sorted(expected))
 
 	def test_battery_files_match_repo(self):
 		stage_payload(self.staging, self.virtio_iso, self.guest_tools_iso, [])
-		for name, repo_path in (("wn-acpi.efi", ("efi", "dist", "wn-acpi.efi")), ("wn-sb.cer", ("efi", "dist", "wn-sb.cer")), ("install-wn-acpi.ps1", ("efi", "guest", "install-wn-acpi.ps1")), ("install-wn-battery-notify.ps1", ("efi", "guest", "install-wn-battery-notify.ps1")), ("wn-battery-notify.cs", ("efi", "guest", "wn-battery-notify.cs"))):
+		for name, repo_path in (("wn-acpi.efi", ("efi", "dist", "wn-acpi.efi")), ("install-wn-acpi.ps1", ("efi", "guest", "install-wn-acpi.ps1")), ("install-wn-battery-notify.ps1", ("efi", "guest", "install-wn-battery-notify.ps1")), ("wn-battery-notify.cs", ("efi", "guest", "wn-battery-notify.cs"))):
 			with open(os.path.join(self.staging, "efi", name), "rb") as staged, open(os.path.join(REPO_ROOT, *repo_path), "rb") as source:
 				self.assertEqual(staged.read(), source.read(), name)
 

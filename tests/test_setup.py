@@ -11,7 +11,8 @@ from wn.backend import VMStatus
 from wn.backends.utm import UTMCtlError
 from wn.downloads import Downloads
 from wn.efivars import EFI_IMAGE_SECURITY_DATABASE_GUID, find, parse_signature_lists, qcow2_image, read_flash
-from wn.payload import SECURE_BOOT_CERT
+from wn.authenticode import file_authenticode_sha256
+from wn.payload import BATTERY_DRIVER
 from wn.qmp import QMPConnectionError
 from wn.setup import (
 	FINAL_DISPLAY,
@@ -233,13 +234,11 @@ class RunTests(InstallerTestCase):
 		self.installer().run()
 		self.assertTrue(seen[0])
 
-	def test_vars_file_has_the_certificate_in_db(self):
+	def test_vars_file_has_the_driver_hash_in_db(self):
 		self.installer().run()
 		flash = read_flash(os.path.join(self.bundle_dir, "Windows.utm", "Data", "efi_vars.fd"))
-		with open(SECURE_BOOT_CERT, "rb") as cert_file:
-			cert = cert_file.read()
 		lists = parse_signature_lists(find(flash, "db", EFI_IMAGE_SECURITY_DATABASE_GUID).data)
-		self.assertEqual(lists[-1][1][0][1], cert)
+		self.assertEqual(lists[-1][1][0][1], file_authenticode_sha256(BATTERY_DRIVER))
 
 	def test_installs_the_agent_and_says_how_to_remove_it(self):
 		self.installer().run()
