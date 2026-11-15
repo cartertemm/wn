@@ -100,13 +100,14 @@ def camera_socket_file(vm_name):
 
 
 def check_qmp_socket_files(vm_name):
-	"""Raise UTMConfigError when QEMU cannot take the VM's QMP socket paths."""
+	"""Raise UTMConfigError when QEMU cannot take the VM's QMP and camera socket paths."""
 	if "," in vm_name:
 		raise UTMConfigError("the VM name must not contain commas: {}".format(vm_name))
-	for session in (False, True):
-		path = qmp_socket_file(vm_name, session)
+	paths = [("QMP", qmp_socket_file(vm_name, session)) for session in (False, True)]
+	paths.append(("camera", camera_socket_file(vm_name)))
+	for kind, path in paths:
 		if len(os.fsencode(path)) > UNIX_SOCKET_PATH_LIMIT:
-			raise UTMConfigError("the QMP socket path {} is longer than the {} bytes macOS allows. Pick a shorter VM name".format(path, UNIX_SOCKET_PATH_LIMIT))
+			raise UTMConfigError("the {} socket path {} is longer than the {} bytes macOS allows. Pick a shorter VM name".format(kind, path, UNIX_SOCKET_PATH_LIMIT))
 
 
 def _resolve_argument_options(options):

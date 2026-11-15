@@ -595,6 +595,13 @@ class CameraArgumentTests(unittest.TestCase):
 		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
 			self.assertEqual(camera_socket_file("Win11"), "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-Win11-camera.sock")
 
+	def test_camera_socket_path_must_fit_in_sun_path(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}), mock.patch("wn.utm_config.CAMERA_SOCKET_NAME", "wn-{}-camera-socket.sock"):
+			build_config(options(name="W" * 21))
+			with self.assertRaises(UTMConfigError) as context:
+				build_config(options(name="W" * 22))
+		self.assertIn("camera socket path", str(context.exception))
+
 	def test_camera_units_are_in_the_camera_block(self):
 		units = argument_units(CAMERA_ARGUMENTS + ["-device", "usb-redir,chardev=other,id=redir5", "-chardev", "socket,id=wncamera"])
 		self.assertEqual([block_of(unit) for unit in units], [BLOCK_CAMERA, BLOCK_CAMERA, BLOCK_CAMERA, BLOCK_EXTRA, BLOCK_EXTRA])
