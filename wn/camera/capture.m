@@ -311,6 +311,9 @@ void capture_init(bool test_pattern, capture_frame_ready frame_ready)
 	frame_queue = dispatch_queue_create("wn.camera.frames", DISPATCH_QUEUE_SERIAL);
 	delegate = [[WNCaptureDelegate alloc] init];
 	VTPixelTransferSessionCreate(kCFAllocatorDefault, &transfer);
+	VTSessionSetProperty(transfer, kVTPixelTransferPropertyKey_DestinationYCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+	VTSessionSetProperty(transfer, kVTPixelTransferPropertyKey_DestinationColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
+	VTSessionSetProperty(transfer, kVTPixelTransferPropertyKey_DestinationTransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
 	if (test_pattern)
 		watch_pattern_stop_signal();
 }
