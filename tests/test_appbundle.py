@@ -27,6 +27,12 @@ def completed(returncode=0, stderr=""):
 	return subprocess.CompletedProcess([], returncode, stdout="", stderr=stderr)
 
 
+def build_outputs(command, **kwargs):
+	if "-o" in command:
+		open(command[command.index("-o") + 1], "w").close()
+	return completed()
+
+
 class AppBundleTests(unittest.TestCase):
 	def setUp(self):
 		self.home = tempfile.TemporaryDirectory()
@@ -34,7 +40,7 @@ class AppBundleTests(unittest.TestCase):
 		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
 		patcher.start()
 		self.addCleanup(patcher.stop)
-		self.run = mock.Mock(return_value=completed())
+		self.run = mock.Mock(side_effect=build_outputs)
 		self.app = os.path.join(self.home.name, "Library", "Application Support", "wn", "wn-agent.app")
 
 	def test_paths(self):
@@ -75,6 +81,7 @@ class AppBundleTests(unittest.TestCase):
 		])
 
 	def test_build_reports_a_compiler_failure(self):
+		self.run.side_effect = None
 		self.run.return_value = completed(1, "xcrun: error: invalid active developer path")
 		with self.assertRaises(AppBundleError) as caught:
 			build_app(run=self.run)
@@ -86,6 +93,12 @@ class AppBundleTests(unittest.TestCase):
 		with self.assertRaises(AppBundleError) as caught:
 			build_app(run=self.run)
 		self.assertIn("codesign", str(caught.exception))
+		self.assertFalse(os.path.exists(self.app))
+
+	def test_build_removes_the_bundle_when_interrupted_while_signing(self):
+		self.run.side_effect = [completed(), completed(), KeyboardInterrupt()]
+		with self.assertRaises(KeyboardInterrupt):
+			build_app(run=self.run)
 		self.assertFalse(os.path.exists(self.app))
 
 	def test_build_replaces_an_old_bundle(self):
@@ -106,6 +119,35 @@ class AppBundleTests(unittest.TestCase):
 		self.assertEqual(build_app(run=self.run), self.app)
 		self.run.assert_not_called()
 
+	def test_build_runs_again_when_an_executable_is_missing(self):
+		for path in (executable_path, camera_executable_path):
+			build_app(run=self.run)
+			os.remove(path())
+			self.run.reset_mock()
+			build_app(run=self.run)
+			self.assertEqual(self.run.call_count, 3)
+			self.assertTrue(os.path.exists(path()))
+
+	def test_source_hash_changes_with_info_plist(self):
+		before = source_hash()
+		with mock.patch("wn.appbundle.CAMERA_USAGE", "changed"):
+			self.assertNotEqual(source_hash(), before)
+
+	def test_source_hash_changes_with_the_stub_source(self):
+		before = source_hash()
+		sources = tempfile.TemporaryDirectory()
+		self.addCleanup(sources.cleanup)
+		stub = os.path.join(sources.name, os.path.basename(STUB_SOURCE))
+		with open(STUB_SOURCE, "rb") as original, open(stub, "wb") as copy:
+			copy.write(original.read() + b"\n")
+		with mock.patch("wn.appbundle.STUB_SOURCE", stub):
+			self.assertNotEqual(source_hash(), before)
+
+	def test_source_hash_changes_with_a_build_command(self):
+		before = source_hash()
+		with mock.patch("wn.appbundle.CAMERA_FRAMEWORKS", ("Foundation",)):
+			self.assertNotEqual(source_hash(), before)
+
 	def test_build_runs_again_when_a_camera_source_changes(self):
 		sources = tempfile.TemporaryDirectory()
 		self.addCleanup(sources.cleanup)
@@ -120,10 +162,11 @@ class AppBundleTests(unittest.TestCase):
 		self.assertEqual(self.run.call_count, 3)
 
 	def test_build_runs_again_after_a_failed_build(self):
+		self.run.side_effect = None
 		self.run.return_value = completed(1, "error")
 		with self.assertRaises(AppBundleError):
 			build_app(run=self.run)
-		self.run.return_value = completed()
+		self.run.side_effect = build_outputs
 		self.run.reset_mock()
 		build_app(run=self.run)
 		self.assertEqual(self.run.call_count, 3)

@@ -117,7 +117,7 @@ def build_app(run=None):
 	run = run or subprocess.run
 	path = app_path()
 	expected = source_hash()
-	if installed_source_hash() == expected:
+	if installed_source_hash() == expected and os.path.exists(executable_path()) and os.path.exists(camera_executable_path()):
 		return path
 	remove_app()
 	os.makedirs(os.path.dirname(executable_path()))
@@ -130,7 +130,7 @@ def build_app(run=None):
 		with open(source_hash_path(), "w") as hash_file:
 			hash_file.write(expected + "\n")
 		_check(run([CODESIGN_PATH, "--sign", AD_HOC_IDENTITY, "--force", "--deep", path], capture_output=True, text=True), "codesign")
-	except AppBundleError:
+	except BaseException:
 		remove_app()
 		raise
 	return path
