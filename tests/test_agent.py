@@ -647,6 +647,12 @@ class FakeCameraProcess:
 	def poll(self):
 		return self.returncode
 
+	def terminate(self):
+		pass
+
+	def kill(self):
+		pass
+
 
 class CameraSupervisorTests(unittest.TestCase):
 	def setUp(self):
@@ -710,6 +716,13 @@ class CameraSupervisorTests(unittest.TestCase):
 		with mock.patch("wn.agent.CAMERA_STOP_SECONDS", 0.2):
 			supervisor.stop()
 		self.assertEqual(supervisor.process.returncode, -signal.SIGKILL)
+
+	def test_stop_does_not_fail_when_wn_camera_exits_before_the_signal(self):
+		supervisor = CameraSupervisor(["/app/wn-camera"], self.log)
+		supervisor.process = FakeCameraProcess(returncode=None)
+		with mock.patch("wn.agent.os.kill", side_effect=ProcessLookupError(3, "No such process")):
+			supervisor.stop()
+		self.assertTrue(supervisor.stopping.is_set())
 
 
 class AgentCameraTests(unittest.TestCase):

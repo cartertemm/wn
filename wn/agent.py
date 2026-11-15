@@ -298,16 +298,16 @@ class CameraSupervisor:
 		self.thread.start()
 
 	def stop(self):
-		"""Send SIGTERM to wn-camera, and SIGKILL by PID if it has not exited 3 s later."""
+		"""Send SIGTERM to wn-camera, and SIGKILL if it has not exited 3 s later."""
 		with self.lock:
 			self.stopping.set()
 			process = self.process
-		if process is not None and process.poll() is None:
-			os.kill(process.pid, signal.SIGTERM)
+		if process is not None:
+			process.terminate()
 			try:
 				process.wait(timeout=CAMERA_STOP_SECONDS)
 			except subprocess.TimeoutExpired:
-				os.kill(process.pid, signal.SIGKILL)
+				process.kill()
 				process.wait()
 		if self.thread is not None:
 			self.thread.join()
