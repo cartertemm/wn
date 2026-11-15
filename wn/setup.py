@@ -25,6 +25,7 @@ from wn.utm_config import (
 	BUNDLE_SUFFIX,
 	DATA_DIRECTORY_NAME,
 	DEFAULT_OPTIONS,
+	camera_socket_file,
 	check_qmp_socket_files,
 	default_battery_file,
 	detach_drives,
@@ -401,7 +402,8 @@ class Installer:
 	def start_agent(self):
 		"""Install and start the launch agent that writes the Mac's battery to the battery file and runs wn-camera."""
 		path = self.install_agent()
-		agent_file = battery_file_path(load_config())
+		config = load_config()
+		agent_file = battery_file_path(config)
 		lines = ["Installed the wn agent and started it: {}".format(path)]
 		if self.options.battery:
 			lines.append("It writes the Mac's battery status to {} for the battery in Windows.".format(agent_file))
@@ -415,6 +417,8 @@ class Installer:
 			self.output.write(line + "\n")
 		if self.options.battery and agent_file != self.battery_file:
 			self.output.write("Warning: the VM reads {}, but the agent writes {}. Set vm_name or battery_file in {}\n".format(self.battery_file, agent_file, config_path()))
+		if self.options.camera and config.vm_name != self.options.name:
+			self.output.write("Warning: the VM listens on {}, but the agent connects to {}. Set vm_name in {}\n".format(camera_socket_file(self.options.name), camera_socket_file(config.vm_name), config_path()))
 
 	def print_summary(self, address):
 		self.report("Done")

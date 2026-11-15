@@ -261,6 +261,16 @@ class RunTests(InstallerTestCase):
 		self.installer().run()
 		self.assertIn("Warning: the VM reads", self.output.getvalue())
 
+	def test_warns_when_the_agent_uses_another_camera_socket(self):
+		path = os.path.join(self.directory.name, ".config", "wn", "config.json")
+		os.makedirs(os.path.dirname(path))
+		with open(path, "w") as config_file:
+			json.dump({"vm_name": "Other"}, config_file)
+		self.installer(battery=False).run()
+		output = self.output.getvalue()
+		self.assertIn("Warning: the VM listens on {}, but the agent connects to {}".format(
+			os.path.join(self.group_container, "wn-Windows-camera.sock"), os.path.join(self.group_container, "wn-Other-camera.sock")), output)
+
 	def test_no_battery(self):
 		self.installer(battery=False, camera=False).run()
 		arguments = self.bundle_config()["QEMU"]["AdditionalArguments"]
