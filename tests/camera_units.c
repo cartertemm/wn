@@ -553,9 +553,14 @@ static void test_payload_fits_small_request(void)
 	uvc_stream_load(&stream, 614400);
 	EXPECT(uvc_pack_payload(&stream, 1000, payload) == 998);
 	EXPECT(uvc_pack_payload(&stream, 512, payload) == 510);
-	EXPECT(uvc_pack_payload(&stream, 5, payload) == 0);
-	EXPECT(stream.frame_offset == 996 + 508);
 	frame_id = payload[1] & UVC_HEADER_FRAME_ID;
+	memset(payload, 0xAA, sizeof payload);
+	EXPECT(uvc_pack_payload(&stream, 5, payload) == 2);
+	EXPECT(payload[0] == 2 && payload[1] == (0x80 | frame_id));
+	EXPECT(uvc_pack_payload(&stream, 2, payload) == 2);
+	EXPECT(uvc_pack_payload(&stream, 1, payload) == 0);
+	EXPECT(uvc_pack_payload(&stream, 0, payload) == 0);
+	EXPECT(stream.frame_offset == 996 + 508);
 	uvc_stream_drop_frame(&stream);
 	EXPECT(!uvc_stream_has_frame(&stream));
 	EXPECT(stream.frame_id == frame_id);

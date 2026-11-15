@@ -458,7 +458,7 @@ size_t uvc_pack_payload(struct uvc_stream *stream, uint32_t request_length, uint
 	size_t left = stream->frame_size - stream->frame_offset;
 	size_t data;
 
-	if (room < UVC_PAYLOAD_HEADER_SIZE + UVC_MACROPIXEL_SIZE)
+	if (room < UVC_PAYLOAD_HEADER_SIZE)
 		return 0;
 	data = (room - UVC_PAYLOAD_HEADER_SIZE) / UVC_MACROPIXEL_SIZE * UVC_MACROPIXEL_SIZE;
 	if (data > left)
