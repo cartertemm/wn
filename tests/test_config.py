@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from wn.config import Config, ConfigError, config_path, load_config
+from wn.config import Config, ConfigError, config_path, load_config, update_config_file
 
 
 class ConfigTests(unittest.TestCase):
@@ -138,6 +138,33 @@ class ConfigTests(unittest.TestCase):
 	def test_battery_file_is_loaded(self):
 		self.write_config(json.dumps({"battery_file": "~/wn-battery.bin"}))
 		self.assertEqual(load_config().battery_file, os.path.expanduser("~/wn-battery.bin"))
+
+	def test_camera_is_off_unless_the_config_turns_it_on(self):
+		self.assertFalse(load_config().camera)
+		self.write_config(json.dumps({"camera": True}))
+		self.assertTrue(load_config().camera)
+
+	def test_camera_type(self):
+		self.write_config(json.dumps({"camera": "yes"}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn("camera", str(context.exception))
+
+	def test_update_creates_the_file(self):
+		update_config_file({"camera": True})
+		with open(config_path()) as config_file:
+			self.assertEqual(json.load(config_file), {"camera": True})
+
+	def test_update_keeps_other_settings(self):
+		self.write_config(json.dumps({"vm_name": "Win11", "camera": True}))
+		update_config_file({"camera": False})
+		with open(config_path()) as config_file:
+			self.assertEqual(json.load(config_file), {"vm_name": "Win11", "camera": False})
+
+	def test_update_refuses_a_file_that_is_not_an_object(self):
+		self.write_config("[]")
+		with self.assertRaises(ConfigError):
+			update_config_file({"camera": True})
 
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")

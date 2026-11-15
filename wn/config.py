@@ -29,6 +29,7 @@ class Config:
 	screen_size: Optional[str] = None
 	battery_sync: bool = True
 	battery_file: Optional[str] = None
+	camera: bool = False
 
 
 FIELD_TYPES = {
@@ -43,6 +44,7 @@ FIELD_TYPES = {
 	"screen_size": (str, type(None)),
 	"battery_sync": (bool,),
 	"battery_file": (str, type(None)),
+	"camera": (bool,),
 }
 OBSOLETE_FIELDS = ("qmp_port", "qmp_session_port")
 PATH_FIELDS = ("utmctl_path", "qmp_socket", "keygrab_binary", "keygrab_keycodes", "battery_file")
@@ -86,3 +88,16 @@ def load_config(path=None):
 		if values.get(field):
 			values[field] = os.path.expanduser(values[field])
 	return Config(**values)
+
+
+def update_config_file(values, path=None):
+	"""Write ``values`` into the config file and keep every other setting. Create the file when it is missing."""
+	path = path or config_path()
+	current = _read_json(path) if os.path.exists(path) else {}
+	if not isinstance(current, dict):
+		raise ConfigError("{} must contain a JSON object".format(path))
+	current.update(values)
+	os.makedirs(os.path.dirname(path), exist_ok=True)
+	with open(path, "w") as config_file:
+		json.dump(current, config_file, indent="\t")
+		config_file.write("\n")
