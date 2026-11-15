@@ -316,6 +316,29 @@ class RunTests(InstallerTestCase):
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
 			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows"})
 
+	def test_other_vm_keeps_the_agent_settings(self):
+		path = os.path.join(self.directory.name, ".config", "wn", "config.json")
+		os.makedirs(os.path.dirname(path))
+		with open(path, "w") as config_file:
+			json.dump({"vm_name": "Other", "battery_sync": True}, config_file)
+		self.installer(battery=False).run()
+		with open(path) as config_file:
+			self.assertEqual(json.load(config_file), {"vm_name": "Other", "battery_sync": True})
+		self.assertIn("Warning: the agent serves VM 'Other', so wn setup left camera and battery_sync in {} as they were".format(path), self.output.getvalue())
+
+	def test_no_battery_and_no_camera_with_the_agent_installed_says_how_to_remove_it(self):
+		agent_path = os.path.join(self.directory.name, "Library", "LaunchAgents", "com.wn.agent.plist")
+		os.makedirs(os.path.dirname(agent_path))
+		open(agent_path, "w").close()
+		self.installer(battery=False, camera=False).run()
+		self.assertIn("If you no longer want the wn agent, run python3 -m wn agent --uninstall", self.output.getvalue())
+		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
+			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows"})
+
+	def test_no_battery_and_no_camera_without_the_agent_says_nothing_about_it(self):
+		self.installer(battery=False, camera=False).run()
+		self.assertNotIn("--uninstall", self.output.getvalue())
+
 	def test_falls_back_to_plain_ramfb_when_desktop_stays_blank(self):
 		self.desktop_drawn.return_value = False
 		self.installer().run()

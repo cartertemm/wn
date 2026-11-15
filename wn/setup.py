@@ -10,7 +10,7 @@ import tempfile
 import time
 from typing import Optional, Tuple
 
-from wn.agent import LOG_PATH, REPOSITORY_DIRECTORY, install_launch_agent
+from wn.agent import LOG_PATH, REPOSITORY_DIRECTORY, install_launch_agent, launch_agent_path
 from wn.backends.utm import DEFAULT_VM_NAME, UTMBackend, UTMCtlError
 from wn.battery_file import battery_file_path, prepare_battery_file
 from wn.config import config_path, load_config, update_config_file
@@ -168,9 +168,7 @@ class Installer:
 			self.finish_bundle(display=None)
 		address = self.wait_for_ip()
 		self.write_config_if_absent()
-		if self.options.battery or self.options.camera:
-			update_config_file({"camera": self.options.camera, "battery_sync": self.options.battery})
-			self.start_agent()
+		self.update_agent()
 		self.print_summary(address)
 		return address
 
@@ -398,6 +396,18 @@ class Installer:
 			json.dump(values, config_file, indent="\t")
 			config_file.write("\n")
 		self.report("Wrote {}".format(path))
+
+	def update_agent(self):
+		vm_name = load_config().vm_name
+		if not self.options.battery and not self.options.camera:
+			if vm_name == self.options.name and os.path.exists(launch_agent_path()):
+				self.output.write("If you no longer want the wn agent, run python3 -m wn agent --uninstall\n")
+			return
+		if vm_name == self.options.name:
+			update_config_file({"camera": self.options.camera, "battery_sync": self.options.battery})
+		else:
+			self.output.write("Warning: the agent serves VM '{}', so wn setup left camera and battery_sync in {} as they were\n".format(vm_name, config_path()))
+		self.start_agent()
 
 	def start_agent(self):
 		"""Install and start the launch agent that writes the Mac's battery to the battery file and runs wn-camera."""
