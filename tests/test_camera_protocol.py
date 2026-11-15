@@ -17,6 +17,7 @@ from fake_usbredir_guest import (
 	EP_INFO,
 	HELLO,
 	INTERFACE_INFO,
+	RESET,
 	SET_CONFIGURATION,
 	STATUS_CANCELLED,
 	STATUS_STALL,
@@ -50,6 +51,13 @@ CONNECT_TIMEOUT_SECONDS = 10
 IDLE_SECONDS = 3
 CAPTURE_RETRY_SECONDS = 2
 EXIT_TIMEOUT_SECONDS = 5
+HELLO_TIMEOUT_SECONDS = 5
+RECONNECT_SECONDS = 2
+EXIT_USAGE = 64
+SET_FEATURE = 0x03
+CLEAR_FEATURE = 0x01
+ENDPOINT_HALT = 0x0000
+STREAMING_ENDPOINT = 0x0081
 GET_DESCRIPTOR = 0x06
 SET_CUR = 0x01
 GET_CUR = 0x81
@@ -259,6 +267,48 @@ class CameraProtocolTests(unittest.TestCase):
 		time.sleep(0.5)
 		lines = self.drain_log()
 		self.assertFalse([line for line in lines if "camera off" in line or "camera on" in line], lines)
+
+	def test_held_requests_are_cancelled_by_set_configuration(self):
+		self.configure()
+		self.guest.bulk_request(800, REQUEST_LENGTH)
+		self.guest.bulk_request(801, REQUEST_LENGTH)
+		self.guest.send(SET_CONFIGURATION, 78, bytes([1]))
+		self.assertEqual([self.guest.read_bulk() for _ in range(2)], [(800, STATUS_CANCELLED, b""), (801, STATUS_CANCELLED, b"")])
+		self.assertEqual([self.guest.read_packet()[0] for _ in range(3)], [EP_INFO, INTERFACE_INFO, CONFIGURATION_STATUS])
+
+	def test_held_requests_are_cancelled_by_reset(self):
+		self.configure()
+		self.guest.bulk_request(810, REQUEST_LENGTH)
+		self.guest.bulk_request(811, REQUEST_LENGTH)
+		self.guest.send(RESET)
+		self.assertEqual([self.guest.read_bulk() for _ in range(2)], [(810, STATUS_CANCELLED, b""), (811, STATUS_CANCELLED, b"")])
+
+	def test_bulk_stalls_while_the_endpoint_is_halted(self):
+		self.configure()
+		self.commit(2)
+		self.assertEqual(self.guest.control(0x02, SET_FEATURE, ENDPOINT_HALT, STREAMING_ENDPOINT, 0), (STATUS_SUCCESS, b""))
+		self.guest.bulk_request(820, REQUEST_LENGTH)
+		self.assertEqual(self.guest.read_bulk(), (820, STATUS_STALL, b""))
+		self.assertEqual(self.guest.control(0x02, CLEAR_FEATURE, ENDPOINT_HALT, STREAMING_ENDPOINT, 0), (STATUS_SUCCESS, b""))
+		self.guest.bulk_request(821, REQUEST_LENGTH)
+		self.assertEqual(self.guest.read_bulk()[:2], (821, STATUS_SUCCESS))
+
+	def test_connects_again_when_qemu_sends_no_hello(self):
+		self.assertEqual(self.guest.read_packet()[0], HELLO)
+		started = time.monotonic()
+		with self.assertRaises(EOFError):
+			self.guest.read_packet()
+		self.assertGreaterEqual(time.monotonic() - started, HELLO_TIMEOUT_SECONDS - 0.5)
+		self.wait_for_log("no hello from QEMU", EXIT_TIMEOUT_SECONDS)
+		self.guest.accept(CONNECT_TIMEOUT_SECONDS)
+		self.assertGreaterEqual(time.monotonic() - started, HELLO_TIMEOUT_SECONDS + RECONNECT_SECONDS - 0.5)
+		self.assertEqual(self.guest.read_packet()[0], HELLO)
+
+	def test_bad_arguments_exit_64(self):
+		for arguments in ([], ["--socket"], ["--socket", "x", "--bogus"]):
+			result = subprocess.run([self.binary] + arguments, capture_output=True, text=True, timeout=EXIT_TIMEOUT_SECONDS)
+			self.assertEqual(result.returncode, EXIT_USAGE, arguments)
+			self.assertIn("usage:", result.stderr)
 
 	def test_sigterm_unplugs_and_exits_0(self):
 		self.plug()
