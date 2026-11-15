@@ -36,6 +36,7 @@ static AVCaptureSession *session;
 static AVCaptureDevice *device;
 static AVCaptureVideoDataOutput *output;
 static NSArray *observers;
+static bool observing_suspended;
 static NSString *last_failure;
 
 static uint32_t pack_size(size_t width, size_t height)
@@ -116,7 +117,9 @@ static void tear_down(void)
 	[session stopRunning];
 	for (id observer in observers)
 		[[NSNotificationCenter defaultCenter] removeObserver:observer];
-	[device removeObserver:delegate forKeyPath:@"suspended"];
+	if (observing_suspended)
+		[device removeObserver:delegate forKeyPath:@"suspended"];
+	observing_suspended = false;
 	observers = nil;
 	output = nil;
 	device = nil;
@@ -181,11 +184,19 @@ static bool build_session(void)
 	output = [[AVCaptureVideoDataOutput alloc] init];
 	output.alwaysDiscardsLateVideoFrames = YES;
 	[output setSampleBufferDelegate:delegate queue:frame_queue];
+	if (![session canAddInput:input] || ![session canAddOutput:output]) {
+		log_failure(@"cannot use the camera in a capture session");
+		output = nil;
+		device = nil;
+		session = nil;
+		return false;
+	}
 	[session beginConfiguration];
 	[session addInput:input];
 	[session addOutput:output];
 	[session commitConfiguration];
 	[device addObserver:delegate forKeyPath:@"suspended" options:0 context:NULL];
+	observing_suspended = true;
 	observers = @[
 		observe(AVCaptureDeviceWasDisconnectedNotification, device, @"the camera was disconnected"),
 		observe(AVCaptureSessionRuntimeErrorNotification, session, @"camera error"),
@@ -211,9 +222,12 @@ static void run_session(uint32_t size)
 		camera_log("cannot set 30 fps: %s", error.localizedDescription.UTF8String);
 		return;
 	}
-	device.activeVideoMinFrameDuration = CMTimeMake(1, FRAMES_PER_SECOND);
-	device.activeVideoMaxFrameDuration = CMTimeMake(1, FRAMES_PER_SECOND);
-	[device unlockForConfiguration];
+	@try {
+		device.activeVideoMinFrameDuration = CMTimeMake(1, FRAMES_PER_SECOND);
+		device.activeVideoMaxFrameDuration = CMTimeMake(1, FRAMES_PER_SECOND);
+	} @finally {
+		[device unlockForConfiguration];
+	}
 }
 
 static void start_camera(uint32_t size)
