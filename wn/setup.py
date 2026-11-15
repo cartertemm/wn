@@ -37,6 +37,7 @@ UTM_APP_PATH = "/Applications/UTM.app"
 UTM_PROCESS_NAME = "UTM"
 SETUP_DISPLAY = "virtio-ramfb"
 FINAL_DISPLAY = "virtio-gpu-pci"
+FALLBACK_DISPLAY = "ramfb"
 WINDOWS_ISO_IMAGE = "windows11-arm64.iso"
 PAYLOAD_IMAGE = "wnsetup.iso"
 DISK_IMAGE = DEFAULT_OPTIONS["disk_image"]
@@ -337,9 +338,9 @@ class Installer:
 		if self.desktop_drawn():
 			self.report("The desktop draws on {}".format(FINAL_DISPLAY))
 			return
-		self.report("The screen stayed blank on {}. Going back to {}".format(FINAL_DISPLAY, SETUP_DISPLAY))
+		self.report("The screen stayed blank on {}. Switching to {}, which has one display at a fixed resolution".format(FINAL_DISPLAY, FALLBACK_DISPLAY))
 		self.stop_and_wait()
-		set_display_hardware(self.bundle, SETUP_DISPLAY)
+		set_display_hardware(self.bundle, FALLBACK_DISPLAY)
 		self.restart_utm_and_wait()
 		self.backend.start()
 

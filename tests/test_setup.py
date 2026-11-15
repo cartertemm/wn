@@ -18,7 +18,6 @@ from wn.setup import (
 	FINAL_DISPLAY,
 	INSTALL_TIMEOUT_SECONDS,
 	PAYLOAD_IMAGE,
-	SETUP_DISPLAY,
 	WINDOWS_ISO_IMAGE,
 	Installer,
 	SetupError,
@@ -266,12 +265,12 @@ class RunTests(InstallerTestCase):
 		self.assertFalse(self.payload_calls[0][4])
 		self.assertEqual(self.agent_installs, [])
 
-	def test_reverts_display_when_desktop_stays_blank(self):
+	def test_falls_back_to_plain_ramfb_when_desktop_stays_blank(self):
 		self.desktop_drawn.return_value = False
 		self.installer().run()
-		self.assertEqual([display["Hardware"] for display in self.bundle_config()["Display"]], [SETUP_DISPLAY])
+		self.assertEqual([display["Hardware"] for display in self.bundle_config()["Display"]], ["ramfb"])
 		self.assertEqual(self.backend.calls.count("start"), 3)
-		self.assertIn("Going back", self.output.getvalue())
+		self.assertIn("Switching to ramfb", self.output.getvalue())
 
 	def test_headless_keeps_no_display(self):
 		self.installer(headless=True).run()
