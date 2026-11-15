@@ -218,7 +218,7 @@ class LaunchAgentTests(unittest.TestCase):
 	def test_install_builds_the_app_before_loading_it(self):
 		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
 		commands = [call.args[0][0] for call in self.run.call_args_list]
-		self.assertEqual(commands, ["/usr/bin/clang", "/usr/bin/codesign", "/bin/launchctl"])
+		self.assertEqual(commands, ["/usr/bin/clang", "/usr/bin/clang", "/usr/bin/codesign", "/bin/launchctl"])
 		self.assertTrue(os.path.isfile(os.path.join(app_path(), "Contents", "Info.plist")))
 
 	def test_install_reports_a_build_failure_without_loading(self):
@@ -239,7 +239,7 @@ class LaunchAgentTests(unittest.TestCase):
 		self.assertEqual(commands, ["bootstrap", "bootout", "bootstrap"])
 
 	def test_install_reports_launchctl_failure(self):
-		self.run.side_effect = [completed(), completed(), subprocess.CompletedProcess([], 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")]
+		self.run.side_effect = [completed(), completed(), completed(), subprocess.CompletedProcess([], 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")]
 		with self.assertRaises(AgentError) as caught:
 			install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
 		self.assertIn("Input/output error", str(caught.exception))

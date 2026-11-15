@@ -1,5 +1,6 @@
 import os
 import plistlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -13,8 +14,10 @@ from wn.appbundle import (
 	app_path,
 	build_app,
 	camera_build_command,
+	camera_executable_path,
 	executable_path,
 	remove_app,
+	source_hash,
 )
 
 CAMERA_SOURCES = [os.path.join(CAMERA_DIRECTORY, name) for name in ("main.m", "capture.m", "uvc.c", "usbredir.c")]
@@ -37,6 +40,7 @@ class AppBundleTests(unittest.TestCase):
 	def test_paths(self):
 		self.assertEqual(app_path(), self.app)
 		self.assertEqual(executable_path(), os.path.join(self.app, "Contents", "MacOS", "wn-agent"))
+		self.assertEqual(camera_executable_path(), os.path.join(self.app, "Contents", "MacOS", "wn-camera"))
 
 	def test_stub_source_ships_with_the_package(self):
 		self.assertTrue(os.path.isfile(STUB_SOURCE))
@@ -60,11 +64,13 @@ class AppBundleTests(unittest.TestCase):
 		self.assertTrue(info["LSUIElement"])
 		self.assertTrue(info["LSBackgroundOnly"])
 		self.assertIn("battery", info["NSAppDataUsageDescription"])
+		self.assertEqual(info["NSCameraUsageDescription"], "wn-agent shows the Mac's camera to the Windows VM as a USB webcam.")
 
-	def test_build_compiles_the_stub_then_signs_the_bundle(self):
+	def test_build_compiles_the_stub_and_the_camera_then_signs_the_bundle(self):
 		build_app(run=self.run)
 		self.assertEqual(self.run.call_args_list, [
 			mock.call(["/usr/bin/clang", "-O2", "-o", executable_path(), STUB_SOURCE], capture_output=True, text=True),
+			mock.call(camera_build_command(camera_executable_path()), capture_output=True, text=True),
 			mock.call(["/usr/bin/codesign", "--sign", "-", "--force", "--deep", self.app], capture_output=True, text=True),
 		])
 
@@ -76,10 +82,11 @@ class AppBundleTests(unittest.TestCase):
 		self.assertEqual(self.run.call_count, 1)
 
 	def test_build_reports_a_signing_failure(self):
-		self.run.side_effect = [completed(), completed(1, "resource fork not allowed")]
+		self.run.side_effect = [completed(), completed(), completed(1, "resource fork not allowed")]
 		with self.assertRaises(AppBundleError) as caught:
 			build_app(run=self.run)
 		self.assertIn("codesign", str(caught.exception))
+		self.assertFalse(os.path.exists(self.app))
 
 	def test_build_replaces_an_old_bundle(self):
 		stale = os.path.join(self.app, "Contents", "Resources", "old")
@@ -87,6 +94,39 @@ class AppBundleTests(unittest.TestCase):
 		open(stale, "w").close()
 		build_app(run=self.run)
 		self.assertFalse(os.path.exists(stale))
+
+	def test_build_stores_the_source_hash(self):
+		build_app(run=self.run)
+		with open(os.path.join(self.app, "Contents", "Resources", "wn-source.sha256")) as hash_file:
+			self.assertEqual(hash_file.read(), source_hash() + "\n")
+
+	def test_build_skips_a_bundle_built_from_the_same_sources(self):
+		build_app(run=self.run)
+		self.run.reset_mock()
+		self.assertEqual(build_app(run=self.run), self.app)
+		self.run.assert_not_called()
+
+	def test_build_runs_again_when_a_camera_source_changes(self):
+		sources = tempfile.TemporaryDirectory()
+		self.addCleanup(sources.cleanup)
+		copy = os.path.join(sources.name, "camera")
+		shutil.copytree(CAMERA_DIRECTORY, copy)
+		with mock.patch("wn.appbundle.CAMERA_DIRECTORY", copy):
+			build_app(run=self.run)
+			with open(os.path.join(copy, "uvc.h"), "a") as header:
+				header.write("\n")
+			self.run.reset_mock()
+			build_app(run=self.run)
+		self.assertEqual(self.run.call_count, 3)
+
+	def test_build_runs_again_after_a_failed_build(self):
+		self.run.return_value = completed(1, "error")
+		with self.assertRaises(AppBundleError):
+			build_app(run=self.run)
+		self.run.return_value = completed()
+		self.run.reset_mock()
+		build_app(run=self.run)
+		self.assertEqual(self.run.call_count, 3)
 
 	def test_remove(self):
 		build_app(run=self.run)
