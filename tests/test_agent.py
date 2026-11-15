@@ -211,6 +211,7 @@ class LaunchAgentTests(unittest.TestCase):
 		self.assertEqual(plist["WorkingDirectory"], "/repo dir")
 		self.assertTrue(plist["RunAtLoad"])
 		self.assertTrue(plist["KeepAlive"])
+		self.assertEqual(plist["ProcessType"], "Standard")
 		self.assertEqual(plist["StandardErrorPath"], os.path.join(self.home.name, "Library", "Logs", "wn-agent.log"))
 		self.assertEqual(self.run.call_args_list[-1], mock.call(["/bin/launchctl", "bootstrap", "gui/501", self.path], capture_output=True, text=True))
 
