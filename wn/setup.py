@@ -14,7 +14,7 @@ from wn.agent import LOG_PATH, REPOSITORY_DIRECTORY, install_launch_agent
 from wn.backends.utm import DEFAULT_VM_NAME, UTMBackend, UTMCtlError
 from wn.battery_file import battery_file_path, prepare_battery_file
 from wn.config import config_path, load_config
-from wn.downloads import fetch_all
+from wn.downloads import BYTES_PER_GB, fetch_all
 from wn.errors import WnError
 from wn.payload import BATTERY_DRIVER, build_payload_iso
 from wn.qcow2 import create_empty_qcow2
@@ -45,6 +45,9 @@ SOFTWARE_NVDA = "nvda"
 SOFTWARE_CHOICES = ((SOFTWARE_NVDA, "NVDA screen reader"),)
 STOPPED_STATE = "stopped"
 DEFAULT_DISK_GIB = 64
+# Measured peak near 40 GB: an 8.1 GB download cache, the 8.5 GB ISO copy, and the disk image during install.
+DOWNLOAD_SPACE_BYTES = 9 * BYTES_PER_GB
+BUNDLE_SPACE_BYTES = 41 * BYTES_PER_GB
 
 UTM_QUIT_TIMEOUT_SECONDS = 30
 UTM_REGISTER_TIMEOUT_SECONDS = 60
@@ -83,6 +86,26 @@ class SetupOptions:
 	mac_address: Optional[str] = None
 	battery: bool = True
 	battery_file: Optional[str] = None
+
+
+def nearest_existing_directory(path):
+	path = os.path.abspath(os.path.expanduser(path))
+	while not os.path.exists(path):
+		path = os.path.dirname(path)
+	return path
+
+
+def directory_file_bytes(path):
+	if not os.path.isdir(path):
+		return 0
+	with os.scandir(path) as entries:
+		return sum(entry.stat().st_size for entry in entries if entry.is_file())
+
+
+def clone_file(source, destination, run=subprocess.run):
+	"""Copy with an APFS clone, which takes no space until either file changes. Fall back to a plain copy."""
+	if run(["cp", "-c", source, destination], capture_output=True).returncode != 0:
+		shutil.copyfile(source, destination)
 
 
 def install_agent():
@@ -156,11 +179,27 @@ class Installer:
 		if os.path.exists(self.bundle):
 			raise SetupError("{} already exists. Remove it first or pick another name".format(self.bundle))
 		self.check_no_running_vms("Stop them first")
+		self.check_free_space()
 
 	def check_no_running_vms(self, advice):
 		running = [name for _, state, name in self.backend.machines() if state != STOPPED_STATE]
 		if running:
 			raise SetupError("wn setup restarts UTM, which would stop these VMs: {}. {}".format(", ".join(running), advice))
+
+	def check_free_space(self):
+		downloads = nearest_existing_directory(self.options.downloads_dir)
+		bundles = nearest_existing_directory(self.options.bundle_dir)
+		cached = directory_file_bytes(os.path.abspath(os.path.expanduser(self.options.downloads_dir)))
+		needed = {downloads: max(0, DOWNLOAD_SPACE_BYTES - cached)}
+		if os.stat(downloads).st_dev == os.stat(bundles).st_dev:
+			needed[downloads] += BUNDLE_SPACE_BYTES
+		else:
+			needed[bundles] = BUNDLE_SPACE_BYTES
+		for path, needed_bytes in needed.items():
+			free = shutil.disk_usage(path).free
+			if free < needed_bytes:
+				raise SetupError("wn setup needs {:.1f} GB free on the volume that holds {}, and it has {:.1f} GB. Free some space first".format(
+					needed_bytes / BYTES_PER_GB, path, free / BYTES_PER_GB))
 
 	def create_bundle(self, downloads):
 		self.report("Creating the VM bundle {}".format(self.bundle))
@@ -184,7 +223,7 @@ class Installer:
 				prepare_battery_file(self.battery_file)
 			data = os.path.join(self.bundle, DATA_DIRECTORY_NAME)
 			create_empty_qcow2(os.path.join(data, DISK_IMAGE), options.disk_gib)
-			shutil.copyfile(downloads.windows_iso, os.path.join(data, WINDOWS_ISO_IMAGE))
+			clone_file(downloads.windows_iso, os.path.join(data, WINDOWS_ISO_IMAGE))
 			self.report("Building the setup disc (answer file, drivers, guest tools{})".format(", NVDA" if downloads.nvda_installer else ""))
 			self.build_payload(os.path.join(data, PAYLOAD_IMAGE), self.unattend_options(), downloads.virtio_iso, downloads.guest_tools_iso, downloads.nvda_installer, battery=options.battery)
 		except BaseException as error:

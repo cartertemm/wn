@@ -22,6 +22,7 @@ from wn.setup import (
 	Installer,
 	SetupError,
 	SetupOptions,
+	clone_file,
 	restart_utm,
 )
 from wn.unattend import SETUP_DONE_MARKER
@@ -154,6 +155,10 @@ class InstallerTestCase(unittest.TestCase):
 		screen_patch = mock.patch("wn.setup.Installer.desktop_drawn", return_value=True)
 		self.desktop_drawn = screen_patch.start()
 		self.addCleanup(screen_patch.stop)
+		self.free_bytes = 10 ** 15
+		usage_patch = mock.patch("wn.setup.shutil.disk_usage", side_effect=lambda path: mock.Mock(free=self.free_bytes))
+		self.disk_usage = usage_patch.start()
+		self.addCleanup(usage_patch.stop)
 
 	def fetch(self, downloads_dir, include_nvda=True, report=None):
 		self.fetch_calls.append((downloads_dir, include_nvda))
@@ -359,6 +364,25 @@ class FailureTests(InstallerTestCase):
 		self.assertIn("Linux", str(context.exception))
 		self.assertEqual(len(self.restarts), 1)
 
+	def test_not_enough_free_space(self):
+		self.free_bytes = 10 * 1000 ** 3
+		with self.assertRaises(SetupError) as context:
+			self.installer().run()
+		self.assertIn("GB free", str(context.exception))
+		self.assertEqual(self.fetch_calls, [])
+
+	def test_cached_downloads_count_as_free_space(self):
+		downloads_dir = os.path.join(self.directory.name, "downloads")
+		os.makedirs(downloads_dir)
+		with open(os.path.join(downloads_dir, "win.iso"), "wb") as cached:
+			cached.write(b"x" * 60)
+		with mock.patch("wn.setup.DOWNLOAD_SPACE_BYTES", 100), mock.patch("wn.setup.BUNDLE_SPACE_BYTES", 1000):
+			self.free_bytes = 1040
+			self.installer(downloads_dir=downloads_dir).check_free_space()
+			self.free_bytes = 1039
+			with self.assertRaises(SetupError):
+				self.installer(downloads_dir=downloads_dir).check_free_space()
+
 	def test_existing_bundle(self):
 		os.makedirs(os.path.join(self.bundle_dir, "Windows.utm"))
 		with self.assertRaises(SetupError):
@@ -389,6 +413,36 @@ class FailureTests(InstallerTestCase):
 		with self.assertRaises(SetupError):
 			installer.run()
 		self.assertFalse(os.path.exists(os.path.join(self.bundle_dir, "Windows.utm")))
+
+
+class CloneFileTests(unittest.TestCase):
+	def setUp(self):
+		self.directory = short_temporary_directory()
+		self.addCleanup(self.directory.cleanup)
+		self.source = os.path.join(self.directory.name, "source.iso")
+		self.destination = os.path.join(self.directory.name, "copy.iso")
+		with open(self.source, "wb") as source:
+			source.write(b"windows")
+
+	def test_clones_with_cp(self):
+		commands = []
+
+		def run(command, **kwargs):
+			commands.append(command)
+			return mock.Mock(returncode=0)
+		clone_file(self.source, self.destination, run=run)
+		self.assertEqual(commands, [["cp", "-c", self.source, self.destination]])
+		self.assertFalse(os.path.exists(self.destination))
+
+	def test_copies_when_cp_fails(self):
+		clone_file(self.source, self.destination, run=lambda command, **kwargs: mock.Mock(returncode=1))
+		with open(self.destination, "rb") as copy:
+			self.assertEqual(copy.read(), b"windows")
+
+	def test_real_clone(self):
+		clone_file(self.source, self.destination)
+		with open(self.destination, "rb") as copy:
+			self.assertEqual(copy.read(), b"windows")
 
 
 class RestartUTMTests(unittest.TestCase):
