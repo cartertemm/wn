@@ -682,6 +682,29 @@ class UpdateVMArgsTests(CLITestCase):
 		with open(os.path.join(self.home.name, ".config", "wn", "config.json")) as config_file:
 			self.assertFalse(json.load(config_file)["camera"])
 
+	def test_no_camera_with_battery_sync_on_says_to_install_the_agent_again(self):
+		_, stdout, _ = self.run_cli("update-vm-args", "--bundle", self.bundle, "--no-camera")
+		self.assertIn("python3 -m wn agent --install", stdout)
+		self.assertNotIn("--uninstall", stdout)
+
+	def test_no_camera_with_battery_sync_off_says_to_uninstall_the_agent(self):
+		write_config(self.home.name, {"battery_sync": False, "camera": True})
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--no-camera")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn("python3 -m wn agent --uninstall", stdout)
+		self.assertNotIn("--install", stdout)
+
+	def test_camera_for_another_vm_warns_about_the_socket(self):
+		write_config(self.home.name, {"vm_name": "Other"})
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--camera")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn("Warning: the VM listens on {}, but the agent connects to {}. Set vm_name in".format(
+			os.path.join(self.group_container, "wn-Windows-camera.sock"), os.path.join(self.group_container, "wn-Other-camera.sock")), stdout)
+
+	def test_camera_for_the_configured_vm_has_no_warning(self):
+		_, stdout, _ = self.run_cli("update-vm-args", "--bundle", self.bundle, "--camera")
+		self.assertNotIn("Warning", stdout)
+
 	def test_camera_flags_are_exclusive(self):
 		with self.assertRaises(SystemExit):
 			self.run_cli("update-vm-args", "--camera", "--no-camera")

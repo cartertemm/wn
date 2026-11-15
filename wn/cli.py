@@ -33,8 +33,10 @@ from wn.utm_config import (
 	BUNDLE_SUFFIX,
 	DEFAULT_BUNDLE_DIRECTORY,
 	DEFAULT_OPTIONS,
+	_bundle_vm_name,
 	argument_units,
 	battery_file_for_bundle,
+	camera_socket_file,
 	update_additional_arguments,
 )
 
@@ -405,8 +407,16 @@ def run_update_vm_args(context):
 		context.print("Battery file: {}".format(battery_file))
 	if arguments.camera or arguments.no_camera:
 		update_config_file({"camera": arguments.camera})
-		context.print("Set camera to {} in {}. Run python3 -m wn agent --install so the agent {} wn-camera".format(
-			"true" if arguments.camera else "false", config_path(), "starts" if arguments.camera else "stops"))
+		if arguments.camera:
+			context.print("Set camera to true in {}. Run python3 -m wn agent --install so the agent starts wn-camera".format(config_path()))
+			bundle_vm_name = _bundle_vm_name(bundle)
+			if bundle_vm_name != config.vm_name:
+				context.print("Warning: the VM listens on {}, but the agent connects to {}. Set vm_name in {}".format(
+					camera_socket_file(bundle_vm_name), camera_socket_file(config.vm_name), config_path()))
+		elif config.battery_sync:
+			context.print("Set camera to false in {}. Run python3 -m wn agent --install so the agent stops wn-camera".format(config_path()))
+		else:
+			context.print("Set camera to false in {}. battery_sync is also false, so the agent has nothing to do. Run python3 -m wn agent --uninstall to remove it".format(config_path()))
 	if before == after:
 		context.print("AdditionalArguments in {} did not change".format(os.path.join(bundle, "config.plist")))
 		return
