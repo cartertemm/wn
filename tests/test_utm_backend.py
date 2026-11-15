@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,12 +13,15 @@ from wn.backends.utm import (
 	UTMBackend,
 	UTMCtlError,
 	UTMCtlMissingError,
+	UTMCtlTimeoutError,
 )
 from wn.config import Config
 
 FAKE_UTMCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_utmctl.py")
 VM_UUID = "9E1A6F38-2D0B-4C41-8F7E-3B5A1C2D0001"
 OTHER_UUID = "9E1A6F38-2D0B-4C41-8F7E-3B5A1C2D0002"
+HANGING_UTMCTL_SECONDS = 10
+TEST_TIMEOUT_SECONDS = 0.5
 
 
 class FakeUTMCtlTestCase(unittest.TestCase):
@@ -132,6 +136,17 @@ class UTMBackendErrorTests(FakeUTMCtlTestCase):
 		with self.assertRaises(UTMCtlMissingError) as context:
 			backend.status()
 		self.assertIn("/no/such/utmctl", str(context.exception))
+
+	def test_utmctl_timeout(self):
+		backend = self.backend(utmctl_path=[sys.executable, "-c", "import time; time.sleep({})".format(HANGING_UTMCTL_SECONDS)])
+		with mock.patch("wn.backends.utm.UTMCTL_TIMEOUT_SECONDS", TEST_TIMEOUT_SECONDS):
+			with mock.patch("wn.backends.utm.subprocess.run", wraps=subprocess.run) as run:
+				with self.assertRaises(UTMCtlTimeoutError) as context:
+					backend.status()
+		self.assertEqual(run.call_count, 1)
+		self.assertEqual(run.call_args.kwargs["timeout"], TEST_TIMEOUT_SECONDS)
+		self.assertIn("dialog", str(context.exception))
+		self.assertIn("Automation", str(context.exception))
 
 	def test_unknown_vm_on_status(self):
 		with self.assertRaises(UnknownVMError) as context:

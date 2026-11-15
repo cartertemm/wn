@@ -11,6 +11,7 @@ DEFAULT_UTMCTL_PATH = "/Applications/UTM.app/Contents/MacOS/utmctl"
 LIST_HEADER_PREFIX = "UUID"
 LIST_COLUMN_COUNT = 3
 VM_NOT_FOUND_MESSAGE = "Error: Virtual machine not found."
+UTMCTL_TIMEOUT_SECONDS = 30
 UTM_STATES = {
 	"stopped": "stopped",
 	"starting": "starting",
@@ -28,6 +29,10 @@ class UTMCtlError(BackendError):
 
 class UTMCtlMissingError(UTMCtlError):
 	"""Raised when the utmctl executable cannot be run."""
+
+
+class UTMCtlTimeoutError(UTMCtlError):
+	"""Raised when utmctl does not finish in time, which happens when UTM waits on a dialog."""
 
 
 class UnknownVMError(UTMCtlError):
@@ -128,7 +133,7 @@ class UTMBackend(Backend):
 		"""Run a utmctl command about the VM. On failure, report an unknown VM name before the raw error."""
 		try:
 			return self._run(*arguments)
-		except UTMCtlMissingError:
+		except (UTMCtlMissingError, UTMCtlTimeoutError):
 			raise
 		except UTMCtlError as error:
 			try:
@@ -142,7 +147,9 @@ class UTMBackend(Backend):
 	def _run(self, *arguments):
 		command = self.utmctl_command + list(arguments)
 		try:
-			result = subprocess.run(command, capture_output=True, text=True)
+			result = subprocess.run(command, capture_output=True, text=True, timeout=UTMCTL_TIMEOUT_SECONDS)
+		except subprocess.TimeoutExpired:
+			raise UTMCtlTimeoutError("utmctl {} did not finish within {} s. UTM may be showing a dialog or waiting for an Automation permission prompt. Check UTM and System Settings > Privacy & Security > Automation, then try again".format(arguments[0], UTMCTL_TIMEOUT_SECONDS)) from None
 		except OSError as error:
 			raise UTMCtlMissingError("cannot run utmctl at {}: {}. Install UTM or set utmctl_path".format(self.utmctl_command[0], error)) from None
 		if result.returncode != 0:
