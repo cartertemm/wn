@@ -38,6 +38,7 @@ static AVCaptureVideoDataOutput *output;
 static NSArray *observers;
 static bool observing_suspended;
 static NSString *last_failure;
+static bool frame_rate_logged;
 
 static uint32_t pack_size(size_t width, size_t height)
 {
@@ -209,6 +210,17 @@ static bool build_session(void)
 	return true;
 }
 
+static bool supports_frame_rate(AVCaptureDeviceFormat *format)
+{
+	CMTime duration = CMTimeMake(1, FRAMES_PER_SECOND);
+
+	for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
+		if (CMTimeCompare(range.minFrameDuration, duration) <= 0 && CMTimeCompare(range.maxFrameDuration, duration) >= 0)
+			return true;
+	}
+	return false;
+}
+
 static void run_session(uint32_t size)
 {
 	NSError *error = nil;
@@ -222,6 +234,12 @@ static void run_session(uint32_t size)
 	[session commitConfiguration];
 	if (!session.running)
 		[session startRunning];
+	if (!supports_frame_rate(device.activeFormat)) {
+		if (!frame_rate_logged)
+			camera_log("the camera does not support %d fps, using its default frame rate", FRAMES_PER_SECOND);
+		frame_rate_logged = true;
+		return;
+	}
 	if (![device lockForConfiguration:&error]) {
 		camera_log("cannot set 30 fps: %s", error.localizedDescription.UTF8String);
 		return;
