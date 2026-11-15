@@ -50,6 +50,7 @@ SOCKET_TIMEOUT_SECONDS = 10
 CONNECT_TIMEOUT_SECONDS = 10
 IDLE_SECONDS = 3
 CAPTURE_RETRY_SECONDS = 2
+PATTERN_REFUSALS = 2
 EXIT_TIMEOUT_SECONDS = 5
 HELLO_TIMEOUT_SECONDS = 5
 RECONNECT_SECONDS = 2
@@ -263,7 +264,10 @@ class CameraProtocolTests(unittest.TestCase):
 		self.wait_for_log("camera stopped", EXIT_TIMEOUT_SECONDS)
 		held = time.monotonic()
 		self.check_frame(self.read_frame(next_id), 2)
-		self.assertLess(time.monotonic() - held, CAPTURE_RETRY_SECONDS + 1.5)
+		recovered = time.monotonic() - held
+		self.assertGreater(recovered, IDLE_SECONDS + 0.5)
+		self.assertLess(recovered, PATTERN_REFUSALS * CAPTURE_RETRY_SECONDS + 1.5)
+		self.wait_for_log("camera recovered", EXIT_TIMEOUT_SECONDS)
 		time.sleep(0.5)
 		lines = self.drain_log()
 		self.assertFalse([line for line in lines if "camera off" in line or "camera on" in line], lines)

@@ -13,6 +13,7 @@
 #define BYTES_PER_PIXEL 2
 #define PATTERN_FIRST_LEVEL 16
 #define PATTERN_LEVELS 200
+#define PATTERN_REFUSALS 2
 
 @interface WNCaptureDelegate : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @end
@@ -28,7 +29,7 @@ static dispatch_queue_t control_queue;
 static dispatch_queue_t frame_queue;
 static dispatch_source_t pattern_timer;
 static dispatch_source_t pattern_stop_signal;
-static bool pattern_refuses_start;
+static int pattern_refusals_left;
 static uint64_t pattern_count;
 static VTPixelTransferSessionRef transfer;
 static WNCaptureDelegate *delegate;
@@ -320,8 +321,8 @@ static void stop_pattern(void)
 
 static void start_pattern_if_allowed(void)
 {
-	if (pattern_refuses_start) {
-		pattern_refuses_start = false;
+	if (pattern_refusals_left) {
+		pattern_refusals_left--;
 		atomic_store(&running, false);
 		return;
 	}
@@ -334,7 +335,7 @@ static void fail_pattern(void)
 		return;
 	camera_log("camera stopped: the test pattern was told to stop");
 	stop_pattern();
-	pattern_refuses_start = true;
+	pattern_refusals_left = PATTERN_REFUSALS;
 	atomic_store(&running, false);
 	clear_frame();
 }
