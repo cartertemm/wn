@@ -59,6 +59,10 @@ static void store_frame(CVPixelBufferRef buffer)
 	CVPixelBufferRef previous;
 
 	os_unfair_lock_lock(&slot_lock);
+	if (!atomic_load(&running)) {
+		os_unfair_lock_unlock(&slot_lock);
+		return;
+	}
 	previous = slot_buffer;
 	slot_buffer = CVPixelBufferRetain(buffer);
 	slot_sequence++;
@@ -254,8 +258,11 @@ static void start_camera(uint32_t size)
 
 static void emit_pattern_frame(void)
 {
-	CVPixelBufferRef buffer = create_frame_buffer(atomic_load(&target_size));
+	CVPixelBufferRef buffer;
 
+	if (!atomic_load(&running))
+		return;
+	buffer = create_frame_buffer(atomic_load(&target_size));
 	if (!buffer)
 		return;
 	CVPixelBufferLockBaseAddress(buffer, 0);
