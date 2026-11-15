@@ -421,3 +421,122 @@ void uvc_handle_control(struct uvc_device *device, uint8_t requesttype, uint8_t 
 	else
 		reply->stall = true;
 }
+
+uint8_t *uvc_stream_reserve(struct uvc_stream *stream, size_t frame_size)
+{
+	if (frame_size > stream->frame_capacity) {
+		free(stream->frame);
+		stream->frame = malloc(frame_size);
+		if (!stream->frame)
+			abort();
+		stream->frame_capacity = frame_size;
+	}
+	return stream->frame;
+}
+
+void uvc_stream_load(struct uvc_stream *stream, size_t frame_size)
+{
+	stream->frame_size = frame_size;
+	stream->frame_offset = 0;
+	stream->frame_id ^= UVC_HEADER_FRAME_ID;
+}
+
+bool uvc_stream_has_frame(const struct uvc_stream *stream)
+{
+	return stream->frame_offset < stream->frame_size;
+}
+
+void uvc_stream_drop_frame(struct uvc_stream *stream)
+{
+	stream->frame_size = 0;
+	stream->frame_offset = 0;
+}
+
+size_t uvc_pack_payload(struct uvc_stream *stream, uint32_t request_length, uint8_t *out)
+{
+	size_t room = request_length < UVC_PAYLOAD_MAX ? request_length : UVC_PAYLOAD_MAX;
+	size_t left = stream->frame_size - stream->frame_offset;
+	size_t data;
+
+	if (room < UVC_PAYLOAD_HEADER_SIZE + UVC_MACROPIXEL_SIZE)
+		return 0;
+	data = (room - UVC_PAYLOAD_HEADER_SIZE) / UVC_MACROPIXEL_SIZE * UVC_MACROPIXEL_SIZE;
+	if (data > left)
+		data = left;
+	memcpy(out + UVC_PAYLOAD_HEADER_SIZE, stream->frame + stream->frame_offset, data);
+	stream->frame_offset += data;
+	out[0] = UVC_PAYLOAD_HEADER_SIZE;
+	out[1] = UVC_HEADER_END_OF_HEADER | stream->frame_id;
+	if (stream->frame_offset == stream->frame_size) {
+		out[1] |= UVC_HEADER_END_OF_FRAME;
+		uvc_stream_drop_frame(stream);
+	}
+	return UVC_PAYLOAD_HEADER_SIZE + data;
+}
+
+void uvc_stream_free(struct uvc_stream *stream)
+{
+	free(stream->frame);
+	memset(stream, 0, sizeof *stream);
+}
+
+void uvc_queue_push(struct uvc_request_queue *queue, uint64_t id, uint32_t length)
+{
+	if (queue->count == queue->capacity) {
+		size_t capacity = queue->capacity ? queue->capacity * 2 : UVC_QUEUE_INITIAL_CAPACITY;
+		struct uvc_request *items = malloc(capacity * sizeof *items);
+		if (!items)
+			abort();
+		for (size_t position = 0; position < queue->count; position++)
+			items[position] = queue->items[(queue->head + position) % queue->capacity];
+		free(queue->items);
+		queue->items = items;
+		queue->head = 0;
+		queue->capacity = capacity;
+	}
+	queue->items[(queue->head + queue->count) % queue->capacity] = (struct uvc_request){id, length};
+	queue->count++;
+}
+
+bool uvc_queue_peek(const struct uvc_request_queue *queue, struct uvc_request *request)
+{
+	if (queue->count == 0)
+		return false;
+	*request = queue->items[queue->head];
+	return true;
+}
+
+bool uvc_queue_pop(struct uvc_request_queue *queue, struct uvc_request *request)
+{
+	if (queue->count == 0)
+		return false;
+	if (request)
+		*request = queue->items[queue->head];
+	queue->head = (queue->head + 1) % queue->capacity;
+	queue->count--;
+	return true;
+}
+
+bool uvc_queue_remove(struct uvc_request_queue *queue, uint64_t id)
+{
+	for (size_t position = 0; position < queue->count; position++) {
+		if (queue->items[(queue->head + position) % queue->capacity].id != id)
+			continue;
+		for (size_t later = position; later + 1 < queue->count; later++)
+			queue->items[(queue->head + later) % queue->capacity] = queue->items[(queue->head + later + 1) % queue->capacity];
+		queue->count--;
+		return true;
+	}
+	return false;
+}
+
+void uvc_queue_clear(struct uvc_request_queue *queue)
+{
+	free(queue->items);
+	memset(queue, 0, sizeof *queue);
+}
+
+bool uvc_idle_expired(double last_arrival, double now)
+{
+	return now - last_arrival >= UVC_IDLE_SECONDS;
+}

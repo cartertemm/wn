@@ -466,6 +466,104 @@ static void test_reset(void)
 	EXPECT(device.configuration == 0 && !device.halted && !device.has_commit && device.commit.frame_index == 1 && device.probe.frame_index == 1);
 }
 
+static size_t pack_frame(struct uvc_stream *stream, size_t frame_size, size_t *sizes, uint8_t *headers, size_t *data_bytes)
+{
+	uint8_t payload[UVC_PAYLOAD_MAX];
+	size_t count = 0;
+	uint8_t *frame = uvc_stream_reserve(stream, frame_size);
+
+	memset(frame, 0x5A, frame_size);
+	uvc_stream_load(stream, frame_size);
+	*data_bytes = 0;
+	while (uvc_stream_has_frame(stream)) {
+		sizes[count] = uvc_pack_payload(stream, 65536, payload);
+		headers[count] = payload[1];
+		*data_bytes += sizes[count] - 2;
+		EXPECT(payload[0] == 2 && payload[2] == 0x5A && payload[sizes[count] - 1] == 0x5A);
+		count++;
+	}
+	return count;
+}
+
+static void test_payloads_for_640x480(void)
+{
+	struct uvc_stream stream = {0};
+	size_t sizes[64];
+	uint8_t headers[64];
+	size_t data_bytes;
+	size_t count = pack_frame(&stream, uvc_frame_bytes(2), sizes, headers, &data_bytes);
+
+	EXPECT(count == 10 && data_bytes == 614400);
+	for (size_t index = 0; index < 9; index++)
+		EXPECT(sizes[index] == 65534 && headers[index] == (0x80 | (headers[0] & 1)));
+	EXPECT(sizes[9] == 24614 && headers[9] == (0x82 | (headers[0] & 1)));
+	count = pack_frame(&stream, uvc_frame_bytes(2), sizes, headers + 10, &data_bytes);
+	EXPECT(count == 10 && (headers[10] & 1) != (headers[0] & 1));
+	uvc_stream_free(&stream);
+}
+
+static void test_payloads_for_1280x720(void)
+{
+	struct uvc_stream stream = {0};
+	size_t sizes[64];
+	uint8_t headers[64];
+	size_t data_bytes;
+	size_t count = pack_frame(&stream, uvc_frame_bytes(1), sizes, headers, &data_bytes);
+
+	EXPECT(count == 29 && data_bytes == 1843200);
+	EXPECT(sizes[0] == 65534 && sizes[27] == 65534 && sizes[28] == 8306);
+	EXPECT((headers[27] & 0x02) == 0 && (headers[28] & 0x02) == 0x02);
+	uvc_stream_free(&stream);
+}
+
+static void test_payload_fits_small_request(void)
+{
+	struct uvc_stream stream = {0};
+	uint8_t payload[1024];
+	uint8_t *frame = uvc_stream_reserve(&stream, 614400);
+
+	memset(frame, 1, 614400);
+	uvc_stream_load(&stream, 614400);
+	EXPECT(uvc_pack_payload(&stream, 1000, payload) == 998);
+	EXPECT(uvc_pack_payload(&stream, 512, payload) == 510);
+	EXPECT(uvc_pack_payload(&stream, 5, payload) == 0);
+	EXPECT(stream.frame_offset == 996 + 508);
+	uvc_stream_drop_frame(&stream);
+	EXPECT(!uvc_stream_has_frame(&stream));
+	uvc_stream_free(&stream);
+}
+
+static void test_queue_keeps_order(void)
+{
+	struct uvc_request_queue queue = {0};
+	struct uvc_request item;
+
+	uvc_queue_push(&queue, 1, 65536);
+	uvc_queue_push(&queue, 2, 65536);
+	uvc_queue_push(&queue, 3, 512);
+	EXPECT(uvc_queue_remove(&queue, 2));
+	EXPECT(!uvc_queue_remove(&queue, 2));
+	EXPECT(uvc_queue_peek(&queue, &item) && item.id == 1);
+	EXPECT(uvc_queue_pop(&queue, &item) && item.id == 1 && item.length == 65536);
+	EXPECT(uvc_queue_pop(&queue, &item) && item.id == 3 && item.length == 512);
+	EXPECT(!uvc_queue_pop(&queue, &item));
+	for (uint64_t id = 0; id < 200; id++) {
+		uvc_queue_push(&queue, id, 1);
+		if (id % 3 == 0)
+			uvc_queue_pop(&queue, NULL);
+	}
+	EXPECT(uvc_queue_peek(&queue, &item) && item.id == 67);
+	EXPECT(queue.count == 133);
+	uvc_queue_clear(&queue);
+	EXPECT(!uvc_queue_peek(&queue, &item));
+}
+
+static void test_idle_timer(void)
+{
+	EXPECT(!uvc_idle_expired(10.0, 12.9));
+	EXPECT(uvc_idle_expired(10.0, 13.0));
+}
+
 int main(void)
 {
 	test_hello();
@@ -490,6 +588,11 @@ int main(void)
 	test_commit();
 	test_unsupported_class_requests();
 	test_reset();
+	test_payloads_for_640x480();
+	test_payloads_for_1280x720();
+	test_payload_fits_small_request();
+	test_queue_keeps_order();
+	test_idle_timer();
 	if (failures) {
 		fprintf(stderr, "%d failed\n", failures);
 		return 1;
