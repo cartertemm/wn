@@ -9,15 +9,17 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from xml.sax.saxutils import escape
 
-from wn.appbundle import build_app, executable_path, remove_app
+from wn.appbundle import build_app, camera_executable_path, executable_path, remove_app
 from wn.backend import create_backend
 from wn.battery_file import BatteryFile, battery_file_path, battery_writer
 from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, POLL_SECONDS, WRITE_INTERVAL_SECONDS, battery_reading, run_sync_loop, sync_message
 from wn.errors import WnError
 from wn.qmp import qmp_client_for
+from wn.utm_config import camera_socket_file
 
 PMSET_COMMAND = ["/usr/bin/pmset", "-g", "batt"]
 LAUNCHCTL_PATH = "/bin/launchctl"
@@ -40,6 +42,14 @@ POWER_SOURCES_NOTIFICATION = b"com.apple.system.powersources"
 NOTIFY_STATUS_OK = 0
 NOTIFY_READ_BYTES = 4096
 NOTIFIED_POLL_SECONDS = WRITE_INTERVAL_SECONDS
+CAMERA_PID_FILE = os.path.join("~", "Library", "Application Support", "wn", "camera.pid")
+CAMERA_RESTART_SECONDS = 5
+CAMERA_STOP_SECONDS = 3
+CAMERA_LOG_PREFIX = "camera: "
+CAMERA_ACCESS_PREFIX = "wn-camera: access: "
+CAMERA_ACCESS_ALLOWED = "allowed"
+LOG_TAIL_BYTES = 64 * 1024
+IDLE_WAIT_SECONDS = 3600
 
 
 class AgentError(WnError):
@@ -120,10 +130,20 @@ def launchd_state(run, uid):
 	return True, int(match.group(1)) if match else None
 
 
-def foreground_pid():
-	"""Return the PID from the pid file, or None if there is no file or that process has exited."""
+def camera_pid_file_path():
+	return os.path.expanduser(CAMERA_PID_FILE)
+
+
+def _write_pid_file(path, pid):
+	os.makedirs(os.path.dirname(path), exist_ok=True)
+	with open(path, "w") as pid_file:
+		pid_file.write("{}\n".format(pid))
+
+
+def _live_pid(path):
+	"""Return the PID in ``path``, or None if there is no file or that process has exited."""
 	try:
-		with open(pid_file_path()) as pid_file:
+		with open(path) as pid_file:
 			pid = int(pid_file.read().strip())
 	except (OSError, ValueError):
 		return None
@@ -134,6 +154,14 @@ def foreground_pid():
 	except PermissionError:
 		pass
 	return pid
+
+
+def foreground_pid():
+	return _live_pid(pid_file_path())
+
+
+def camera_pid():
+	return _live_pid(camera_pid_file_path())
 
 
 def render_launch_agent(python, working_directory):
@@ -217,28 +245,104 @@ def _stop_on_sigterm(signum, frame):
 	raise KeyboardInterrupt
 
 
-def serve(config, output, wait=None):
-	"""Run the sync loop until Ctrl+C or SIGTERM, with the PID in the pid file while it runs."""
-	if not config.battery_sync:
-		raise AgentError("battery_sync is off in the config, so the agent has nothing to do")
+def camera_command(config):
+	return [camera_executable_path(), "--socket", camera_socket_file(config.vm_name)]
+
+
+class CameraSupervisor:
+	"""Runs wn-camera as a child, starts it again 5 s after it exits, and stops it with the agent.
+
+	wn-camera inherits the agent's stdout and stderr, so its lines land in the agent log.
+	"""
+
+	def __init__(self, command, log, popen=subprocess.Popen, wait=None):
+		self.command = command
+		self.log = log
+		self.popen = popen
+		self.stopping = threading.Event()
+		self.wait = wait or self.stopping.wait
+		self.lock = threading.Lock()
+		self.process = None
+		self.thread = None
+
+	def _write(self, message):
+		self.log.write(CAMERA_LOG_PREFIX + message + "\n")
+		self.log.flush()
+
+	def _spawn(self):
+		with self.lock:
+			if self.stopping.is_set():
+				return None
+			try:
+				self.process = self.popen(self.command)
+			except OSError as error:
+				self._write("cannot start {}: {}".format(self.command[0], error))
+				return None
+			_write_pid_file(camera_pid_file_path(), self.process.pid)
+			return self.process
+
+	def run(self):
+		while not self.stopping.is_set():
+			process = self._spawn()
+			if process is not None:
+				code = process.wait()
+				if os.path.exists(camera_pid_file_path()):
+					os.remove(camera_pid_file_path())
+				if self.stopping.is_set():
+					return
+				self._write("wn-camera exited with code {}. Starting it again in {} s".format(code, CAMERA_RESTART_SECONDS))
+			self.wait(CAMERA_RESTART_SECONDS)
+
+	def start(self):
+		self.thread = threading.Thread(target=self.run, daemon=True)
+		self.thread.start()
+
+	def stop(self):
+		"""Send SIGTERM to wn-camera, and SIGKILL by PID if it has not exited 3 s later."""
+		with self.lock:
+			self.stopping.set()
+			process = self.process
+		if process is not None and process.poll() is None:
+			os.kill(process.pid, signal.SIGTERM)
+			try:
+				process.wait(timeout=CAMERA_STOP_SECONDS)
+			except subprocess.TimeoutExpired:
+				os.kill(process.pid, signal.SIGKILL)
+				process.wait()
+		if self.thread is not None:
+			self.thread.join()
+
+
+def serve(config, output, wait=None, popen=subprocess.Popen):
+	"""Run the battery sync loop and the camera helper until Ctrl+C or SIGTERM, with the PID in the pid file while it runs."""
+	if not config.battery_sync and not config.camera:
+		raise AgentError("battery_sync and camera are off in the config, so the agent has nothing to do")
 	running = foreground_pid()
 	if running is not None:
 		raise AgentError("the agent is already running with PID {}. Run wn agent stop first".format(running))
 	path = pid_file_path()
-	os.makedirs(os.path.dirname(path), exist_ok=True)
-	with open(path, "w") as pid_file:
-		pid_file.write("{}\n".format(os.getpid()))
+	_write_pid_file(path, os.getpid())
 	previous_handler = signal.signal(signal.SIGTERM, _stop_on_sigterm)
+	camera = CameraSupervisor(camera_command(config), output, popen) if config.camera else None
 	try:
 		output.write("Running the agent in the foreground with PID {}. Press Ctrl+C to stop\n".format(os.getpid()))
 		output.flush()
-		poll_seconds = POLL_SECONDS
-		if wait is None:
-			wait, poll_seconds = power_change_waiter(output)
-		run_sync_loop(battery_writer(config), battery_status, output, wait, poll_seconds)
+		if camera is not None:
+			camera.start()
+		if config.battery_sync:
+			poll_seconds = POLL_SECONDS
+			if wait is None:
+				wait, poll_seconds = power_change_waiter(output)
+			run_sync_loop(battery_writer(config), battery_status, output, wait, poll_seconds)
+		else:
+			wait = wait or time.sleep
+			while not wait(IDLE_WAIT_SECONDS):
+				pass
 	except KeyboardInterrupt:
 		pass
 	finally:
+		if camera is not None:
+			camera.stop()
 		signal.signal(signal.SIGTERM, previous_handler)
 		os.remove(path)
 
@@ -304,6 +408,30 @@ def _battery_file_line(path):
 	return "Battery file: {} (updated {})".format(path, updated.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
 
+def last_camera_access(log_path):
+	"""Return the text of the last camera access line wn-camera wrote to the log, or None."""
+	try:
+		with open(log_path, "rb") as log_file:
+			log_file.seek(0, os.SEEK_END)
+			log_file.seek(max(0, log_file.tell() - LOG_TAIL_BYTES))
+			text = log_file.read().decode("utf-8", "replace")
+	except OSError:
+		return None
+	states = [line[len(CAMERA_ACCESS_PREFIX):] for line in text.splitlines() if line.startswith(CAMERA_ACCESS_PREFIX)]
+	return states[-1] if states else None
+
+
+def _camera_lines(config):
+	if not config.camera:
+		return ["Camera: off in the config"]
+	pid = camera_pid()
+	lines = ["Camera: running, PID {}".format(pid) if pid is not None else "Camera: stopped"]
+	access = last_camera_access(os.path.expanduser(LOG_PATH))
+	if access is not None and access != CAMERA_ACCESS_ALLOWED:
+		lines.append("Camera access: {}".format(access))
+	return lines
+
+
 def agent_status(config, output, run=None, uid=None):
 	"""Print whether the agent is installed and running, and what it talks to. Return 0 when it runs, else 1."""
 	run = run or subprocess.run
@@ -318,7 +446,7 @@ def agent_status(config, output, run=None, uid=None):
 		"Running: yes, PID {}".format(pid) if pid is not None else "Running: no",
 		_qmp_line(qmp_address(config)),
 		_battery_file_line(battery_file_path(config)),
-	]
+	] + _camera_lines(config)
 	output.write("".join(line + "\n" for line in lines))
 	return EXIT_RUNNING if pid is not None else EXIT_NOT_RUNNING
 

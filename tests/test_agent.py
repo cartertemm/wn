@@ -18,7 +18,9 @@ from wn import agent
 from wn.agent import (
 	LAUNCHD_LABEL,
 	AgentError,
+	CameraSupervisor,
 	battery_status,
+	camera_pid_file_path,
 	install_launch_agent,
 	launch_agent_path,
 	parse_pmset,
@@ -27,7 +29,7 @@ from wn.agent import (
 	run_agent_command,
 	uninstall_launch_agent,
 )
-from wn.appbundle import AppBundleError, app_path, executable_path
+from wn.appbundle import AppBundleError, app_path, camera_executable_path, executable_path
 from wn.battery_file import BatteryFile
 from wn.battery_sync import BLOCK_SIZE, decode_block
 from wn.cli import main
@@ -632,6 +634,160 @@ class AgentLoopTests(unittest.TestCase):
 		output = self.run_agent(Config(battery_file=os.path.join(self.home.name, "missing", "wn-battery.bin")), wait)
 		self.assertIn("battery sync: cannot write the battery file", output)
 		self.assertEqual(len(waits), 2)
+
+
+class FakeCameraProcess:
+	def __init__(self, pid=4343, returncode=1):
+		self.pid = pid
+		self.returncode = returncode
+
+	def wait(self, timeout=None):
+		return self.returncode
+
+	def poll(self):
+		return self.returncode
+
+
+class CameraSupervisorTests(unittest.TestCase):
+	def setUp(self):
+		self.home = tempfile.TemporaryDirectory()
+		self.addCleanup(self.home.cleanup)
+		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		self.log = io.StringIO()
+
+	def test_restarts_wn_camera_5_s_after_it_exits(self):
+		spawned = []
+		waits = []
+
+		def popen(command):
+			spawned.append(command)
+			return FakeCameraProcess()
+
+		supervisor = CameraSupervisor(["/app/wn-camera", "--socket", "/s.sock"], self.log, popen)
+
+		def wait(seconds):
+			waits.append(seconds)
+			if len(waits) == 2:
+				supervisor.stopping.set()
+
+		supervisor.wait = wait
+		supervisor.run()
+		self.assertEqual(spawned, [["/app/wn-camera", "--socket", "/s.sock"]] * 2)
+		self.assertEqual(waits, [5, 5])
+		self.assertIn("camera: wn-camera exited with code 1. Starting it again in 5 s", self.log.getvalue())
+		self.assertFalse(os.path.exists(camera_pid_file_path()))
+
+	def test_reports_a_missing_binary_and_tries_again(self):
+		supervisor = CameraSupervisor(["/missing/wn-camera"], self.log, mock.Mock(side_effect=FileNotFoundError(2, "No such file or directory")))
+		supervisor.wait = lambda seconds: supervisor.stopping.set()
+		supervisor.run()
+		self.assertIn("camera: cannot start /missing/wn-camera", self.log.getvalue())
+
+	def test_stop_sends_sigterm_and_waits(self):
+		supervisor = CameraSupervisor(["/bin/sleep", "30"], self.log)
+		supervisor.start()
+		deadline = time.monotonic() + 5
+		while agent.camera_pid() is None and time.monotonic() < deadline:
+			time.sleep(0.01)
+		pid = agent.camera_pid()
+		self.assertIsNotNone(pid)
+		supervisor.stop()
+		self.assertEqual(supervisor.process.returncode, -signal.SIGTERM)
+		self.assertFalse(supervisor.thread.is_alive())
+		self.assertFalse(os.path.exists(camera_pid_file_path()))
+		self.assertNotIn("exited", self.log.getvalue())
+
+	def test_stop_kills_wn_camera_when_sigterm_is_ignored(self):
+		ready = os.path.join(self.home.name, "ready")
+		script = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nopen({!r}, 'w').close()\ntime.sleep(30)\n".format(ready)
+		supervisor = CameraSupervisor([sys.executable, "-c", script], self.log)
+		supervisor.start()
+		deadline = time.monotonic() + 10
+		while not os.path.exists(ready) and time.monotonic() < deadline:
+			time.sleep(0.01)
+		with mock.patch("wn.agent.CAMERA_STOP_SECONDS", 0.2):
+			supervisor.stop()
+		self.assertEqual(supervisor.process.returncode, -signal.SIGKILL)
+
+
+class AgentCameraTests(unittest.TestCase):
+	def setUp(self):
+		self.home = tempfile.TemporaryDirectory()
+		self.addCleanup(self.home.cleanup)
+		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		stub_power_change_waiter(self)
+
+	def run_cli(self, *argv):
+		stdout = io.StringIO()
+		stderr = io.StringIO()
+		exit_code = main(["agent"] + list(argv), stdout=stdout, stderr=stderr)
+		return exit_code, stdout.getvalue(), stderr.getvalue()
+
+	def test_starts_wn_camera_with_the_vm_camera_socket(self):
+		write_config(self.home.name, {"camera": True, "vm_name": "Win11"})
+		with mock.patch("wn.agent.CameraSupervisor") as supervisor_class, mock.patch("wn.agent.run_sync_loop"):
+			exit_code, _, _ = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 0)
+		socket_path = os.path.join(self.home.name, "Library", "Group Containers", "WDNLXAD4W8.com.utmapp.UTM", "wn-Win11-camera.sock")
+		self.assertEqual(supervisor_class.call_args.args[0], [camera_executable_path(), "--socket", socket_path])
+		supervisor_class.return_value.start.assert_called_once_with()
+		supervisor_class.return_value.stop.assert_called_once_with()
+
+	def test_no_wn_camera_when_the_camera_is_off(self):
+		with mock.patch("wn.agent.CameraSupervisor") as supervisor_class, mock.patch("wn.agent.run_sync_loop"):
+			self.run_cli("start", "--foreground")
+		supervisor_class.assert_not_called()
+
+	def test_camera_only_agent_waits_for_sigterm(self):
+		write_config(self.home.name, {"camera": True, "battery_sync": False})
+		with mock.patch("wn.agent.CameraSupervisor") as supervisor_class, mock.patch("wn.agent.run_sync_loop") as loop, mock.patch("wn.agent.time.sleep", side_effect=KeyboardInterrupt) as sleep:
+			exit_code, _, _ = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 0)
+		loop.assert_not_called()
+		sleep.assert_called_once_with(3600)
+		supervisor_class.return_value.stop.assert_called_once_with()
+
+	def test_fails_when_battery_and_camera_are_off(self):
+		write_config(self.home.name, {"camera": False, "battery_sync": False})
+		exit_code, _, stderr = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("battery_sync and camera are off", stderr)
+
+	def write_log(self, text):
+		path = os.path.join(self.home.name, "Library", "Logs", "wn-agent.log")
+		os.makedirs(os.path.dirname(path), exist_ok=True)
+		with open(path, "w") as log_file:
+			log_file.write(text)
+
+	def status(self):
+		write_config(self.home.name, {"camera": True, "qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
+		with mock.patch("wn.agent.subprocess.run", FakeLaunchctl()):
+			return self.run_cli("status")[1]
+
+	def test_status_shows_the_running_camera_helper(self):
+		os.makedirs(os.path.dirname(camera_pid_file_path()), exist_ok=True)
+		with open(camera_pid_file_path(), "w") as pid_file:
+			pid_file.write("{}\n".format(os.getpid()))
+		self.write_log("wn-camera: access: allowed\n")
+		stdout = self.status()
+		self.assertIn("Camera: running, PID {}".format(os.getpid()), stdout)
+		self.assertNotIn("Camera access", stdout)
+
+	def test_status_shows_the_last_access_problem(self):
+		self.write_log("wn-camera: access: not decided yet. Click Allow\nwn-camera: access: denied. Allow wn-agent in System Settings > Privacy & Security > Camera\n")
+		stdout = self.status()
+		self.assertIn("Camera: stopped", stdout)
+		self.assertIn("Camera access: denied. Allow wn-agent in System Settings > Privacy & Security > Camera", stdout)
+
+	def test_status_when_the_camera_is_off_in_the_config(self):
+		write_config(self.home.name, {"qmp_socket": "tcp:127.0.0.1:{}".format(unused_port())})
+		with mock.patch("wn.agent.subprocess.run", FakeLaunchctl()):
+			stdout = self.run_cli("status")[1]
+		self.assertIn("Camera: off in the config", stdout)
 
 
 if __name__ == "__main__":
