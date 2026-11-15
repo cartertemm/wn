@@ -29,10 +29,16 @@ BLOCK_QMP = "qmp"
 BLOCK_RAMFB = "ramfb"
 BLOCK_AUDIO = "audio"
 BLOCK_BATTERY = "battery"
+BLOCK_CAMERA = "camera"
 BLOCK_EXTRA = "extra"
-ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_EXTRA)
+ARGUMENT_BLOCKS = (BLOCK_QMP, BLOCK_RAMFB, BLOCK_AUDIO, BLOCK_BATTERY, BLOCK_CAMERA, BLOCK_EXTRA)
 QMP_SOCKET_NAME = "wn-{}.qmp"
 QMP_SESSION_SOCKET_NAME = "wn-{}-session.qmp"
+CAMERA_SOCKET_NAME = "wn-{}-camera.sock"
+CAMERA_CONTROLLER_ID = "wncam-xhci"
+CAMERA_CHARDEV_ID = "wncam"
+CAMERA_DEVICE_ID = "wncam0"
+CAMERA_IDS = (CAMERA_CONTROLLER_ID, CAMERA_CHARDEV_ID, CAMERA_DEVICE_ID)
 UNIX_SOCKET_PATH_LIMIT = 103
 AUDIODEV_ID = "ca0"
 SPICE_AUDIODEV_ID = "audio0"
@@ -62,6 +68,7 @@ DEFAULT_OPTIONS = {
 	"extra_args": None,
 	"battery": False,
 	"battery_file": None,
+	"camera": True,
 	"tpm": True,
 	"uefi": True,
 	"secure_boot_driver": None,
@@ -85,6 +92,11 @@ def qmp_socket_file(vm_name, session=False):
 	"""Return the VM's QMP socket in the UTM group container. With ``session``, return the one for long-lived clients such as grab."""
 	template = QMP_SESSION_SOCKET_NAME if session else QMP_SOCKET_NAME
 	return os.path.join(os.path.expanduser(UTM_GROUP_CONTAINER), template.format(vm_name))
+
+
+def camera_socket_file(vm_name):
+	"""Return the VM's camera socket in the UTM group container. QEMU listens on it and wn-camera connects."""
+	return os.path.join(os.path.expanduser(UTM_GROUP_CONTAINER), CAMERA_SOCKET_NAME.format(vm_name))
 
 
 def check_qmp_socket_files(vm_name):
@@ -165,6 +177,15 @@ def _battery_arguments(options):
 	]
 
 
+def _camera_arguments(options):
+	"""Give the camera its own USB controller, so it attaches at high speed, and a usb-redir device that QEMU serves on the camera socket."""
+	return [
+		"-device", "qemu-xhci,id={}".format(CAMERA_CONTROLLER_ID),
+		"-chardev", "socket,id={},path={},server=on,wait=off".format(CAMERA_CHARDEV_ID, os.path.basename(camera_socket_file(options["name"]))),
+		"-device", "usb-redir,chardev={},id={},bus={}.0".format(CAMERA_CHARDEV_ID, CAMERA_DEVICE_ID, CAMERA_CONTROLLER_ID),
+	]
+
+
 def _audio_arguments(options):
 	if options["audio_args"]:
 		return shlex.split(options["audio_args"])
@@ -178,6 +199,7 @@ def _argument_blocks(options):
 		BLOCK_RAMFB: list(RAMFB_ARGUMENTS) if options["headless"] else [],
 		BLOCK_AUDIO: _audio_arguments(options),
 		BLOCK_BATTERY: _battery_arguments(options) if options["battery"] else [],
+		BLOCK_CAMERA: _camera_arguments(options) if options["camera"] else [],
 		BLOCK_EXTRA: shlex.split(options["extra_args"]) if options["extra_args"] else [],
 	}
 
@@ -215,6 +237,8 @@ def block_of(unit):
 		return BLOCK_BATTERY
 	if option in ("-object", "-device") and ("id={}".format(BATTERY_MEMDEV_ID) in value.split(",") or "id={}".format(BATTERY_DEVICE_ID) in value.split(",")):
 		return BLOCK_BATTERY
+	if option in ("-device", "-chardev") and any("id={}".format(identifier) in value.split(",") for identifier in CAMERA_IDS):
+		return BLOCK_CAMERA
 	return BLOCK_EXTRA
 
 
@@ -403,7 +427,7 @@ def update_additional_arguments(bundle_path, options, blocks):
 	"""Replace the ``blocks`` (names from ARGUMENT_BLOCKS) in an existing bundle's AdditionalArguments.
 
 	``options`` takes the same argument options as ``build_config``, such as
-	``headless``, ``audio_args``, ``battery``, ``battery_file``, and ``extra_args``. Only the named blocks
+	``headless``, ``audio_args``, ``battery``, ``battery_file``, ``camera``, and ``extra_args``. Only the named blocks
 	are built from them; every other argument stays as it is, and BLOCK_EXTRA means every argument that is in
 	no other block. ``name`` defaults to the bundle name, and names the QMP sockets. With ``battery``, the
 	memory size comes from the bundle, and ``battery_file`` defaults to wn-battery-<name>.bin in the UTM group

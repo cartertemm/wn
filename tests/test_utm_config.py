@@ -14,6 +14,7 @@ from wn.utm_config import (
 	ARGUMENT_BLOCKS,
 	BLOCK_AUDIO,
 	BLOCK_BATTERY,
+	BLOCK_CAMERA,
 	BLOCK_EXTRA,
 	BLOCK_QMP,
 	BLOCK_RAMFB,
@@ -22,6 +23,7 @@ from wn.utm_config import (
 	battery_file_for_bundle,
 	block_of,
 	build_config,
+	camera_socket_file,
 	default_battery_file,
 	config_plist_bytes,
 	detach_drives,
@@ -221,15 +223,15 @@ class ConfigContentTests(unittest.TestCase):
 		config = build_config(options(audio_args="-audiodev coreaudio,id=ca0,timer-period=2500 -device usb-audio,audiodev=ca0"))
 		arguments = arguments_of(config)
 		self.assertEqual(config["Sound"], [])
-		self.assertEqual(arguments[4:], ["-audiodev", "coreaudio,id=ca0,timer-period=2500", "-device", "usb-audio,audiodev=ca0"])
+		self.assertEqual(arguments[4:], ["-audiodev", "coreaudio,id=ca0,timer-period=2500", "-device", "usb-audio,audiodev=ca0"] + CAMERA_ARGUMENTS)
 
 	def test_audio_args_follow_ramfb(self):
 		arguments = arguments_of(build_config(options(headless=True, audio_args="-device intel-hda")))
-		self.assertEqual(arguments[4:], ["-device", "ramfb", "-device", "intel-hda"])
+		self.assertEqual(arguments[4:], ["-device", "ramfb", "-device", "intel-hda"] + CAMERA_ARGUMENTS)
 
 	def test_extra_args_come_last(self):
 		arguments = arguments_of(build_config(options(audio_args="-device intel-hda", extra_args="-device virtio-keyboard-pci,id=vkbd")))
-		self.assertEqual(arguments[4:], ["-device", "intel-hda", "-device", "virtio-keyboard-pci,id=vkbd"])
+		self.assertEqual(arguments[4:], ["-device", "intel-hda"] + CAMERA_ARGUMENTS + ["-device", "virtio-keyboard-pci,id=vkbd"])
 
 	def test_extra_args_with_default_audio(self):
 		arguments = arguments_of(build_config(options(extra_args="-device virtio-keyboard-pci")))
@@ -272,7 +274,7 @@ class BatteryArgumentTests(unittest.TestCase):
 
 	def test_battery_comes_before_extra_args(self):
 		arguments = arguments_of(build_config(options(audio_args="-device intel-hda", battery=True, battery_file=BATTERY_FILE, extra_args="-device virtio-keyboard-pci")))
-		self.assertEqual(arguments[4:], ["-device", "intel-hda"] + battery_arguments(8192, BATTERY_FILE) + ["-device", "virtio-keyboard-pci"])
+		self.assertEqual(arguments[4:], ["-device", "intel-hda"] + battery_arguments(8192, BATTERY_FILE) + CAMERA_ARGUMENTS + ["-device", "virtio-keyboard-pci"])
 
 	def test_machine_properties_are_unchanged(self):
 		config = build_config(options(battery=True, battery_file=BATTERY_FILE))
@@ -557,11 +559,49 @@ class UpdateAdditionalArgumentsTests(unittest.TestCase):
 		_, after = update_additional_arguments(self.bundle, {}, [BLOCK_BATTERY])
 		self.assertEqual(after, CUSTOM_ARGUMENTS)
 
+	def test_adding_the_camera_keeps_every_other_argument(self):
+		self.set_arguments(CUSTOM_ARGUMENTS)
+		_, after = update_additional_arguments(self.bundle, {"camera": True}, [BLOCK_CAMERA])
+		self.assertEqual(after, CUSTOM_ARGUMENTS[:-2] + CAMERA_ARGUMENTS + CUSTOM_ARGUMENTS[-2:])
+
+	def test_removing_the_camera(self):
+		self.set_arguments(CUSTOM_ARGUMENTS[:-2] + CAMERA_ARGUMENTS + CUSTOM_ARGUMENTS[-2:])
+		_, after = update_additional_arguments(self.bundle, {"camera": False}, [BLOCK_CAMERA])
+		self.assertEqual(after, CUSTOM_ARGUMENTS)
+
 	def test_qmp_block_replaces_the_tcp_servers_in_place(self):
 		self.set_arguments(CUSTOM_ARGUMENTS)
 		_, after = update_additional_arguments(self.bundle, {}, [BLOCK_QMP])
 		self.assertEqual(after[:4], QMP_ARGUMENTS)
 		self.assertEqual(after[4:], CUSTOM_ARGUMENTS[4:])
+
+
+CAMERA_ARGUMENTS = [
+	"-device", "qemu-xhci,id=wncam-xhci",
+	"-chardev", "socket,id=wncam,path=wn-Win11-camera.sock,server=on,wait=off",
+	"-device", "usb-redir,chardev=wncam,id=wncam0,bus=wncam-xhci.0",
+]
+
+
+class CameraArgumentTests(unittest.TestCase):
+	def test_camera_is_on_by_default(self):
+		self.assertTrue(contains_sequence(arguments_of(build_config(options())), CAMERA_ARGUMENTS))
+
+	def test_no_camera(self):
+		arguments = arguments_of(build_config(options(camera=False)))
+		self.assertFalse(any("wncam" in argument for argument in arguments))
+
+	def test_camera_socket_is_in_the_utm_group_container(self):
+		with mock.patch.dict(os.environ, {"HOME": "/home/me"}):
+			self.assertEqual(camera_socket_file("Win11"), "/home/me/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-Win11-camera.sock")
+
+	def test_camera_units_are_in_the_camera_block(self):
+		units = argument_units(CAMERA_ARGUMENTS + ["-device", "usb-redir,chardev=other,id=redir5", "-chardev", "socket,id=wncamera"])
+		self.assertEqual([block_of(unit) for unit in units], [BLOCK_CAMERA, BLOCK_CAMERA, BLOCK_CAMERA, BLOCK_EXTRA, BLOCK_EXTRA])
+
+	def test_extra_args_keep_the_camera(self):
+		merged = merge_argument_blocks(QMP_ARGUMENTS + CAMERA_ARGUMENTS + ["-gdb", "x"], {BLOCK_EXTRA: ["-S"]})
+		self.assertEqual(merged, QMP_ARGUMENTS + CAMERA_ARGUMENTS + ["-S"])
 
 
 QMP_ARGUMENTS = [
