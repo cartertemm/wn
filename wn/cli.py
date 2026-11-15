@@ -406,17 +406,7 @@ def run_update_vm_args(context):
 			raise WnError("{}. Create the folder or set battery_file in the config".format(error)) from None
 		context.print("Battery file: {}".format(battery_file))
 	if arguments.camera or arguments.no_camera:
-		update_config_file({"camera": arguments.camera})
-		if arguments.camera:
-			context.print("Set camera to true in {}. Run python3 -m wn agent --install so the agent starts wn-camera".format(config_path()))
-			bundle_vm_name = _bundle_vm_name(bundle)
-			if bundle_vm_name != config.vm_name:
-				context.print("Warning: the VM listens on {}, but the agent connects to {}. Set vm_name in {}".format(
-					camera_socket_file(bundle_vm_name), camera_socket_file(config.vm_name), config_path()))
-		elif config.battery_sync:
-			context.print("Set camera to false in {}. Run python3 -m wn agent --install so the agent stops wn-camera".format(config_path()))
-		else:
-			context.print("Set camera to false in {}. battery_sync is also false, so the agent has nothing to do. Run python3 -m wn agent --uninstall to remove it".format(config_path()))
+		_update_camera_setting(context, bundle)
 	if before == after:
 		context.print("AdditionalArguments in {} did not change".format(os.path.join(bundle, "config.plist")))
 		return
@@ -424,6 +414,25 @@ def run_update_vm_args(context):
 	for line in difflib.unified_diff(_argument_lines(before), _argument_lines(after), "AdditionalArguments before", "AdditionalArguments after", lineterm=""):
 		context.print(line)
 	context.print("Next: quit UTM and open it again so it reads the new arguments, then run wn start")
+
+
+def _update_camera_setting(context, bundle):
+	camera = context.arguments.camera
+	config = context.config
+	bundle_vm_name = _bundle_vm_name(bundle)
+	if bundle_vm_name != config.vm_name and os.path.exists(config_path()):
+		context.print("Warning: the agent serves VM '{}', so update-vm-args left camera in {} as it was".format(config.vm_name, config_path()))
+	else:
+		update_config_file({"camera": camera})
+		if camera:
+			context.print("Set camera to true in {}. Run python3 -m wn agent --install so the agent starts wn-camera".format(config_path()))
+		elif config.battery_sync:
+			context.print("Set camera to false in {}. Run python3 -m wn agent --install so the agent stops wn-camera".format(config_path()))
+		else:
+			context.print("Set camera to false in {}. battery_sync is also false, so the agent has nothing to do. Run python3 -m wn agent --uninstall to remove it".format(config_path()))
+	if camera and bundle_vm_name != config.vm_name:
+		context.print("Warning: the VM listens on {}, but the agent connects to {}. Set vm_name in {}".format(
+			camera_socket_file(bundle_vm_name), camera_socket_file(config.vm_name), config_path()))
 
 
 def _argument_lines(arguments):

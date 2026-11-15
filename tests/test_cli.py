@@ -694,12 +694,41 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertIn("python3 -m wn agent --uninstall", stdout)
 		self.assertNotIn("--install", stdout)
 
-	def test_camera_for_another_vm_warns_about_the_socket(self):
+	def read_config(self):
+		with open(os.path.join(self.home.name, ".config", "wn", "config.json")) as config_file:
+			return json.load(config_file)
+
+	def test_camera_for_another_vm_leaves_the_config_and_warns_about_the_socket(self):
 		write_config(self.home.name, {"vm_name": "Other"})
 		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--camera")
 		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn("usb-redir,chardev=wncam,id=wncam0,bus=wncam-xhci.0", self.read_plist()["QEMU"]["AdditionalArguments"])
+		self.assertEqual(self.read_config(), {"vm_name": "Other"})
+		self.assertIn("Warning: the agent serves VM 'Other', so update-vm-args left camera in {} as it was".format(
+			os.path.join(self.home.name, ".config", "wn", "config.json")), stdout)
 		self.assertIn("Warning: the VM listens on {}, but the agent connects to {}. Set vm_name in".format(
 			os.path.join(self.group_container, "wn-Windows-camera.sock"), os.path.join(self.group_container, "wn-Other-camera.sock")), stdout)
+		self.assertNotIn("Set camera to", stdout)
+
+	def test_no_camera_for_another_vm_leaves_the_config(self):
+		self.assertEqual(self.run_cli("update-vm-args", "--bundle", self.bundle, "--camera")[0], 0)
+		write_config(self.home.name, {"vm_name": "Other", "camera": True})
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--no-camera")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS)
+		self.assertEqual(self.read_config(), {"vm_name": "Other", "camera": True})
+		self.assertIn("Warning: the agent serves VM 'Other', so update-vm-args left camera in", stdout)
+		self.assertNotIn("Set camera to", stdout)
+
+	def test_camera_without_a_config_writes_the_camera_key(self):
+		bundle = os.path.join(self.home.name, "Other.utm")
+		os.makedirs(bundle)
+		with open(os.path.join(bundle, "config.plist"), "wb") as plist_file:
+			plistlib.dump({"Information": {"Name": "Other"}, "QEMU": {"AdditionalArguments": OLD_ARGUMENTS, "UEFIBoot": True}}, plist_file)
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", bundle, "--camera")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertTrue(self.read_config()["camera"])
+		self.assertIn("Set camera to true", stdout)
 
 	def test_camera_for_the_configured_vm_has_no_warning(self):
 		_, stdout, _ = self.run_cli("update-vm-args", "--bundle", self.bundle, "--camera")
