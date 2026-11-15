@@ -10,15 +10,6 @@ class BackendTests(unittest.TestCase):
 		with self.assertRaises(TypeError):
 			Backend()
 
-	def test_share_and_net_are_not_implemented_by_default(self):
-		backend = FakeBackend()
-		with self.assertRaises(NotImplementedError) as context:
-			backend.share("/tmp")
-		self.assertIn("share", str(context.exception))
-		with self.assertRaises(NotImplementedError) as context:
-			backend.net()
-		self.assertIn("net", str(context.exception))
-
 	def test_vm_status_fields(self):
 		status = VMStatus(name="Windows", state="stopped")
 		self.assertEqual((status.name, status.state), ("Windows", "stopped"))

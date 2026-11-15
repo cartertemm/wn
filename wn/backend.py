@@ -39,12 +39,6 @@ class Backend(abc.ABC):
 	def qmp_socket_path(self, session=False):
 		"""Return the VM's QMP address. With ``session``, return the one for long-lived clients such as grab."""
 
-	def share(self, host_path):
-		raise NotImplementedError("share is not implemented by the {} backend yet".format(type(self).__name__))
-
-	def net(self):
-		raise NotImplementedError("net is not implemented by the {} backend yet".format(type(self).__name__))
-
 
 def _create_utm_backend(config):
 	from wn.backends.utm import UTMBackend

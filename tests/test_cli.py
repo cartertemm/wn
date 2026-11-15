@@ -135,15 +135,15 @@ class LifecycleCommandTests(CLITestCase):
 		self.assertEqual(exit_code, 1)
 		self.assertIn("IP address", stderr)
 
-	def test_share_not_implemented(self):
-		exit_code, _, stderr = self.run_cli("share", "/Users/me/Projects")
-		self.assertEqual(exit_code, 1)
-		self.assertIn("share", stderr)
-
-	def test_net_not_implemented(self):
-		exit_code, _, stderr = self.run_cli("net")
-		self.assertEqual(exit_code, 1)
-		self.assertIn("net", stderr)
+	def test_unimplemented_commands_are_hidden(self):
+		with mock.patch("sys.stdout", io.StringIO()) as help_output, self.assertRaises(SystemExit):
+			self.run_cli("--help")
+		for command in ("share", "net"):
+			self.assertNotRegex(help_output.getvalue(), r"\b{}\b".format(command))
+			with mock.patch("sys.stderr", io.StringIO()) as error_output, self.assertRaises(SystemExit) as context:
+				self.run_cli(command)
+			self.assertEqual(context.exception.code, 2)
+			self.assertIn("invalid choice", error_output.getvalue())
 
 	def test_missing_subcommand_is_usage_error(self):
 		with mock.patch("sys.stderr", io.StringIO()):

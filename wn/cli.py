@@ -84,9 +84,6 @@ def build_parser():
 	grab.add_argument("--start-released", action="store_true", help="start with the keyboard released, not grabbed")
 	grab.add_argument("--release-hotkey", default=keygrab.DEFAULT_RELEASE_HOTKEY, metavar="MODIFIERS", help="comma separated modifiers that release and grab the keyboard (default: %(default)s)")
 	grab.add_argument("--dry-run", action="store_true", help="print the QMP commands as JSON instead of sending them")
-	share = subcommands.add_parser("share", help="share a host folder with the guest")
-	share.add_argument("host_path")
-	subcommands.add_parser("net", help="show or change VM networking")
 	_add_update_vm_args_parser(subcommands)
 	_add_setup_parser(subcommands)
 	_add_agent_parser(subcommands)
@@ -287,14 +284,6 @@ def run_ip(context):
 	if address is None:
 		raise WnError("no IP address is known for VM '{}' yet".format(context.config.vm_name))
 	context.print(address)
-
-
-def run_share(context):
-	context.backend.share(context.arguments.host_path)
-
-
-def run_net(context):
-	context.backend.net()
 
 
 def _send_or_print_steps(context, steps):
@@ -558,8 +547,6 @@ COMMANDS = {
 	"mouse": run_mouse,
 	"screenshot": run_screenshot,
 	"grab": run_grab,
-	"share": run_share,
-	"net": run_net,
 	"update-vm-args": run_update_vm_args,
 	"setup": run_setup,
 	"agent": run_agent,
@@ -574,7 +561,7 @@ def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_clien
 	try:
 		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin, stderr)
 		exit_code = COMMANDS[arguments.command](context)
-	except (WnError, NotImplementedError) as error:
+	except WnError as error:
 		stderr.write("wn: error: {}\n".format(error))
 		return EXIT_FAILURE
 	return EXIT_SUCCESS if exit_code is None else exit_code
