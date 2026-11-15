@@ -3,8 +3,10 @@
 import json
 import os
 import socket
+import subprocess
 import tempfile
 
+from wn.appbundle import CLANG_PATH
 from wn.backend import Backend, VMStatus
 
 
@@ -21,6 +23,14 @@ SHORT_TEMPORARY_ROOT = "/tmp"
 def short_temporary_directory():
 	"""Return a temporary directory short enough for a home whose QMP socket paths fit in sun_path."""
 	return tempfile.TemporaryDirectory(dir=SHORT_TEMPORARY_ROOT)
+
+
+def clang_works():
+	"""Return True when clang runs, so the camera tests can build their C code."""
+	try:
+		return subprocess.run([CLANG_PATH, "--version"], capture_output=True).returncode == 0
+	except OSError:
+		return False
 
 
 def unused_port():
