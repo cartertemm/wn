@@ -38,6 +38,7 @@ static AVCaptureVideoDataOutput *output;
 static NSArray *observers;
 static bool observing_suspended;
 static NSString *last_failure;
+static atomic_bool frame_seen;
 static bool frame_rate_logged;
 
 static uint32_t pack_size(size_t width, size_t height)
@@ -136,7 +137,7 @@ static void fail_session(NSString *reason)
 	dispatch_async(control_queue, ^{
 		if (!session)
 			return;
-		camera_log("camera stopped: %s", reason.UTF8String);
+		log_failure([NSString stringWithFormat:@"camera stopped: %@", reason]);
 		tear_down();
 		atomic_store(&running, false);
 		clear_frame();
@@ -149,8 +150,14 @@ static void fail_session(NSString *reason)
 {
 	CVPixelBufferRef buffer = CMSampleBufferGetImageBuffer(sampleBuffer);
 
-	if (buffer && atomic_load(&running))
-		store_camera_frame(buffer);
+	if (!buffer || !atomic_load(&running))
+		return;
+	if (!atomic_exchange(&frame_seen, true)) {
+		dispatch_async(control_queue, ^{
+			last_failure = nil;
+		});
+	}
+	store_camera_frame(buffer);
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
@@ -265,8 +272,8 @@ static void start_camera(uint32_t size)
 			atomic_store(&running, false);
 			return;
 		}
+		atomic_store(&frame_seen, false);
 		run_session(size);
-		last_failure = nil;
 	} @catch (NSException *exception) {
 		log_failure([NSString stringWithFormat:@"camera failed: %@", exception.reason]);
 		tear_down();
