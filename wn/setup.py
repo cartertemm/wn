@@ -13,7 +13,7 @@ from typing import Optional, Tuple
 from wn.agent import LOG_PATH, REPOSITORY_DIRECTORY, install_launch_agent
 from wn.backends.utm import DEFAULT_VM_NAME, UTMBackend, UTMCtlError
 from wn.battery_file import battery_file_path, prepare_battery_file
-from wn.config import config_path, load_config
+from wn.config import config_path, load_config, update_config_file
 from wn.downloads import BYTES_PER_GB, fetch_all
 from wn.errors import WnError
 from wn.payload import BATTERY_DRIVER, build_payload_iso
@@ -64,6 +64,7 @@ DESKTOP_TIMEOUT_SECONDS = 3 * 60
 DESKTOP_POLL_SECONDS = 5
 SHORT_POLL_SECONDS = 1
 SECONDS_PER_MINUTE = 60
+CAMERA_PROMPT_TEXT = "macOS will ask whether wn-agent may use the camera. Click Allow."
 
 
 class SetupError(WnError):
@@ -166,8 +167,9 @@ class Installer:
 			self.finish_bundle(display=None)
 		address = self.wait_for_ip()
 		self.write_config_if_absent()
-		if self.options.battery:
-			self.start_battery_agent()
+		update_config_file({"camera": self.options.camera})
+		if self.options.battery or self.options.camera:
+			self.start_agent()
 		self.print_summary(address)
 		return address
 
@@ -217,6 +219,7 @@ class Installer:
 			"battery": options.battery,
 			"battery_file": self.battery_file if options.battery else None,
 			"secure_boot_driver": BATTERY_DRIVER if options.battery else None,
+			"camera": options.camera,
 		}
 		try:
 			write_bundle(os.path.dirname(self.bundle), bundle_options)
@@ -395,18 +398,22 @@ class Installer:
 			config_file.write("\n")
 		self.report("Wrote {}".format(path))
 
-	def start_battery_agent(self):
-		"""Install and start the launch agent that writes the Mac's battery to the battery file."""
+	def start_agent(self):
+		"""Install and start the launch agent that writes the Mac's battery to the battery file and runs wn-camera."""
 		path = self.install_agent()
 		agent_file = battery_file_path(load_config())
-		for line in (
-			"Installed the wn agent and started it: {}".format(path),
-			"It writes the Mac's battery status to {} for the battery in Windows.".format(agent_file),
+		lines = ["Installed the wn agent and started it: {}".format(path)]
+		if self.options.battery:
+			lines.append("It writes the Mac's battery status to {} for the battery in Windows.".format(agent_file))
+		if self.options.camera:
+			lines.append(CAMERA_PROMPT_TEXT)
+		lines += [
 			"Log: {}".format(os.path.expanduser(LOG_PATH)),
 			"To remove it: python3 -m wn agent --uninstall",
-		):
+		]
+		for line in lines:
 			self.output.write(line + "\n")
-		if agent_file != self.battery_file:
+		if self.options.battery and agent_file != self.battery_file:
 			self.output.write("Warning: the VM reads {}, but the agent writes {}. Set vm_name or battery_file in {}\n".format(self.battery_file, agent_file, config_path()))
 
 	def print_summary(self, address):

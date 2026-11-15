@@ -262,13 +262,35 @@ class RunTests(InstallerTestCase):
 		self.assertIn("Warning: the VM reads", self.output.getvalue())
 
 	def test_no_battery(self):
-		self.installer(battery=False).run()
+		self.installer(battery=False, camera=False).run()
 		arguments = self.bundle_config()["QEMU"]["AdditionalArguments"]
 		self.assertNotIn("nvdimm=on", arguments)
 		self.assertEqual(os.listdir(os.path.join(self.bundle_dir, "Windows.utm", "Data")), ["disk.qcow2"])
 		self.assertEqual(os.listdir(self.group_container), [])
 		self.assertFalse(self.payload_calls[0][4])
 		self.assertEqual(self.agent_installs, [])
+
+	def test_camera_is_on_by_default(self):
+		self.installer().run()
+		arguments = self.bundle_config()["QEMU"]["AdditionalArguments"]
+		self.assertIn("usb-redir,chardev=wncam,id=wncam0,bus=wncam-xhci.0", arguments)
+		self.assertIn("macOS will ask whether wn-agent may use the camera. Click Allow.", self.output.getvalue())
+
+	def test_camera_without_battery_still_installs_the_agent(self):
+		self.installer(battery=False).run()
+		self.assertEqual(len(self.agent_installs), 1)
+		output = self.output.getvalue()
+		self.assertIn("Click Allow", output)
+		self.assertNotIn("battery status", output)
+		self.assertNotIn("Warning", output)
+
+	def test_no_camera(self):
+		self.installer(camera=False).run()
+		arguments = self.bundle_config()["QEMU"]["AdditionalArguments"]
+		self.assertFalse(any("wncam" in argument for argument in arguments))
+		self.assertNotIn("Click Allow", self.output.getvalue())
+		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
+			self.assertFalse(json.load(config_file)["camera"])
 
 	def test_falls_back_to_plain_ramfb_when_desktop_stays_blank(self):
 		self.desktop_drawn.return_value = False
@@ -303,16 +325,16 @@ class RunTests(InstallerTestCase):
 	def test_writes_config_when_absent(self):
 		self.installer(name="Windows").run()
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
-			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows"})
+			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows", "camera": True})
 
 	def test_keeps_existing_config(self):
 		path = os.path.join(self.directory.name, ".config", "wn", "config.json")
 		os.makedirs(os.path.dirname(path))
 		with open(path, "w") as config_file:
-			config_file.write("{}")
+			config_file.write('{"key_delay_ms": 30}')
 		self.installer().run()
 		with open(path) as config_file:
-			self.assertEqual(config_file.read(), "{}")
+			self.assertEqual(json.load(config_file), {"key_delay_ms": 30, "camera": True})
 
 	def test_progress_lines_have_elapsed_time(self):
 		self.installer().run()
