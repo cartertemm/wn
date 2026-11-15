@@ -135,7 +135,7 @@ static bool wait_seconds(double seconds)
 	return !terminate_requested;
 }
 
-static enum access_state camera_access(void)
+static enum access_state camera_authorization(void)
 {
 	switch ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo]) {
 	case AVAuthorizationStatusNotDetermined:
@@ -145,8 +145,16 @@ static enum access_state camera_access(void)
 	case AVAuthorizationStatusRestricted:
 		return ACCESS_RESTRICTED;
 	default:
-		break;
+		return ACCESS_ALLOWED;
 	}
+}
+
+static enum access_state camera_access(void)
+{
+	enum access_state state = camera_authorization();
+
+	if (state != ACCESS_ALLOWED)
+		return state;
 	return [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo] ? ACCESS_ALLOWED : ACCESS_NO_CAMERA;
 }
 
@@ -480,7 +488,7 @@ static bool check_timers(struct camera *camera)
 		start_capture(camera);
 	if (camera->capture_on && !camera->test_pattern && now - camera->last_access_check >= ACCESS_POLL_SECONDS) {
 		camera->last_access_check = now;
-		state = camera_access();
+		state = camera_authorization();
 		if (state != ACCESS_ALLOWED) {
 			log_access(state);
 			stop_capture(camera);
