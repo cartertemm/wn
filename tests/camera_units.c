@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "usbredir.h"
+#include "uvc.h"
 
 static int failures;
 
@@ -251,6 +252,220 @@ static void test_connection_sends_output(void)
 	close(pair[1]);
 }
 
+static void request(struct uvc_device *device, uint8_t requesttype, uint8_t request_code, uint16_t value, uint16_t index, uint16_t length, struct uvc_reply *reply)
+{
+	uvc_handle_control(device, requesttype, request_code, value, index, length, NULL, 0, reply);
+}
+
+static void set_cur(struct uvc_device *device, uint16_t selector, uint8_t frame_index, uint32_t interval, struct uvc_reply *reply)
+{
+	uint8_t data[UVC_PROBE_SIZE] = {0};
+
+	data[2] = UVC_FORMAT_INDEX;
+	data[3] = frame_index;
+	data[4] = interval & 0xFF;
+	data[5] = (interval >> 8) & 0xFF;
+	data[6] = (interval >> 16) & 0xFF;
+	data[7] = interval >> 24;
+	uvc_handle_control(device, 0x21, 0x01, (uint16_t)(selector << 8), 0x0001, UVC_PROBE_SIZE, data, sizeof data, reply);
+}
+
+static uint8_t error_code(struct uvc_device *device)
+{
+	struct uvc_reply reply;
+
+	request(device, 0xA1, 0x81, 0x0200, 0x0000, 1, &reply);
+	return reply.stall ? 0xFF : reply.data[0];
+}
+
+static void test_descriptor_bytes(void)
+{
+	EXPECT(uvc_device_descriptor[0] == 18 && uvc_device_descriptor[4] == 0xEF && uvc_device_descriptor[7] == 64);
+	EXPECT(read16(uvc_device_descriptor + 8) == UVC_VENDOR_ID);
+	EXPECT(read16(uvc_device_descriptor + 10) == UVC_PRODUCT_ID);
+	EXPECT(read16(uvc_device_descriptor + 12) == UVC_DEVICE_BCD);
+	EXPECT(read16(uvc_configuration_descriptor + 2) == 189);
+	EXPECT(uvc_configuration_descriptor[9 + 1] == 0x0B);
+	EXPECT(read16(uvc_configuration_descriptor + 26 + 5) == 40);
+	EXPECT(read16(uvc_configuration_descriptor + 75 + 4) == 107);
+	EXPECT(uvc_configuration_descriptor[176] == 6 && uvc_configuration_descriptor[178] == 0x0D);
+	EXPECT(uvc_configuration_descriptor[179] == 1 && uvc_configuration_descriptor[180] == 1 && uvc_configuration_descriptor[181] == 1);
+	EXPECT(uvc_configuration_descriptor[182] == 7 && uvc_configuration_descriptor[184] == 0x81);
+	EXPECT(read16(uvc_configuration_descriptor + 186) == 512);
+}
+
+static void test_get_descriptor(void)
+{
+	struct uvc_device device;
+	struct uvc_reply reply;
+
+	uvc_device_reset(&device);
+	request(&device, 0x80, 0x06, 0x0100, 0, 64, &reply);
+	EXPECT(!reply.stall && reply.length == 18 && memcmp(reply.data, uvc_device_descriptor, 18) == 0);
+	request(&device, 0x80, 0x06, 0x0100, 0, 8, &reply);
+	EXPECT(reply.length == 8);
+	request(&device, 0x80, 0x06, 0x0200, 0, 255, &reply);
+	EXPECT(reply.length == 189 && memcmp(reply.data, uvc_configuration_descriptor, 189) == 0);
+	request(&device, 0x80, 0x06, 0x0201, 0, 255, &reply);
+	EXPECT(reply.stall);
+	request(&device, 0x80, 0x06, 0x0600, 0, 10, &reply);
+	EXPECT(reply.length == 10 && reply.data[1] == 0x06 && reply.data[8] == 1);
+	request(&device, 0x80, 0x06, 0x0700, 0, 255, &reply);
+	EXPECT(reply.length == 189 && reply.data[1] == 0x07 && read16(reply.data + 186) == 64);
+	request(&device, 0x80, 0x06, 0x0F00, 0, 255, &reply);
+	EXPECT(reply.stall);
+}
+
+static void test_strings(void)
+{
+	struct uvc_device device;
+	struct uvc_reply reply;
+	const uint8_t language[] = {0x04, 0x03, 0x09, 0x04};
+	const uint8_t product[] = {22, 3, 'M', 0, 'a', 0, 'c', 0, ' ', 0, 'C', 0, 'a', 0, 'm', 0, 'e', 0, 'r', 0, 'a', 0};
+
+	uvc_device_reset(&device);
+	request(&device, 0x80, 0x06, 0x0300, 0, 255, &reply);
+	EXPECT(reply.length == 4 && memcmp(reply.data, language, 4) == 0);
+	request(&device, 0x80, 0x06, 0x0302, 0x0409, 255, &reply);
+	EXPECT(reply.length == 22 && memcmp(reply.data, product, 22) == 0);
+	request(&device, 0x80, 0x06, 0x0301, 0x0409, 255, &reply);
+	EXPECT(reply.length == 6 && reply.data[2] == 'w' && reply.data[4] == 'n');
+	request(&device, 0x80, 0x06, 0x03EE, 0, 18, &reply);
+	EXPECT(reply.stall);
+	request(&device, 0x80, 0x06, 0x0303, 0x0409, 255, &reply);
+	EXPECT(reply.stall);
+}
+
+static void test_status_and_halt(void)
+{
+	struct uvc_device device;
+	struct uvc_reply reply;
+
+	uvc_device_reset(&device);
+	request(&device, 0x80, 0x00, 0, 0, 2, &reply);
+	EXPECT(!reply.stall && reply.length == 2 && reply.data[0] == 0 && reply.data[1] == 0);
+	request(&device, 0x81, 0x00, 0, 1, 2, &reply);
+	EXPECT(!reply.stall && reply.length == 2);
+	request(&device, 0x81, 0x00, 0, 2, 2, &reply);
+	EXPECT(reply.stall);
+	request(&device, 0x02, 0x03, 0, 0x81, 0, &reply);
+	EXPECT(!reply.stall && reply.stream_stop && device.halted);
+	request(&device, 0x82, 0x00, 0, 0x81, 2, &reply);
+	EXPECT(reply.data[0] == 1);
+	request(&device, 0x02, 0x01, 0, 0x81, 0, &reply);
+	EXPECT(!reply.stall && reply.stream_stop && !device.halted);
+	request(&device, 0x82, 0x00, 0, 0x81, 2, &reply);
+	EXPECT(reply.data[0] == 0);
+	request(&device, 0x02, 0x01, 0, 0x00, 0, &reply);
+	EXPECT(!reply.stall && !reply.stream_stop);
+	request(&device, 0x00, 0x03, 1, 0, 0, &reply);
+	EXPECT(reply.stall);
+	request(&device, 0x82, 0x00, 0, 0x02, 2, &reply);
+	EXPECT(reply.stall);
+	request(&device, 0x40, 0x01, 0, 0, 0, &reply);
+	EXPECT(reply.stall);
+}
+
+static void test_probe(void)
+{
+	struct uvc_device device;
+	struct uvc_reply reply;
+
+	uvc_device_reset(&device);
+	request(&device, 0xA1, 0x87, 0x0100, 0x0001, 34, &reply);
+	EXPECT(!reply.stall && reply.length == 34);
+	EXPECT(reply.data[2] == 1 && reply.data[3] == 1 && read32(reply.data + 4) == 333333);
+	EXPECT(read16(reply.data + 16) == 33 && read32(reply.data + 18) == 1843200 && read32(reply.data + 22) == 65536);
+	EXPECT(read32(reply.data + 26) == 48000000 && reply.data[30] == 3 && reply.data[31] == 1 && reply.data[32] == 1 && reply.data[33] == 1);
+	set_cur(&device, 1, 2, 0, &reply);
+	EXPECT(!reply.stall && reply.length == 0);
+	request(&device, 0xA1, 0x81, 0x0100, 0x0001, 34, &reply);
+	EXPECT(reply.data[3] == 2 && read32(reply.data + 4) == 333333 && read32(reply.data + 18) == 614400);
+	set_cur(&device, 1, 9, 5, &reply);
+	request(&device, 0xA1, 0x81, 0x0100, 0x0001, 34, &reply);
+	EXPECT(reply.data[2] == 1 && reply.data[3] == 1 && read32(reply.data + 18) == 1843200);
+	request(&device, 0xA1, 0x82, 0x0100, 0x0001, 34, &reply);
+	EXPECT(reply.data[3] == 2);
+	request(&device, 0xA1, 0x83, 0x0100, 0x0001, 34, &reply);
+	EXPECT(reply.data[3] == 1);
+	request(&device, 0xA1, 0x84, 0x0100, 0x0001, 34, &reply);
+	EXPECT(reply.data[2] == 1 && reply.data[3] == 1 && read32(reply.data + 4) == 1 && read32(reply.data + 18) == 0);
+	request(&device, 0xA1, 0x85, 0x0100, 0x0001, 2, &reply);
+	EXPECT(reply.length == 2 && reply.data[0] == 0x22 && reply.data[1] == 0);
+	request(&device, 0xA1, 0x86, 0x0100, 0x0001, 1, &reply);
+	EXPECT(reply.length == 1 && reply.data[0] == 3);
+	request(&device, 0xA1, 0x81, 0x0100, 0x0001, 26, &reply);
+	EXPECT(reply.length == 26);
+}
+
+static void test_commit(void)
+{
+	struct uvc_device device;
+	struct uvc_reply reply;
+
+	uvc_device_reset(&device);
+	set_cur(&device, 2, 2, 333333, &reply);
+	EXPECT(!reply.stall && reply.committed && device.has_commit && device.commit.frame_index == 2);
+	request(&device, 0xA1, 0x81, 0x0200, 0x0001, 34, &reply);
+	EXPECT(reply.data[3] == 2 && read32(reply.data + 18) == 614400);
+	set_cur(&device, 2, 1, 0, &reply);
+	EXPECT(reply.stall && !reply.committed && device.commit.frame_index == 2);
+	EXPECT(error_code(&device) == 0x04);
+	EXPECT(error_code(&device) == 0x00);
+	set_cur(&device, 2, 3, 333333, &reply);
+	EXPECT(reply.stall);
+	request(&device, 0xA1, 0x82, 0x0200, 0x0001, 34, &reply);
+	EXPECT(reply.stall);
+	EXPECT(error_code(&device) == 0x07);
+	request(&device, 0xA1, 0x85, 0x0200, 0x0001, 2, &reply);
+	EXPECT(!reply.stall && reply.data[0] == 0x22);
+	request(&device, 0xA1, 0x86, 0x0200, 0x0001, 1, &reply);
+	EXPECT(!reply.stall && reply.data[0] == 3);
+}
+
+static void test_unsupported_class_requests(void)
+{
+	struct uvc_device device;
+	struct uvc_reply reply;
+
+	uvc_device_reset(&device);
+	request(&device, 0xA1, 0x86, 0x0200, 0x0000, 1, &reply);
+	EXPECT(!reply.stall && reply.data[0] == 1);
+	request(&device, 0xA1, 0x81, 0x0100, 0x0000, 1, &reply);
+	EXPECT(reply.stall);
+	EXPECT(error_code(&device) == 0x06);
+	request(&device, 0xA1, 0x87, 0x0B00, 0x0100, 2, &reply);
+	EXPECT(reply.stall);
+	EXPECT(error_code(&device) == 0x06);
+	request(&device, 0xA1, 0x81, 0x0100, 0x0700, 2, &reply);
+	EXPECT(reply.stall);
+	EXPECT(error_code(&device) == 0x05);
+	request(&device, 0xA1, 0x81, 0x0600, 0x0001, 1, &reply);
+	EXPECT(!reply.stall && reply.data[0] == 0);
+	request(&device, 0xA1, 0x81, 0x0900, 0x0001, 1, &reply);
+	EXPECT(reply.stall);
+	EXPECT(error_code(&device) == 0x06);
+	request(&device, 0xA2, 0x81, 0x0100, 0x0081, 1, &reply);
+	EXPECT(reply.stall);
+	EXPECT(error_code(&device) == 0x07);
+	request(&device, 0x21, 0x81, 0x0100, 0x0001, 34, &reply);
+	EXPECT(reply.stall);
+	EXPECT(error_code(&device) == 0x07);
+}
+
+static void test_reset(void)
+{
+	struct uvc_device device;
+	struct uvc_reply reply;
+
+	uvc_device_reset(&device);
+	set_cur(&device, 2, 2, 333333, &reply);
+	device.configuration = 1;
+	device.halted = true;
+	uvc_device_reset(&device);
+	EXPECT(device.configuration == 0 && !device.halted && !device.has_commit && device.commit.frame_index == 1 && device.probe.frame_index == 1);
+}
+
 int main(void)
 {
 	test_hello();
@@ -267,6 +482,14 @@ int main(void)
 	test_connection_parses_packets();
 	test_connection_rejects_bad_packets();
 	test_connection_sends_output();
+	test_descriptor_bytes();
+	test_get_descriptor();
+	test_strings();
+	test_status_and_halt();
+	test_probe();
+	test_commit();
+	test_unsupported_class_requests();
+	test_reset();
 	if (failures) {
 		fprintf(stderr, "%d failed\n", failures);
 		return 1;
