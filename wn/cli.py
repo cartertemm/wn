@@ -14,7 +14,7 @@ from wn.backend import create_backend
 from wn.backends.utm import DEFAULT_VM_NAME
 from wn.battery_file import battery_writer, prepare_battery_file
 from wn.battery_sync import run_battery_command
-from wn.config import load_config
+from wn.config import config_path, load_config, update_config_file
 from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
@@ -26,6 +26,7 @@ from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
 from wn.utm_config import (
 	BLOCK_AUDIO,
 	BLOCK_BATTERY,
+	BLOCK_CAMERA,
 	BLOCK_EXTRA,
 	BLOCK_QMP,
 	BLOCK_RAMFB,
@@ -104,6 +105,7 @@ def _add_setup_parser(subcommands):
 	setup.add_argument("--software", default=",".join(name for name, _ in SOFTWARE_CHOICES), help="comma separated software to install, or none (default: %(default)s)")
 	setup.add_argument("--edition", default=DEFAULT_EDITION, help="Windows 11 edition (default: %(default)s)")
 	setup.add_argument("--no-battery", action="store_true", help="do not add the native battery: no firmware driver, no Secure Boot certificate, no NVDIMM, and no wn agent")
+	setup.add_argument("--no-camera", action="store_true", help="do not show the Mac's camera to Windows as a USB webcam")
 	setup.add_argument("--downloads-dir", default=DEFAULT_DOWNLOADS_DIR, metavar="DIR", help="where to keep the downloaded ISOs and installers (default: %(default)s)")
 	setup.add_argument("--output", metavar="DIR", default=DEFAULT_BUNDLE_DIRECTORY, help="directory for the bundle (default: %(default)s)")
 
@@ -169,8 +171,11 @@ def _add_update_vm_args_parser(subcommands):
 	battery = update.add_mutually_exclusive_group()
 	battery.add_argument("--battery", action="store_true", help="map the battery file into the guest as an NVDIMM, for the wn-acpi firmware driver")
 	battery.add_argument("--no-battery", action="store_true", help="remove the battery NVDIMM")
+	camera = update.add_mutually_exclusive_group()
+	camera.add_argument("--camera", action="store_true", help="add the USB webcam that wn-camera in the wn agent feeds with the Mac's camera")
+	camera.add_argument("--no-camera", action="store_true", help="remove the USB webcam")
 	update.add_argument("--audio-args", metavar="ARGS", help="QEMU arguments that replace the audio arguments, such as \"-audiodev coreaudio,id=ca0,... -device intel-hda -device hda-output,audiodev=ca0\"")
-	update.add_argument("--extra-args", metavar="ARGS", help="QEMU arguments that replace every argument that is not QMP, ramfb, audio, or battery, such as \"-device virtio-keyboard-pci,id=vkbd\"")
+	update.add_argument("--extra-args", metavar="ARGS", help="QEMU arguments that replace every argument that is not QMP, ramfb, audio, battery, or camera, such as \"-device virtio-keyboard-pci,id=vkbd\"")
 
 
 def _add_key_options(parser):
@@ -380,6 +385,7 @@ def run_update_vm_args(context):
 		(BLOCK_RAMFB, arguments.headless),
 		(BLOCK_AUDIO, arguments.audio_args is not None),
 		(BLOCK_BATTERY, arguments.battery or arguments.no_battery),
+		(BLOCK_CAMERA, arguments.camera or arguments.no_camera),
 		(BLOCK_EXTRA, arguments.extra_args is not None),
 	) if named]
 	before, after = update_additional_arguments(bundle, {
@@ -388,6 +394,7 @@ def run_update_vm_args(context):
 		"extra_args": arguments.extra_args,
 		"battery": arguments.battery,
 		"battery_file": config.battery_file,
+		"camera": arguments.camera,
 	}, blocks)
 	if arguments.battery:
 		battery_file = config.battery_file or battery_file_for_bundle(bundle)
@@ -396,6 +403,10 @@ def run_update_vm_args(context):
 		except WnError as error:
 			raise WnError("{}. Create the folder or set battery_file in the config".format(error)) from None
 		context.print("Battery file: {}".format(battery_file))
+	if arguments.camera or arguments.no_camera:
+		update_config_file({"camera": arguments.camera})
+		context.print("Set camera to {} in {}. Run python3 -m wn agent --install so the agent {} wn-camera".format(
+			"true" if arguments.camera else "false", config_path(), "starts" if arguments.camera else "stops"))
 	if before == after:
 		context.print("AdditionalArguments in {} did not change".format(os.path.join(bundle, "config.plist")))
 		return
@@ -531,6 +542,7 @@ def run_setup(context):
 		bundle_dir=arguments.output,
 		downloads_dir=arguments.downloads_dir,
 		battery=not arguments.no_battery,
+		camera=not arguments.no_camera,
 		battery_file=context.config.battery_file,
 		**answers
 	)

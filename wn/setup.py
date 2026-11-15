@@ -86,6 +86,7 @@ class SetupOptions:
 	mac_address: Optional[str] = None
 	battery: bool = True
 	battery_file: Optional[str] = None
+	camera: bool = True
 
 
 def nearest_existing_directory(path):

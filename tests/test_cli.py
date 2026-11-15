@@ -661,6 +661,31 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], TUNED_ARGUMENTS)
 		self.assertIn("--machine nvdimm=on", stdout)
 
+	def test_camera_adds_the_usb_webcam_and_turns_it_on_in_the_config(self):
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--camera")
+		self.assertEqual(exit_code, 0, stderr)
+		arguments = self.read_plist()["QEMU"]["AdditionalArguments"]
+		self.assertEqual(arguments[len(OLD_ARGUMENTS):], [
+			"-device", "qemu-xhci,id=wncam-xhci",
+			"-chardev", "socket,id=wncam,path=wn-Windows-camera.sock,server=on,wait=off",
+			"-device", "usb-redir,chardev=wncam,id=wncam0,bus=wncam-xhci.0",
+		])
+		with open(os.path.join(self.home.name, ".config", "wn", "config.json")) as config_file:
+			self.assertTrue(json.load(config_file)["camera"])
+		self.assertIn("python3 -m wn agent --install", stdout)
+
+	def test_no_camera_removes_the_usb_webcam(self):
+		self.assertEqual(self.run_cli("update-vm-args", "--bundle", self.bundle, "--camera")[0], 0)
+		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--no-camera")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS)
+		with open(os.path.join(self.home.name, ".config", "wn", "config.json")) as config_file:
+			self.assertFalse(json.load(config_file)["camera"])
+
+	def test_camera_flags_are_exclusive(self):
+		with self.assertRaises(SystemExit):
+			self.run_cli("update-vm-args", "--camera", "--no-camera")
+
 	def test_refuses_running_vm(self):
 		self.backend.state = "running"
 		exit_code, _, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle)
@@ -741,6 +766,14 @@ class SetupCommandTests(CLITestCase):
 	def test_no_battery(self):
 		_, options, _, _ = self.run_setup("--yes", "--no-battery")
 		self.assertFalse(options.battery)
+
+	def test_camera_is_on_by_default(self):
+		_, options, _, _ = self.run_setup("--yes")
+		self.assertTrue(options.camera)
+
+	def test_no_camera(self):
+		_, options, _, _ = self.run_setup("--yes", "--no-camera")
+		self.assertFalse(options.camera)
 
 	def test_battery_file_comes_from_the_config(self):
 		write_config(self.home.name, {"battery_file": "/tmp/wn-battery.bin"})
