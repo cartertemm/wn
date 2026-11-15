@@ -10,7 +10,11 @@ from wn.errors import WnError
 BUNDLE_IDENTIFIER = "com.wn.agent"
 BUNDLE_NAME = "wn-agent"
 APP_PATH = os.path.join("~", "Library", "Application Support", "wn", BUNDLE_NAME + ".app")
-STUB_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launchd", BUNDLE_NAME + ".c")
+PACKAGE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+STUB_SOURCE = os.path.join(PACKAGE_DIRECTORY, "launchd", BUNDLE_NAME + ".c")
+CAMERA_DIRECTORY = os.path.join(PACKAGE_DIRECTORY, "camera")
+CAMERA_SOURCE_NAMES = ("main.m", "capture.m", "uvc.c", "usbredir.c")
+CAMERA_FRAMEWORKS = ("AVFoundation", "CoreMedia", "CoreVideo", "Foundation", "VideoToolbox")
 CLANG_PATH = "/usr/bin/clang"
 CODESIGN_PATH = "/usr/bin/codesign"
 AD_HOC_IDENTITY = "-"
@@ -41,6 +45,15 @@ def info_plist():
 		"LSBackgroundOnly": True,
 		"NSAppDataUsageDescription": APP_DATA_USAGE,
 	}
+
+
+def camera_build_command(output):
+	"""Return the clang command that builds wn-camera at ``output``."""
+	command = [CLANG_PATH, "-O2", "-fobjc-arc", "-Wall", "-o", output]
+	command += [os.path.join(CAMERA_DIRECTORY, name) for name in CAMERA_SOURCE_NAMES]
+	for framework in CAMERA_FRAMEWORKS:
+		command += ["-framework", framework]
+	return command
 
 
 def _check(result, tool):

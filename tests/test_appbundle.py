@@ -7,13 +7,17 @@ from unittest import mock
 
 from wn.appbundle import (
 	BUNDLE_IDENTIFIER,
+	CAMERA_DIRECTORY,
 	STUB_SOURCE,
 	AppBundleError,
 	app_path,
 	build_app,
+	camera_build_command,
 	executable_path,
 	remove_app,
 )
+
+CAMERA_SOURCES = [os.path.join(CAMERA_DIRECTORY, name) for name in ("main.m", "capture.m", "uvc.c", "usbredir.c")]
 
 
 def completed(returncode=0, stderr=""):
@@ -36,6 +40,13 @@ class AppBundleTests(unittest.TestCase):
 
 	def test_stub_source_ships_with_the_package(self):
 		self.assertTrue(os.path.isfile(STUB_SOURCE))
+		for path in CAMERA_SOURCES:
+			self.assertTrue(os.path.isfile(path), path)
+
+	def test_camera_build_command(self):
+		self.assertEqual(camera_build_command("/out/wn-camera"), ["/usr/bin/clang", "-O2", "-fobjc-arc", "-Wall", "-o", "/out/wn-camera"] + CAMERA_SOURCES + [
+			"-framework", "AVFoundation", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "Foundation", "-framework", "VideoToolbox",
+		])
 
 	def test_build_writes_info_plist(self):
 		self.assertEqual(build_app(run=self.run), self.app)
