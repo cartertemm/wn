@@ -19,6 +19,7 @@
 #define HELLO_TIMEOUT_SECONDS 5.0
 #define ACCESS_RETRY_SECONDS 10.0
 #define ACCESS_POLL_SECONDS 1.0
+#define CAPTURE_RETRY_SECONDS 2.0
 #define POLL_MILLISECONDS 100
 #define FLUSH_MILLISECONDS 1000
 #define OUTPUT_BACKLOG_LIMIT (256 * 1024)
@@ -71,6 +72,7 @@ struct camera {
 	uint64_t frames_sent;
 	double connected_at;
 	double capture_started_at;
+	double capture_attempted_at;
 	double last_bulk_arrival;
 	double last_access_check;
 };
@@ -209,17 +211,20 @@ static void stop_stream(struct camera *camera)
 static void start_capture(struct camera *camera)
 {
 	uint8_t frame_index = camera->device.commit.frame_index;
+	bool changed = !camera->capture_on || camera->capture_frame_index != frame_index;
 
-	if (camera->capture_on && camera->capture_frame_index == frame_index && capture_active())
+	if (!changed && capture_active())
 		return;
 	capture_start(uvc_frame_width(frame_index), uvc_frame_height(frame_index));
+	camera->capture_attempted_at = now_seconds();
 	if (!camera->capture_on) {
-		camera->capture_started_at = now_seconds();
+		camera->capture_started_at = camera->capture_attempted_at;
 		camera->frames_sent = 0;
 	}
 	camera->capture_on = true;
 	camera->capture_frame_index = frame_index;
-	camera_log("camera on %ux%u", uvc_frame_width(frame_index), uvc_frame_height(frame_index));
+	if (changed)
+		camera_log("camera on %ux%u", uvc_frame_width(frame_index), uvc_frame_height(frame_index));
 }
 
 static void stop_capture(struct camera *camera)
@@ -455,6 +460,11 @@ static void unplug(struct camera *camera)
 	camera_log("unplugged from the VM");
 }
 
+static bool starving_guest(struct camera *camera)
+{
+	return camera->queue.count && usbredir_pending(&camera->connection) < OUTPUT_BACKLOG_LIMIT;
+}
+
 static bool check_timers(struct camera *camera)
 {
 	double now = now_seconds();
@@ -464,8 +474,10 @@ static bool check_timers(struct camera *camera)
 		camera_log("no hello from QEMU within %.0f s, connecting again", HELLO_TIMEOUT_SECONDS);
 		return false;
 	}
-	if (camera->capture_on && uvc_idle_expired(camera->last_bulk_arrival, now))
+	if (camera->capture_on && uvc_idle_expired(camera->last_bulk_arrival, now) && !starving_guest(camera))
 		stop_capture(camera);
+	if (camera->capture_on && !capture_active() && starving_guest(camera) && now - camera->capture_attempted_at >= CAPTURE_RETRY_SECONDS)
+		start_capture(camera);
 	if (camera->capture_on && !camera->test_pattern && now - camera->last_access_check >= ACCESS_POLL_SECONDS) {
 		camera->last_access_check = now;
 		state = camera_access();

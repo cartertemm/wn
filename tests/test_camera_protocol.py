@@ -48,6 +48,7 @@ REQUEST_LENGTH = 65536
 SOCKET_TIMEOUT_SECONDS = 10
 CONNECT_TIMEOUT_SECONDS = 10
 IDLE_SECONDS = 3
+CAPTURE_RETRY_SECONDS = 2
 EXIT_TIMEOUT_SECONDS = 5
 GET_DESCRIPTOR = 0x06
 SET_CUR = 0x01
@@ -238,6 +239,26 @@ class CameraProtocolTests(unittest.TestCase):
 		off = self.wait_for_log("camera off", IDLE_SECONDS + 3)
 		self.assertGreaterEqual(off - last_read, IDLE_SECONDS - 0.2)
 		self.assertLess(off - last_read, IDLE_SECONDS + 1.5)
+
+	def drain_log(self):
+		lines = []
+		while not self.log_lines.empty():
+			lines.append(self.log_lines.get()[1])
+		return lines
+
+	def test_stream_recovers_after_the_source_stops(self):
+		self.configure()
+		self.commit(2)
+		next_id = 700
+		next_id += len(self.read_frame(next_id))
+		self.process.send_signal(signal.SIGUSR1)
+		self.wait_for_log("camera stopped", EXIT_TIMEOUT_SECONDS)
+		held = time.monotonic()
+		self.check_frame(self.read_frame(next_id), 2)
+		self.assertLess(time.monotonic() - held, CAPTURE_RETRY_SECONDS + 1.5)
+		time.sleep(0.5)
+		lines = self.drain_log()
+		self.assertFalse([line for line in lines if "camera off" in line or "camera on" in line], lines)
 
 	def test_sigterm_unplugs_and_exits_0(self):
 		self.plug()

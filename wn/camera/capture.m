@@ -3,6 +3,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <VideoToolbox/VideoToolbox.h>
 #include <os/lock.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -26,6 +27,8 @@ static capture_frame_ready notify_frame_ready;
 static dispatch_queue_t control_queue;
 static dispatch_queue_t frame_queue;
 static dispatch_source_t pattern_timer;
+static dispatch_source_t pattern_stop_signal;
+static bool pattern_refuses_start;
 static uint64_t pattern_count;
 static VTPixelTransferSessionRef transfer;
 static WNCaptureDelegate *delegate;
@@ -33,6 +36,7 @@ static AVCaptureSession *session;
 static AVCaptureDevice *device;
 static AVCaptureVideoDataOutput *output;
 static NSArray *observers;
+static NSString *last_failure;
 
 static uint32_t pack_size(size_t width, size_t height)
 {
@@ -97,6 +101,14 @@ static void store_camera_frame(CVPixelBufferRef buffer)
 	CVPixelBufferRelease(scaled);
 }
 
+static void log_failure(NSString *message)
+{
+	if ([message isEqualToString:last_failure])
+		return;
+	camera_log("%s", message.UTF8String);
+	last_failure = message;
+}
+
 static void tear_down(void)
 {
 	if (!session)
@@ -156,12 +168,12 @@ static bool build_session(void)
 
 	device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
 	if (!device) {
-		camera_log("camera not found");
+		log_failure(@"camera not found");
 		return false;
 	}
 	input = [AVCaptureDeviceInput deviceInputWithDevice:device error:&error];
 	if (!input) {
-		camera_log("cannot open the camera: %s", error.localizedDescription.UTF8String);
+		log_failure([NSString stringWithFormat:@"cannot open the camera: %@", error.localizedDescription]);
 		device = nil;
 		return false;
 	}
@@ -212,14 +224,15 @@ static void start_camera(uint32_t size)
 			return;
 		}
 		if (device.isSuspended) {
-			camera_log("the camera is suspended, the lid may be closed");
+			log_failure(@"the camera is suspended, the lid may be closed");
 			tear_down();
 			atomic_store(&running, false);
 			return;
 		}
 		run_session(size);
+		last_failure = nil;
 	} @catch (NSException *exception) {
-		camera_log("camera failed: %s", exception.reason.UTF8String);
+		log_failure([NSString stringWithFormat:@"camera failed: %@", exception.reason]);
 		tear_down();
 		atomic_store(&running, false);
 	}
@@ -259,6 +272,37 @@ static void stop_pattern(void)
 	pattern_timer = nil;
 }
 
+static void start_pattern_if_allowed(void)
+{
+	if (pattern_refuses_start) {
+		pattern_refuses_start = false;
+		atomic_store(&running, false);
+		return;
+	}
+	start_pattern();
+}
+
+static void fail_pattern(void)
+{
+	if (!pattern_timer)
+		return;
+	camera_log("camera stopped: the test pattern was told to stop");
+	stop_pattern();
+	pattern_refuses_start = true;
+	atomic_store(&running, false);
+	clear_frame();
+}
+
+static void watch_pattern_stop_signal(void)
+{
+	signal(SIGUSR1, SIG_IGN);
+	pattern_stop_signal = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1, 0, control_queue);
+	dispatch_source_set_event_handler(pattern_stop_signal, ^{
+		fail_pattern();
+	});
+	dispatch_resume(pattern_stop_signal);
+}
+
 void capture_init(bool test_pattern, capture_frame_ready frame_ready)
 {
 	use_test_pattern = test_pattern;
@@ -267,6 +311,8 @@ void capture_init(bool test_pattern, capture_frame_ready frame_ready)
 	frame_queue = dispatch_queue_create("wn.camera.frames", DISPATCH_QUEUE_SERIAL);
 	delegate = [[WNCaptureDelegate alloc] init];
 	VTPixelTransferSessionCreate(kCFAllocatorDefault, &transfer);
+	if (test_pattern)
+		watch_pattern_stop_signal();
 }
 
 void capture_start(uint16_t width, uint16_t height)
@@ -279,7 +325,7 @@ void capture_start(uint16_t width, uint16_t height)
 		if (!atomic_load(&running))
 			return;
 		if (use_test_pattern)
-			start_pattern();
+			start_pattern_if_allowed();
 		else
 			start_camera(size);
 	});
