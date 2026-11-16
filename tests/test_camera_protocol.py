@@ -27,7 +27,7 @@ from fake_usbredir_guest import (
 from fakes import clang_works, short_temporary_directory
 from wn.appbundle import camera_build_command
 
-DEVICE_DESCRIPTOR = bytes.fromhex("12 01 00 02 ef 02 01 40 09 12 01 00 00 01 01 02 00 01")
+DEVICE_DESCRIPTOR = bytes.fromhex("12 01 00 02 ef 02 01 40 09 12 01 00 01 01 01 02 00 01")
 CONFIGURATION_DESCRIPTOR = bytes.fromhex(
 	"09 02 bd 00 02 01 00 80 fa"
 	" 08 0b 00 02 0e 03 00 02"
@@ -37,9 +37,9 @@ CONFIGURATION_DESCRIPTOR = bytes.fromhex(
 	" 09 24 03 02 01 01 00 01 00"
 	" 09 04 01 00 01 0e 02 00 00"
 	" 0e 24 01 01 6b 00 81 00 02 00 00 00 01 00"
-	" 1b 24 04 01 02 59 55 59 32 00 00 10 00 80 00 00 aa 00 38 9b 71 10 01 00 00 00 00"
-	" 1e 24 05 01 00 00 05 d0 02 00 00 5e 1a 00 00 5e 1a 00 20 1c 00 15 16 05 00 01 15 16 05 00"
-	" 1e 24 05 02 00 80 02 e0 01 00 00 ca 08 00 00 ca 08 00 60 09 00 15 16 05 00 01 15 16 05 00"
+	" 1b 24 04 01 02 4e 56 31 32 00 00 10 00 80 00 00 aa 00 38 9b 71 0c 01 00 00 00 00"
+	" 1e 24 05 01 00 00 05 d0 02 00 80 c6 13 00 80 c6 13 00 18 15 00 15 16 05 00 01 15 16 05 00"
+	" 1e 24 05 02 00 80 02 e0 01 00 80 97 06 00 80 97 06 00 08 07 00 15 16 05 00 01 15 16 05 00"
 	" 06 24 0d 01 01 01"
 	" 07 05 81 02 00 02 00"
 )
@@ -67,7 +67,8 @@ COMMIT = 0x0200
 STREAMING_INTERFACE = 0x0001
 PROBE_SIZE = 34
 FRAME_SIZES = {1: (1280, 720), 2: (640, 480)}
-LAST_PAYLOAD_SIZES = {1: 8306, 2: 24614}
+LAST_PAYLOAD_SIZES = {1: 6230, 2: 2078}
+NEUTRAL_CHROMA = 128
 FULL_PAYLOAD = 65534
 END_OF_FRAME = 0x02
 FRAME_ID = 0x01
@@ -141,7 +142,7 @@ class CameraProtocolTests(unittest.TestCase):
 		self.assertEqual(status, STATUS_SUCCESS)
 		self.assertEqual(probe[3], frame_index)
 		width, height = FRAME_SIZES[frame_index]
-		self.assertEqual(struct.unpack_from("<I", probe, 18)[0], width * height * 2)
+		self.assertEqual(struct.unpack_from("<I", probe, 18)[0], width * height * 3 // 2)
 		self.assertEqual(struct.unpack_from("<I", probe, 22)[0], REQUEST_LENGTH)
 		self.assertEqual(self.guest.control(0x21, SET_CUR, COMMIT, STREAMING_INTERFACE, PROBE_SIZE, probe_bytes(frame_index))[0], STATUS_SUCCESS)
 
@@ -161,13 +162,15 @@ class CameraProtocolTests(unittest.TestCase):
 		width, height = FRAME_SIZES[frame_index]
 		self.assertEqual([len(payload) for payload in payloads[:-1]], [FULL_PAYLOAD] * (len(payloads) - 1))
 		self.assertEqual(len(payloads[-1]), LAST_PAYLOAD_SIZES[frame_index])
-		self.assertEqual(sum(len(payload) - 2 for payload in payloads), width * height * 2)
+		frame = b"".join(payload[2:] for payload in payloads)
+		self.assertEqual(len(frame), width * height * 3 // 2)
 		frame_id = payloads[0][1] & FRAME_ID
 		for payload in payloads:
 			self.assertEqual(payload[0], 2)
 			self.assertEqual(payload[1] & ~END_OF_FRAME, 0x80 | frame_id)
 		self.assertEqual([payload[1] & END_OF_FRAME for payload in payloads], [0] * (len(payloads) - 1) + [END_OF_FRAME])
-		self.assertEqual(len(set(b"".join(payload[2:] for payload in payloads))), 1)
+		self.assertEqual(len(set(frame[:width * height])), 1)
+		self.assertEqual(set(frame[width * height:]), {NEUTRAL_CHROMA})
 		return frame_id
 
 	def test_handshake_order_and_caps(self):
@@ -184,7 +187,7 @@ class CameraProtocolTests(unittest.TestCase):
 		self.assertEqual(set(ep_info[index] for index in range(32) if index not in (0, 16, 17)), {255})
 		self.assertEqual(ep_info[64 + 17], 1)
 		self.assertEqual(struct.unpack_from("<H", ep_info, 96 + 2 * 17)[0], 512)
-		self.assertEqual(connect, struct.pack("<BBBBHHH", 2, 0xEF, 0x02, 0x01, 0x1209, 0x0001, 0x0100))
+		self.assertEqual(connect, struct.pack("<BBBBHHH", 2, 0xEF, 0x02, 0x01, 0x1209, 0x0001, 0x0101))
 
 	def test_descriptors_match_the_requirements(self):
 		self.plug()

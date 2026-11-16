@@ -10,7 +10,11 @@
 #include "capture.h"
 
 #define FRAMES_PER_SECOND 30
-#define BYTES_PER_PIXEL 2
+#define FRAME_PIXEL_FORMAT kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+#define LUMA_PLANE 0
+#define CHROMA_PLANE 1
+#define PLANE_COUNT 2
+#define NEUTRAL_CHROMA 128
 #define PATTERN_FIRST_LEVEL 16
 #define PATTERN_LEVELS 200
 #define PATTERN_REFUSALS 2
@@ -90,7 +94,7 @@ static CVPixelBufferRef create_frame_buffer(uint32_t size)
 	NSDictionary *attributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
 	CVPixelBufferRef buffer = NULL;
 
-	CVPixelBufferCreate(kCFAllocatorDefault, size_width(size), size_height(size), kCVPixelFormatType_422YpCbCr8_yuvs, (__bridge CFDictionaryRef)attributes, &buffer);
+	CVPixelBufferCreate(kCFAllocatorDefault, size_width(size), size_height(size), FRAME_PIXEL_FORMAT, (__bridge CFDictionaryRef)attributes, &buffer);
 	return buffer;
 }
 
@@ -99,7 +103,7 @@ static void store_camera_frame(CVPixelBufferRef buffer)
 	uint32_t size = atomic_load(&target_size);
 	CVPixelBufferRef scaled;
 
-	if (pack_size(CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer)) == size && CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_422YpCbCr8_yuvs) {
+	if (pack_size(CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer)) == size && CVPixelBufferGetPixelFormatType(buffer) == FRAME_PIXEL_FORMAT) {
 		store_frame(buffer);
 		return;
 	}
@@ -235,7 +239,7 @@ static void run_session(uint32_t size)
 
 	[session beginConfiguration];
 	output.videoSettings = @{
-		(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_422YpCbCr8_yuvs),
+		(id)kCVPixelBufferPixelFormatTypeKey: @(FRAME_PIXEL_FORMAT),
 		(id)kCVPixelBufferWidthKey: @(size_width(size)),
 		(id)kCVPixelBufferHeightKey: @(size_height(size)),
 	};
@@ -292,7 +296,8 @@ static void emit_pattern_frame(void)
 	if (!buffer)
 		return;
 	CVPixelBufferLockBaseAddress(buffer, 0);
-	memset(CVPixelBufferGetBaseAddress(buffer), PATTERN_FIRST_LEVEL + pattern_count % PATTERN_LEVELS, CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer));
+	memset(CVPixelBufferGetBaseAddressOfPlane(buffer, LUMA_PLANE), PATTERN_FIRST_LEVEL + pattern_count % PATTERN_LEVELS, CVPixelBufferGetBytesPerRowOfPlane(buffer, LUMA_PLANE) * CVPixelBufferGetHeightOfPlane(buffer, LUMA_PLANE));
+	memset(CVPixelBufferGetBaseAddressOfPlane(buffer, CHROMA_PLANE), NEUTRAL_CHROMA, CVPixelBufferGetBytesPerRowOfPlane(buffer, CHROMA_PLANE) * CVPixelBufferGetHeightOfPlane(buffer, CHROMA_PLANE));
 	CVPixelBufferUnlockBaseAddress(buffer, 0);
 	pattern_count++;
 	store_frame(buffer);
@@ -402,7 +407,6 @@ bool capture_active(void)
 
 bool capture_copy_frame(uint8_t *destination, uint16_t width, uint16_t height, uint64_t *sequence)
 {
-	size_t row_bytes = (size_t)width * BYTES_PER_PIXEL;
 	CVPixelBufferRef buffer;
 	uint64_t buffer_sequence;
 	bool copied = false;
@@ -414,10 +418,14 @@ bool capture_copy_frame(uint8_t *destination, uint16_t width, uint16_t height, u
 	if (!buffer)
 		return false;
 	if (CVPixelBufferGetWidth(buffer) == width && CVPixelBufferGetHeight(buffer) == height && CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
-		const uint8_t *source = CVPixelBufferGetBaseAddress(buffer);
-		size_t stride = CVPixelBufferGetBytesPerRow(buffer);
-		for (size_t row = 0; row < height; row++)
-			memcpy(destination + row * row_bytes, source + row * stride, row_bytes);
+		for (size_t plane = 0; plane < PLANE_COUNT; plane++) {
+			const uint8_t *source = CVPixelBufferGetBaseAddressOfPlane(buffer, plane);
+			size_t stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
+			size_t rows = plane == CHROMA_PLANE ? height / 2 : height;
+			for (size_t row = 0; row < rows; row++)
+				memcpy(destination + row * width, source + row * stride, width);
+			destination += rows * width;
+		}
 		CVPixelBufferUnlockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly);
 		copied = true;
 	}
