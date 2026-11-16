@@ -1,0 +1,19 @@
+[project]
+name = "wn"
+dynamic = ["version"]
+description = "Run Windows on Apple silicon Macs with UTM"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+wn = "wn.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "wn/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wn"]
