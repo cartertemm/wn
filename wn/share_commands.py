@@ -195,20 +195,21 @@ class ShareCommands:
 		elif not self.agent_running():
 			raise ShareError("the wn agent is installed but not running. Run python3 -m wn agent start, then run wn {} again".format(SHARE_COMMAND))
 
-	def _prepare_guest(self, name, vm_path, current):
-		"""Run prepare.ps1. A remove marker left by a failed first share has no supervisor to process it, so clean the guest and prepare again."""
-		params = {"name": name, "vm_path": vm_path}
-		state = self._run_script(PREPARE_SCRIPT, params, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
-		if state["removing"] and not shares_for_vm(current, self.config.vm_name):
-			self._run_script(CLEANUP_SCRIPT, {}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
-			state = self._run_script(PREPARE_SCRIPT, params, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+	def _prepare_guest(self, name, vm_path):
+		"""Run prepare.ps1. A share folder that Windows still removes has files to upload, so make sure the supervisor runs to upload them."""
+		state = self._run_script(PREPARE_SCRIPT, {"name": name, "vm_path": vm_path}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		if state["removing"]:
+			self._run_script(TASK_SCRIPT, {"restart": False}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+			raise ShareError("Windows is still removing a share named {} and has files in its cache to upload first. Run wn {} again later".format(name, SHARE_COMMAND))
 		return state
 
-	def _refuse_guest_state(self, state, name, vm_path):
-		if state["removing"]:
-			raise ShareError("Windows is still removing a share named {}. Wait a minute and try again".format(name))
+	def _refuse_guest_state(self, state, vm_path):
 		if not state["parent_exists"]:
 			raise ShareError("the folder that holds {} does not exist in Windows. Create it first".format(vm_path))
+		if state["linked_parent"]:
+			raise ShareError("{} in Windows is a link or mount point. Pick a path with no link in it".format(state["linked_parent"]))
+		if state["system_folder"]:
+			raise ShareError("{} is inside {} in Windows. Pick a folder outside it".format(vm_path, state["system_folder"]))
 		problems = {
 			FILES_PATH_STATE: "{} has files in Windows. Pick an empty or new folder",
 			JUNCTION_PATH_STATE: "{} is already a mount point in Windows",
@@ -307,8 +308,8 @@ class ShareCommands:
 		self.install_binaries(tools, self.paths)
 		self.ensure_keys(self.paths)
 		share = dataclasses.replace(share, port=pick_port(current, self.can_bind))
-		state = self._prepare_guest(name, vm_path, current)
-		self._refuse_guest_state(state, name, vm_path)
+		state = self._prepare_guest(name, vm_path)
+		self._refuse_guest_state(state, vm_path)
 		installed_winfsp = self._install_guest_tools(state, tools)
 		script_changed = self._push_common_files(state)
 		folder = guest_share_folder(name)
@@ -409,19 +410,21 @@ class ShareCommands:
 				raise
 
 	def _wait_for_removal(self, name):
-		"""Wait until a good status read no longer lists the share. Pending uploads extend the wait without limit."""
+		"""Wait until a good status read no longer lists the share, and return that status. While Windows reports the share as removing, wait without limit."""
 		deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
 		next_progress = self.clock()
 		while True:
 			guest = self._guest_status()
 			if guest is not None and name not in guest:
-				return
+				return guest
 			entry = guest.get(name) if guest is not None else None
-			pending = entry.get("pending") if _state_of(entry) == REMOVING_STATE else None
-			if isinstance(pending, int) and pending > 0:
+			if _state_of(entry) == REMOVING_STATE:
 				deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
 				if self.clock() >= next_progress:
-					self._print("Waiting for Windows to upload {} files to the Mac. Press Ctrl+C to stop waiting. The share then stays in place until you run wn {} {} again.".format(pending, REMOVE_COMMAND, name))
+					pending = entry.get("pending")
+					detail = entry.get("detail")
+					waiting = "Waiting for Windows to upload {} files to the Mac".format(pending) if isinstance(pending, int) else "Waiting for Windows to finish its uploads to the Mac" + (" ({})".format(detail) if detail else "")
+					self._print("{}. Press Ctrl+C to stop waiting. The share then stays in place until you run wn {} {} again.".format(waiting, REMOVE_COMMAND, name))
 					next_progress = self.clock() + REMOVE_PROGRESS_SECONDS
 			elif self.clock() >= deadline:
 				raise ShareError("Windows did not remove the share within {} s. Windows reports: {}. Run wn {} {} again later".format(REMOVE_TIMEOUT_SECONDS, _reported(entry), REMOVE_COMMAND, name))
@@ -436,9 +439,13 @@ class ShareCommands:
 			self._print("VM '{}' no longer exists in UTM, so only the Mac side was removed".format(self.config.vm_name))
 			return
 		self._ask_windows_to_remove(share.name)
-		self._wait_for_removal(share.name)
+		guest = self._wait_for_removal(share.name)
 		self._remove_mac_side(share.name)
 		self._print("Removed {}. {} is gone from Windows. The files stay in {} on the Mac.".format(share.name, share.vm_path, share.mac_path))
-		if not shares_for_vm(load_config().shares, self.config.vm_name):
+		if shares_for_vm(load_config().shares, self.config.vm_name):
+			return
+		if guest:
+			self._print("Windows still lists other wn shares ({}), so wn kept its share files and the wn-shares task in Windows.".format(", ".join(sorted(guest))))
+		else:
 			self._run_script(CLEANUP_SCRIPT, {}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 			self._print("Removed the wn share files and the wn-shares task from Windows. WinFsp stays installed. To remove it, open Settings > Apps in Windows.")

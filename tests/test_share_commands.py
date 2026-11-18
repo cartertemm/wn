@@ -45,6 +45,8 @@ def prepare_result(**changes):
 		"parent_exists": True,
 		"vm_path": "missing",
 		"removing": False,
+		"linked_parent": None,
+		"system_folder": None,
 	}
 	result.update(changes)
 	return result
@@ -403,6 +405,8 @@ class AddShareTests(ShareCommandTestCase):
 			(prepare_result(vm_path="junction"), VM_PATH + " is already a mount point in Windows"),
 			(prepare_result(vm_path="file"), VM_PATH + " is a file in Windows"),
 			(prepare_result(parent_exists=False), "the folder that holds " + VM_PATH + " does not exist in Windows. Create it first"),
+			(prepare_result(linked_parent="C:\\Users\\c"), "C:\\Users\\c in Windows is a link or mount point. Pick a path with no link in it"),
+			(prepare_result(system_folder="C:\\Windows"), VM_PATH + " is inside C:\\Windows in Windows. Pick a folder outside it"),
 		)
 		for result, message in cases:
 			with self.subTest(message=message):
@@ -412,35 +416,11 @@ class AddShareTests(ShareCommandTestCase):
 				self.assertEqual(self.runs(), [PREPARE_SCRIPT])
 				self.assertEqual(self.pushes(), [])
 
-	def test_share_that_windows_is_removing_is_refused(self):
-		other = self.make_mac_folder("Other")
-		update_config_file({"shares": [Share("Other", "Windows", "mac_to_vm", other, "C:\\Other", False, FIRST_PORT).to_dict()]})
+	def test_share_that_windows_is_removing_starts_the_supervisor_and_is_refused(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(removing=True)
-		before = self.config_text()
-		with self.assertRaises(ShareError) as caught:
-			self.add()
-		self.assertEqual(str(caught.exception), "Windows is still removing a share named Projects. Wait a minute and try again")
-		self.assertEqual(self.config_text(), before)
-		self.assertEqual(self.runs(), [PREPARE_SCRIPT])
-		self.assertEqual(self.pushes(), [])
-
-	def test_remove_marker_without_other_shares_is_cleaned(self):
-		self.runner.results[PREPARE_SCRIPT] = prepare_result(removing=True)
-
-		def marker_gone(call):
-			if call[:2] == ("run", CLEANUP_SCRIPT):
-				self.runner.results[PREPARE_SCRIPT] = prepare_result()
-
-		self.runner.on_call = marker_gone
-		update_config_file({"shares": [Share("Archive", "Test", "mac_to_vm", "/Archive", "C:\\Archive", False, FIRST_PORT).to_dict()]})
-		self.add()
-		self.assertEqual(self.runs(), [PREPARE_SCRIPT, CLEANUP_SCRIPT, PREPARE_SCRIPT, TASK_SCRIPT])
-		self.assertEqual([share.name for share in load_config().shares], ["Archive", SHARE_NAME])
-
-	def test_remove_marker_that_stays_after_cleaning_is_refused(self):
-		self.runner.results[PREPARE_SCRIPT] = prepare_result(removing=True)
-		self.assert_refused_with_config_unchanged("Windows is still removing a share named Projects. Wait a minute and try again")
-		self.assertEqual(self.runs(), [PREPARE_SCRIPT, CLEANUP_SCRIPT, PREPARE_SCRIPT])
+		self.assert_refused_with_config_unchanged("Windows is still removing a share named Projects and has files in its cache to upload first. Run wn share again later")
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, TASK_SCRIPT])
+		self.assertEqual(self.params_of(TASK_SCRIPT), {"restart": False})
 		self.assertEqual(self.pushes(), [])
 
 	def test_empty_vm_folder_is_accepted(self):
@@ -841,6 +821,7 @@ class RemoveTests(SavedShareTestCase):
 		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
 		self.assertEqual(self.runs(), [CLEANUP_SCRIPT])
 		self.assertEqual(self.output.getvalue().splitlines(), [
+			"Waiting for Windows to finish its uploads to the Mac (waiting for rclone to report its uploads). Press Ctrl+C to stop waiting. The share then stays in place until you run wn unshare Projects again.",
 			"Removed Projects. {} is gone from Windows. The files stay in {} on the Mac.".format(VM_PATH, self.mac_folder),
 			"Removed the wn share files and the wn-shares task from Windows. WinFsp stays installed. To remove it, open Settings > Apps in Windows.",
 		])
@@ -877,6 +858,15 @@ class RemoveTests(SavedShareTestCase):
 		progress = "Waiting for Windows to upload 3 files to the Mac. Press Ctrl+C to stop waiting. The share then stays in place until you run wn unshare Projects again."
 		self.assertEqual(lines.count(progress), 600 // REMOVE_PROGRESS_SECONDS)
 		self.assertEqual(lines[0], progress)
+
+	def test_removing_without_a_count_waits_without_a_time_limit(self):
+		self.save(self.share())
+		removing = {SHARE_NAME: {"state": "removing", "detail": "", "pid": 1}}
+		self.runner.files[GUEST_STATUS_FILE] = lambda: status_text({}) if self.clock.now >= 600 else status_text(removing)
+		self.assertIsNone(self.remove())
+		self.assertGreaterEqual(self.clock.now, 600)
+		self.assertEqual(load_config().shares, ())
+		self.assertIn("Waiting for Windows to finish its uploads to the Mac. Press Ctrl+C to stop waiting.", self.output.getvalue())
 
 	def test_ctrl_c_while_waiting_keeps_the_mac_side(self):
 		self.save(self.share())
@@ -919,6 +909,15 @@ class RemoveTests(SavedShareTestCase):
 		self.remove("Other")
 		self.assertEqual(self.runs(), [CLEANUP_SCRIPT])
 		self.assertEqual([share.name for share in load_config().shares], ["Archive"])
+
+
+	def test_cleanup_waits_while_windows_lists_other_shares(self):
+		self.save(self.share())
+		self.guest_reports({"Leftover": {"state": "removing", "detail": "", "pid": 1}})
+		self.remove()
+		self.assertEqual(load_config().shares, ())
+		self.assertEqual(self.runs(), [])
+		self.assertEqual(self.output.getvalue().splitlines()[-1], "Windows still lists other wn shares (Leftover), so wn kept its share files and the wn-shares task in Windows.")
 
 
 if __name__ == "__main__":
