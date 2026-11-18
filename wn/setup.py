@@ -20,6 +20,7 @@ from wn.payload import BATTERY_DRIVER, build_payload_iso
 from wn.qcow2 import create_empty_qcow2
 from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import looks_drawn, take_screendump
+from wn.shares import shares_for_vm
 from wn.unattend import DEFAULT_EDITION, SETUP_DONE_MARKER, SETUP_DONE_TEXT, SETUP_REBOOTING_TEXT, UnattendOptions, computer_name_for, mac_time_zone
 from wn.utm_config import (
 	BUNDLE_SUFFIX,
@@ -398,9 +399,10 @@ class Installer:
 		self.report("Wrote {}".format(path))
 
 	def update_agent(self):
-		vm_name = load_config().vm_name
+		config = load_config()
+		vm_name = config.vm_name
 		if not self.options.battery and not self.options.camera:
-			if vm_name == self.options.name and os.path.exists(launch_agent_path()):
+			if vm_name == self.options.name and os.path.exists(launch_agent_path()) and not shares_for_vm(config.shares, vm_name):
 				self.output.write("If you no longer want the wn agent, run python3 -m wn agent --uninstall\n")
 			return
 		if vm_name == self.options.name:

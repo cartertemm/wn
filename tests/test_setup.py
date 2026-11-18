@@ -335,6 +335,18 @@ class RunTests(InstallerTestCase):
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
 			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows"})
 
+	def test_no_battery_and_no_camera_with_shares_does_not_suggest_uninstall(self):
+		share = {"name": "Projects", "vm": "Windows", "direction": "mac_to_vm", "mac_path": "/Users/you/Projects", "vm_path": "C:\\Users\\you\\Projects", "read_only": False, "port": 47321}
+		config_file_path = os.path.join(self.directory.name, ".config", "wn", "config.json")
+		os.makedirs(os.path.dirname(config_file_path))
+		with open(config_file_path, "w") as config_file:
+			json.dump({"vm_name": "Windows", "shares": [share]}, config_file)
+		agent_path = os.path.join(self.directory.name, "Library", "LaunchAgents", "com.wn.agent.plist")
+		os.makedirs(os.path.dirname(agent_path))
+		open(agent_path, "w").close()
+		self.installer(battery=False, camera=False).run()
+		self.assertNotIn("--uninstall", self.output.getvalue())
+
 	def test_no_battery_and_no_camera_without_the_agent_says_nothing_about_it(self):
 		self.installer(battery=False, camera=False).run()
 		self.assertNotIn("--uninstall", self.output.getvalue())
