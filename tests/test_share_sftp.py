@@ -686,10 +686,39 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.tick()
 		process = self.popen.processes[0]
 		self.assertNotIn(None, process.wait_timeouts)
-		self.assertEqual(supervisor.unreaped, [process])
+		self.assertEqual(supervisor.unreaped, [(process, self.paths.pid_file("Projects"))])
 		process.returncode = -signal.SIGKILL
 		supervisor.tick()
 		self.assertEqual(supervisor.unreaped, [])
+
+	def test_a_stuck_server_keeps_its_pid_file_until_it_is_reaped(self):
+		self.write_shares(self.share_item())
+		self.popen.options = {"ignores_sigterm": True, "ignores_sigkill": True}
+		supervisor = self.supervisor()
+		supervisor.tick()
+		self.present = False
+		supervisor.tick()
+		supervisor.tick()
+		with open(self.paths.pid_file("Projects")) as handle:
+			self.assertEqual(handle.read(), "{}\n".format(FIRST_PID))
+		self.popen.processes[0].returncode = -signal.SIGKILL
+		supervisor.tick()
+		self.assertFalse(os.path.exists(self.paths.pid_file("Projects")))
+
+	def test_reaping_a_stuck_server_keeps_the_pid_file_of_its_successor(self):
+		self.write_shares(self.share_item())
+		self.popen.options = {"ignores_sigterm": True, "ignores_sigkill": True}
+		supervisor = self.supervisor()
+		supervisor.tick()
+		self.present = False
+		supervisor.tick()
+		self.present = True
+		self.popen.options = {}
+		supervisor.tick()
+		self.popen.processes[0].returncode = -signal.SIGKILL
+		supervisor.tick()
+		with open(self.paths.pid_file("Projects")) as handle:
+			self.assertEqual(handle.read(), "{}\n".format(FIRST_PID + 1))
 
 	def test_stop_terminates_and_removes_the_state_file(self):
 		self.write_shares(self.share_item())
@@ -711,6 +740,46 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.run()
 		self.assertEqual(kill.calls, [(ORPHAN_PID, 0)])
 		self.assertFalse(os.path.exists(self.paths.pid_file("Old")))
+
+	def test_run_logs_each_new_tick_error_once_and_keeps_ticking(self):
+		supervisor = self.supervisor(run=fake_ps(""))
+		errors = [OSError(28, "No space left on device")] * 3 + [ValueError("bad state")]
+		waits = []
+		def tick():
+			if not errors:
+				supervisor.stopping.set()
+				return
+			raise errors.pop(0)
+		supervisor.tick = tick
+		supervisor.wait = waits.append
+		supervisor.run()
+		self.assertEqual(errors, [])
+		self.assertEqual(waits, [SUPERVISOR_TICK] * 5)
+		self.assertEqual(self.log.getvalue(), (
+			"shares: unexpected error, trying again in 2 s: [Errno 28] No space left on device\n"
+			"shares: unexpected error, trying again in 2 s: bad state\n"
+		))
+
+	def test_run_logs_an_orphan_cleanup_error_and_keeps_going(self):
+		with open(self.paths.pid_file("Old"), "w") as handle:
+			handle.write("{}\n".format(ORPHAN_PID))
+		ticks = []
+		def run(argv, capture_output, text):
+			raise OSError(35, "Resource temporarily unavailable")
+		supervisor = self.supervisor(run=run, kill=FakeKill())
+		def tick():
+			ticks.append(True)
+			supervisor.stopping.set()
+		supervisor.tick = tick
+		supervisor.run()
+		self.assertEqual(ticks, [True])
+		self.assertEqual(self.log.getvalue(), "shares: cannot stop the share servers of a previous agent: [Errno 35] Resource temporarily unavailable\n")
+
+	def test_run_ends_on_keyboard_interrupt(self):
+		supervisor = self.supervisor(run=fake_ps(""))
+		supervisor.tick = mock.Mock(side_effect=KeyboardInterrupt)
+		with self.assertRaises(KeyboardInterrupt):
+			supervisor.run()
 
 
 class KillOrphanServersTests(SharePathsTestCase):

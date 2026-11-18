@@ -34,7 +34,6 @@ from wn.battery_file import BatteryFile
 from wn.battery_sync import BLOCK_SIZE, decode_block
 from wn.cli import main
 from wn.config import Config
-from wn.share_sftp import SftpServerSupervisor
 
 UPDATED = "2026-11-11T12:00:00Z"
 CHARGING_NO_ESTIMATE = (
@@ -955,34 +954,6 @@ class AgentShareTests(unittest.TestCase):
 
 	def test_uninstall_without_shares_does_not_warn(self):
 		self.assertNotIn("still in the config", self.uninstall([]))
-
-
-class ShareTickErrorTests(unittest.TestCase):
-	def setUp(self):
-		self.home = tempfile.TemporaryDirectory()
-		self.addCleanup(self.home.cleanup)
-		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
-		patcher.start()
-		self.addCleanup(patcher.stop)
-
-	def test_logs_each_new_error_once_and_keeps_ticking(self):
-		log = io.StringIO()
-		supervisor = SftpServerSupervisor(log, run=mock.Mock(), kill=mock.Mock())
-		errors = [OSError(28, "No space left on device")] * 3 + [ValueError("bad state")]
-		def tick():
-			if not errors:
-				supervisor.stopping.set()
-				return
-			raise errors.pop(0)
-		supervisor.tick = tick
-		supervisor.wait = lambda seconds: None
-		agent.log_share_tick_errors(supervisor, log)
-		supervisor.run()
-		self.assertEqual(errors, [])
-		self.assertEqual(log.getvalue(), (
-			"shares: unexpected error, trying again in 2 s: [Errno 28] No space left on device\n"
-			"shares: unexpected error, trying again in 2 s: bad state\n"
-		))
 
 
 if __name__ == "__main__":

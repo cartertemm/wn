@@ -257,14 +257,18 @@ def _is_alive(pid, kill):
 	return True
 
 
+def _read_pid(path):
+	try:
+		with open(path) as handle:
+			return int(handle.read().strip())
+	except (OSError, ValueError):
+		return None
+
+
 def kill_orphan_servers(paths, run=subprocess.run, kill=os.kill, sleep=time.sleep, clock=time.monotonic):
 	"""Stop the rclone servers that a previous agent left running, by the PIDs in their PID files."""
 	for pid_path in glob.glob(os.path.join(glob.escape(paths.root), "*" + PID_SUFFIX)):
-		try:
-			with open(pid_path) as handle:
-				pid = int(handle.read().strip())
-		except (OSError, ValueError):
-			pid = None
+		pid = _read_pid(pid_path)
 		if pid is not None and _is_alive(pid, kill) and _is_wn_server(pid, paths, run):
 			kill(pid, signal.SIGTERM)
 			deadline = clock() + SERVER_STOP_SECONDS
@@ -310,6 +314,7 @@ class SftpServerSupervisor:
 		self.last_clocks = None
 		self.last_state = None
 		self.unreaped = []
+		self.last_error = None
 
 	def _write(self, message):
 		self.log.write(message + "\n")
@@ -360,15 +365,17 @@ class SftpServerSupervisor:
 			server.process.terminate()
 		for server in running:
 			process = server.process
+			pid_file = self.paths.pid_file(server.share.name)
 			try:
 				process.wait(timeout=SERVER_STOP_SECONDS)
+				remove_file(pid_file)
 			except subprocess.TimeoutExpired:
 				process.kill()
 				try:
 					process.wait(timeout=SERVER_STOP_SECONDS)
+					remove_file(pid_file)
 				except subprocess.TimeoutExpired:
-					self.unreaped.append(process)
-			remove_file(self.paths.pid_file(server.share.name))
+					self.unreaped.append((process, pid_file))
 			server.process = None
 			server.restart_at = now
 
@@ -387,7 +394,13 @@ class SftpServerSupervisor:
 				self.servers[name] = ShareServer(share)
 
 	def _poll(self, now):
-		self.unreaped = [process for process in self.unreaped if process.poll() is None]
+		unreaped = []
+		for process, pid_file in self.unreaped:
+			if process.poll() is None:
+				unreaped.append((process, pid_file))
+			elif _read_pid(pid_file) == process.pid:
+				remove_file(pid_file)
+		self.unreaped = unreaped
 		for server in self.servers.values():
 			if server.process is None:
 				continue
@@ -447,10 +460,19 @@ class SftpServerSupervisor:
 					self._start(server, now)
 		self._write_state()
 
+	def _log_errors(self, action, context):
+		try:
+			action()
+		except Exception as error:
+			message = "{}{}: {}".format(SUPERVISOR_LOG_PREFIX, context, error)
+			if message != self.last_error:
+				self.last_error = message
+				self._write(message)
+
 	def run(self):
-		kill_orphan_servers(self.paths, self.run_command, self.kill)
+		self._log_errors(lambda: kill_orphan_servers(self.paths, self.run_command, self.kill), "cannot stop the share servers of a previous agent")
 		while not self.stopping.is_set():
-			self.tick()
+			self._log_errors(self.tick, "unexpected error, trying again in {} s".format(SUPERVISOR_TICK_SECONDS))
 			self.wait(SUPERVISOR_TICK_SECONDS)
 
 	def start(self):

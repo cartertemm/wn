@@ -19,7 +19,7 @@ from wn.battery_file import BatteryFile, battery_file_path, battery_writer
 from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, POLL_SECONDS, WRITE_INTERVAL_SECONDS, battery_reading, run_sync_loop, sync_message
 from wn.errors import WnError
 from wn.qmp import qmp_client_for
-from wn.share_sftp import SERVING_STATE, SUPERVISOR_LOG_PREFIX, SUPERVISOR_TICK_SECONDS, SftpServerSupervisor, read_mac_state, share_paths
+from wn.share_sftp import SERVING_STATE, SftpServerSupervisor, read_mac_state, share_paths
 from wn.shares import HOST_ADDRESS, REMOVE_COMMAND, shares_for_vm
 from wn.utm_config import camera_socket_file
 
@@ -319,25 +319,6 @@ class CameraSupervisor:
 			self.thread.join()
 
 
-def log_share_tick_errors(supervisor, log):
-	"""Make an unexpected error in a share supervisor tick a log line, so the supervisor thread keeps running."""
-	tick = supervisor.tick
-	last_message = None
-
-	def guarded_tick():
-		nonlocal last_message
-		try:
-			tick()
-		except Exception as error:
-			message = "{}unexpected error, trying again in {} s: {}".format(SUPERVISOR_LOG_PREFIX, SUPERVISOR_TICK_SECONDS, error)
-			if message != last_message:
-				last_message = message
-				log.write(message + "\n")
-				log.flush()
-
-	supervisor.tick = guarded_tick
-
-
 def serve(config, output, wait=None, popen=subprocess.Popen):
 	"""Run the battery sync loop, the camera helper and the share servers until Ctrl+C or SIGTERM, with the PID in the pid file while it runs."""
 	shares = shares_for_vm(config.shares, config.vm_name)
@@ -351,7 +332,6 @@ def serve(config, output, wait=None, popen=subprocess.Popen):
 	previous_handler = signal.signal(signal.SIGTERM, _stop_on_sigterm)
 	camera = CameraSupervisor(camera_command(config), output, popen) if config.camera else None
 	share_supervisor = SftpServerSupervisor(output, popen=popen)
-	log_share_tick_errors(share_supervisor, output)
 	try:
 		output.write("Running the agent in the foreground with PID {}. Press Ctrl+C to stop\n".format(os.getpid()))
 		output.flush()
