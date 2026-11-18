@@ -126,6 +126,9 @@ class RemovalTests(unittest.TestCase):
 		self.assertLess(self.remove.index("rd /s /q"), self.remove.index("if (Test-Path -LiteralPath $Folder) {"))
 		self.assertLess(self.remove.index("Set-State $Name 'error' ($NotDeletedDetail -f $Folder)"), self.remove.index("$Status.Remove($Name)"))
 
+	def test_removal_accepts_a_junction_that_winfsp_removed_first(self):
+		self.assertIn("try { [IO.Directory]::Delete($share.mount_path) } catch { if (Test-Path -LiteralPath $share.mount_path) { throw } }", self.remove)
+
 	def test_startup_errors_do_not_end_the_supervisor(self):
 		self.assertRegex(self.text, r"\ntry \{\n(\t.*\n)*\tFind-Adopted\n\} catch \{\n")
 		self.assertNotIn("\nFind-Adopted\n", self.text)

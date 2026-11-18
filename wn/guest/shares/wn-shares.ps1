@@ -206,7 +206,9 @@ function Remove-Share($Name, $Folder) {
 			Set-State $Name 'blocked' ($LinkedParentDetail -f $linked) $null $null
 			return
 		}
-		if (Test-Junction $share.mount_path) { [IO.Directory]::Delete($share.mount_path) }
+		if (Test-Junction $share.mount_path) {
+			try { [IO.Directory]::Delete($share.mount_path) } catch { if (Test-Path -LiteralPath $share.mount_path) { throw } }
+		}
 	}
 	& cmd.exe /c rd /s /q ('\\?\' + $Folder)
 	$Processes.Remove($Name)
