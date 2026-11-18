@@ -7,12 +7,13 @@ $StatusFile = Join-Path $Root 'status.json'
 $LogFile = Join-Path $Root 'logs\wn-shares.log'
 $LoopSeconds = 5
 $MaxLogBytes = 10MB
-$CacheLineWaitSeconds = 150
 $StopWaitSeconds = 10
 $LogTailLines = 200
+$TailGrowthFactor = 4
 $JsonDepth = 4
 $CachePattern = '^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) .*vfs cache: cleaned: .* to upload (\d+), uploading (\d+)'
 $RcloneTimeFormat = 'yyyy/MM/dd HH:mm:ss'
+$LinkedParentDetail = '{0} is a link or mount point. Use a share path with no link in it'
 $Utf8 = New-Object System.Text.UTF8Encoding $false
 $Processes = @{}
 $Status = @{}
@@ -53,6 +54,26 @@ function Test-Junction($Path) {
 	return [bool]($item -and $item.LinkType -eq 'Junction')
 }
 
+function Find-LinkedParent($Path) {
+	$parent = Split-Path -Parent $Path
+	while ($parent) {
+		$item = Get-Item -LiteralPath $parent -Force -ErrorAction SilentlyContinue
+		if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $parent }
+		$parent = Split-Path -Parent $parent
+	}
+	return $null
+}
+
+function Test-CacheFiles($Folder) {
+	$vfs = Join-Path $Folder 'cache\vfs'
+	if (-not (Test-Path -LiteralPath $vfs)) { return $false }
+	try {
+		return [bool](Get-ChildItem -LiteralPath $vfs -Recurse -File -Force | Select-Object -First 1)
+	} catch {
+		return $true
+	}
+}
+
 function Read-Share($Folder) {
 	Get-Content -Raw -LiteralPath (Join-Path $Folder 'share.json') | ConvertFrom-Json
 }
@@ -91,17 +112,25 @@ function Get-ExitText($Process) {
 	return [string]$code
 }
 
+function Get-ExitDetail($Process, $Folder) {
+	$lastLine = Get-Content -LiteralPath (Join-Path $Folder 'mount.log') -Tail 1 -ErrorAction SilentlyContinue
+	return ('rclone exited with code {0}; last log line: {1}' -f (Get-ExitText $Process), $lastLine)
+}
+
 function Get-PendingUploads($Folder, $Since) {
 	$log = Join-Path $Folder 'mount.log'
 	if (-not (Test-Path -LiteralPath $log)) { return $null }
-	$pending = $null
-	foreach ($line in Get-Content -LiteralPath $log -Tail $LogTailLines) {
-		if ($line -match $CachePattern) {
-			$time = [DateTime]::ParseExact($Matches[1], $RcloneTimeFormat, [Globalization.CultureInfo]::InvariantCulture)
-			if ($time -gt $Since) { $pending = [int]$Matches[2] + [int]$Matches[3] }
+	for ($count = $LogTailLines; ; $count *= $TailGrowthFactor) {
+		$lines = @(Get-Content -LiteralPath $log -Tail $count)
+		for ($index = $lines.Count - 1; $index -ge 0; $index--) {
+			if ($lines[$index] -match $CachePattern) {
+				$time = [DateTime]::ParseExact($Matches[1], $RcloneTimeFormat, [Globalization.CultureInfo]::InvariantCulture)
+				if ($time -gt $Since) { return [int]$Matches[2] + [int]$Matches[3] }
+				return $null
+			}
 		}
+		if ($lines.Count -lt $count) { return $null }
 	}
-	return $pending
 }
 
 function Find-Adopted {
@@ -117,26 +146,64 @@ function Find-Adopted {
 	}
 }
 
+function Start-Mount($Name, $Share, $Folder) {
+	$linked = Find-LinkedParent $Share.mount_path
+	if ($linked) {
+		Set-State $Name 'blocked' ($LinkedParentDetail -f $linked) $null $null
+		return $null
+	}
+	$item = Get-Item -LiteralPath $Share.mount_path -Force -ErrorAction SilentlyContinue
+	if ($item -and $item.LinkType -eq 'Junction') {
+		[IO.Directory]::Delete($Share.mount_path)
+	} elseif ($item -and ((-not $item.PSIsContainer) -or (Get-ChildItem -LiteralPath $Share.mount_path -Force | Select-Object -First 1))) {
+		Set-State $Name 'blocked' ('{0} exists as a local folder with files. Move them out and delete the folder' -f $Share.mount_path) $null $null
+		return $null
+	} elseif ($item) {
+		Remove-Item -LiteralPath $Share.mount_path -Force
+	}
+	Limit-Log (Join-Path $Folder 'mount.log')
+	$process = Start-Process -FilePath $Rclone -ArgumentList (Get-MountArguments $Share $Folder) -WindowStyle Hidden -PassThru
+	$null = $process.Handle
+	$Processes[$Name] = $process
+	return $process
+}
+
 function Remove-Share($Name, $Folder) {
 	$process = $Processes[$Name]
-	if ($process -and -not $process.HasExited) {
-		$removed = (Get-Item -LiteralPath (Join-Path $Folder 'remove')).LastWriteTime
-		$since = $removed.AddTicks(-($removed.Ticks % [TimeSpan]::TicksPerSecond))
+	$shareFile = Join-Path $Folder 'share.json'
+	if ($process -and $process.HasExited) {
+		$Processes.Remove($Name)
+		Set-State $Name 'removing' (Get-ExitDetail $process $Folder) $null $null
+		return
+	}
+	if (-not $process -and (Test-Path -LiteralPath $shareFile) -and (Test-CacheFiles $Folder)) {
+		$process = Start-Mount $Name (Read-Share $Folder) $Folder
+		if ($process) { Set-State $Name 'removing' 'starting rclone to upload the files in its cache' $process.Id $null }
+		return
+	}
+	if ($process) {
+		$since = (Get-Item -LiteralPath (Join-Path $Folder 'remove')).LastWriteTime
+		if ($process.StartTime -gt $since) { $since = $process.StartTime }
+		$since = $since.AddTicks(-($since.Ticks % [TimeSpan]::TicksPerSecond))
 		$pending = Get-PendingUploads $Folder $since
-		if ($null -eq $pending) { $pending = $Status[$Name].pending }
 		if ($pending -gt 0) {
 			Set-State $Name 'removing' ('{0} files to upload to the Mac' -f $pending) $process.Id $pending
 			return
 		}
-		if ($null -eq $pending -and ((Get-Date) - $removed).TotalSeconds -lt $CacheLineWaitSeconds) {
+		if ($null -eq $pending -and (Test-CacheFiles $Folder)) {
 			Set-State $Name 'removing' 'waiting for rclone to report its uploads' $process.Id $null
 			return
 		}
 		Stop-Process -Id $process.Id -Force
 		Wait-Process -Id $process.Id -Timeout $StopWaitSeconds -ErrorAction SilentlyContinue
 	}
-	if (Test-Path -LiteralPath (Join-Path $Folder 'share.json')) {
+	if (Test-Path -LiteralPath $shareFile) {
 		$share = Read-Share $Folder
+		$linked = Find-LinkedParent $share.mount_path
+		if ($linked) {
+			Set-State $Name 'blocked' ($LinkedParentDetail -f $linked) $null $null
+			return
+		}
 		if (Test-Junction $share.mount_path) { [IO.Directory]::Delete($share.mount_path) }
 	}
 	& cmd.exe /c rd /s /q ('\\?\' + $Folder)
@@ -158,23 +225,11 @@ function Update-Share($Name, $Folder) {
 	}
 	if ($process) {
 		$Processes.Remove($Name)
-		$lastLine = Get-Content -LiteralPath (Join-Path $Folder 'mount.log') -Tail 1 -ErrorAction SilentlyContinue
-		Set-State $Name 'waiting' ('rclone exited with code {0}; last log line: {1}' -f (Get-ExitText $process), $lastLine) $null $null
+		Set-State $Name 'waiting' (Get-ExitDetail $process $Folder) $null $null
 		return
 	}
-	$item = Get-Item -LiteralPath $share.mount_path -Force -ErrorAction SilentlyContinue
-	if ($item -and $item.LinkType -eq 'Junction') {
-		[IO.Directory]::Delete($share.mount_path)
-	} elseif ($item -and ((-not $item.PSIsContainer) -or (Get-ChildItem -LiteralPath $share.mount_path -Force | Select-Object -First 1))) {
-		Set-State $Name 'blocked' ('{0} exists as a local folder with files. Move them out and delete the folder' -f $share.mount_path) $null $null
-		return
-	} elseif ($item) {
-		Remove-Item -LiteralPath $share.mount_path -Force
-	}
-	Limit-Log (Join-Path $Folder 'mount.log')
-	$process = Start-Process -FilePath $Rclone -ArgumentList (Get-MountArguments $share $Folder) -WindowStyle Hidden -PassThru
-	$null = $process.Handle
-	$Processes[$Name] = $process
+	$process = Start-Mount $Name $share $Folder
+	if (-not $process) { return }
 	if ($Status[$Name].state -eq 'waiting') {
 		$Status[$Name].pid = $process.Id
 	} else {
@@ -182,10 +237,14 @@ function Update-Share($Name, $Folder) {
 	}
 }
 
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogFile) | Out-Null
-Limit-Log $LogFile
-Write-Log 'wn-shares started'
-Find-Adopted
+try {
+	New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogFile) | Out-Null
+	Limit-Log $LogFile
+	Write-Log 'wn-shares started'
+	Find-Adopted
+} catch {
+	Write-Log ('error: {0}' -f $_)
+}
 while ($true) {
 	foreach ($folder in @(Get-ChildItem -LiteralPath $SharesFolder -Directory -ErrorAction SilentlyContinue)) {
 		try {

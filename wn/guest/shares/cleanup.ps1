@@ -1,8 +1,17 @@
 $Root = 'C:\ProgramData\wn'
 $TaskName = 'wn-shares'
 $StopWaitSeconds = 10
+
+function Wait-TaskStopped {
+	for ($second = 0; $second -lt $StopWaitSeconds; $second++) {
+		if ((Get-ScheduledTask -TaskName $TaskName).State -ne 'Running') { return }
+		Start-Sleep -Seconds 1
+	}
+}
+
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 	Stop-ScheduledTask -TaskName $TaskName
+	Wait-TaskStopped
 	Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'")) {
