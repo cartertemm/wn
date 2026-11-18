@@ -310,7 +310,7 @@ class AgentTests(ShareCommandTestCase):
 	def test_installed_agent_that_is_not_running_is_refused_before_guest_changes(self):
 		with self.assertRaises(ShareError) as caught:
 			self.commands(agent_running=lambda: False).add_share(self.mac_folder, VM_PATH)
-		self.assertEqual(str(caught.exception), "the wn agent is installed but not running. Run python3 -m wn agent start, then run wn share again")
+		self.assertEqual(str(caught.exception), "the wn agent is installed but not running. Run wn agent start, then run wn share again")
 		self.assertEqual(self.runner.calls, [])
 		self.assertEqual(self.installs, [])
 		self.assertEqual(load_config().shares, ())
@@ -357,6 +357,7 @@ class AddShareTests(ShareCommandTestCase):
 
 	def test_fetch_offers_only_what_is_missing(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(rclone_sha256="0" * 64)
+		self.runner.results[FETCH_SCRIPT] = {"mismatch": None, "winfsp_exit": None, "winfsp_log": []}
 		open_during_fetch = []
 		self.runner.on_call = lambda call: open_during_fetch.append(self.offers[0].open) if call[:2] == ("run", FETCH_SCRIPT) else None
 		self.add()
@@ -384,8 +385,15 @@ class AddShareTests(ShareCommandTestCase):
 			"winfsp_name": WINFSP_SOURCE.file_name,
 		})
 		lines = self.output.getvalue().splitlines()
-		self.assertEqual(lines[-1], WINFSP_NOTICE)
 		self.assertEqual(lines.count(WINFSP_NOTICE), 1)
+		self.assertLess(lines.index(WINFSP_NOTICE), lines.index("Projects: {} is now at {} in Windows, read and write".format(self.mac_folder, VM_PATH)))
+
+	def test_winfsp_notice_prints_when_a_later_step_fails(self):
+		self.runner.results[PREPARE_SCRIPT] = prepare_result(winfsp="missing")
+		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "task failed")
+		with self.assertRaises(GuestScriptError):
+			self.add()
+		self.assertEqual(self.output.getvalue().splitlines(), [WINFSP_NOTICE])
 
 	def test_hash_mismatch_in_windows_stops(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(rclone_sha256=None)
@@ -398,12 +406,19 @@ class AddShareTests(ShareCommandTestCase):
 		self.runner.results[FETCH_SCRIPT] = {"mismatch": None, "winfsp_exit": 3010, "winfsp_log": ["restart required"]}
 		self.assert_refused_with_config_unchanged("WinFsp is installed but Windows needs a restart. Restart Windows, then run wn share again")
 		self.assertEqual(self.pushes(), [])
+		self.assertEqual(self.output.getvalue().splitlines(), [WINFSP_NOTICE])
 
 	def test_winfsp_failure_shows_the_code_and_log(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(winfsp="missing")
 		self.runner.results[FETCH_SCRIPT] = {"mismatch": None, "winfsp_exit": 1603, "winfsp_log": ["line one", "line two"]}
 		self.assert_refused_with_config_unchanged("WinFsp setup failed in Windows with exit code 1603:\nline one\nline two")
 		self.assertEqual(self.pushes(), [])
+		self.assertNotIn(WINFSP_NOTICE, self.output.getvalue())
+
+	def test_winfsp_log_with_other_element_types_is_shown(self):
+		self.runner.results[PREPARE_SCRIPT] = prepare_result(winfsp="missing")
+		self.runner.results[FETCH_SCRIPT] = {"mismatch": None, "winfsp_exit": 1603, "winfsp_log": [{"value": "line one", "PSPath": "C:\\log"}, {"other": 1}, 7, None]}
+		self.assert_refused_with_config_unchanged("WinFsp setup failed in Windows with exit code 1603:\nline one\n{'other': 1}\n7\nNone")
 
 	def test_refused_vm_paths(self):
 		cases = (
@@ -424,7 +439,7 @@ class AddShareTests(ShareCommandTestCase):
 
 	def test_share_that_windows_is_removing_starts_the_supervisor_and_is_refused(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(removing=True)
-		self.assert_refused_with_config_unchanged("Windows is still removing a share named Projects and has files in its cache to upload first. Run wn share again later")
+		self.assert_refused_with_config_unchanged("Windows is still removing a share named Projects. Wait a minute and run wn share again")
 		self.assertEqual(self.runs(), [PREPARE_SCRIPT, TASK_SCRIPT])
 		self.assertEqual(self.params_of(TASK_SCRIPT), {"restart": False})
 		self.assertEqual(self.pushes(), [])
@@ -528,7 +543,6 @@ class AddShareTests(ShareCommandTestCase):
 		self.assertNotIn(secret, str(caught.exception))
 
 
-
 class StatusPollTests(ShareCommandTestCase):
 	def test_missing_or_unparsable_status_means_not_ready_yet(self):
 		answers = [None, "{", "\ufeff" + status_text({}), "\ufeff" + status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 1}})]
@@ -578,7 +592,7 @@ class RollbackTests(ShareCommandTestCase):
 		os.remove(self.paths.state_file)
 		with self.assertRaises(ShareError) as caught:
 			self.add()
-		self.assertEqual(str(caught.exception), "the wn agent did not pick up the share within 15 s. Check python3 -m wn agent status. If you updated wn, run python3 -m wn agent --install so the agent runs the new code")
+		self.assertEqual(str(caught.exception), "the wn agent did not pick up the share within 15 s. Check wn agent status. If you updated wn, run python3 -m wn agent --install so the agent runs the new code")
 		self.assertNotIn(TASK_SCRIPT, self.runs())
 		self.assert_rolled_back()
 
@@ -586,7 +600,7 @@ class RollbackTests(ShareCommandTestCase):
 		self.serve(SHARE_NAME, "waiting", "the VM network is not up")
 		with self.assertRaises(ShareError) as caught:
 			self.add()
-		self.assertEqual(str(caught.exception), "the Mac side of the share is waiting: the VM network is not up")
+		self.assertEqual(str(caught.exception), "the wn agent did not start serving the share. It reports: waiting, the VM network is not up")
 		self.assert_rolled_back()
 
 	def test_task_script_failure_rolls_back(self):
@@ -901,6 +915,13 @@ class RemoveTests(SavedShareTestCase):
 		self.assertGreaterEqual(self.clock.now, 600)
 		self.assertEqual(load_config().shares, ())
 		self.assertIn("Waiting for Windows to finish its uploads to the Mac. Press Ctrl+C to stop waiting.", self.output.getvalue())
+
+	def test_one_pending_file_is_singular(self):
+		self.save(self.share())
+		pending = {SHARE_NAME: {"state": "removing", "detail": "", "pid": 1, "pending": 1}}
+		self.answer_in_turn(status_text(pending), status_text({}))
+		self.remove()
+		self.assertTrue(self.output.getvalue().startswith("Waiting for Windows to upload 1 file to the Mac. "))
 
 	def test_stale_removing_status_reaches_the_time_limit(self):
 		self.save(self.share())

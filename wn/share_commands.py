@@ -115,6 +115,13 @@ def _status_key(shares, name):
 	return next((key for key in shares if key.casefold() == name.casefold()), None)
 
 
+def _log_line(line):
+	"""Return one line of a guest log as text. Windows PowerShell 5.1 can send a line as an object that holds it in ``value``."""
+	if isinstance(line, dict) and "value" in line:
+		return str(line["value"])
+	return str(line)
+
+
 def _status_entry(shares, name):
 	return shares.get(_status_key(shares, name))
 
@@ -221,14 +228,14 @@ class ShareCommands:
 			):
 				self._print(line)
 		elif not self.agent_running():
-			raise ShareError("the wn agent is installed but not running. Run python3 -m wn agent start, then run wn {} again".format(SHARE_COMMAND))
+			raise ShareError("the wn agent is installed but not running. Run wn agent start, then run wn {} again".format(SHARE_COMMAND))
 
 	def _prepare_guest(self, name, vm_path):
-		"""Run prepare.ps1. A share folder that Windows still removes has files to upload, so make sure the supervisor runs to upload them."""
+		"""Run prepare.ps1. Windows removes a share folder in the supervisor's next pass, after its uploads, so make sure the supervisor runs."""
 		state = self._run_script(PREPARE_SCRIPT, {"name": name, "vm_path": vm_path}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 		if state["removing"]:
 			self._run_script(TASK_SCRIPT, {"restart": False}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
-			raise ShareError("Windows is still removing a share named {} and has files in its cache to upload first. Run wn {} again later".format(name, SHARE_COMMAND))
+			raise ShareError("Windows is still removing a share named {}. Wait a minute and run wn {} again".format(name, SHARE_COMMAND))
 		return state
 
 	def _refuse_guest_state(self, state, vm_path):
@@ -247,11 +254,11 @@ class ShareCommands:
 			raise ShareError(problems[state["vm_path"]].format(vm_path))
 
 	def _install_guest_tools(self, state, tools):
-		"""Have Windows fetch rclone.exe and the WinFsp installer from the Mac when it lacks them. Return True when WinFsp was installed."""
+		"""Have Windows fetch rclone.exe and the WinFsp installer from the Mac when it lacks them."""
 		need_rclone = state["rclone_sha256"] != RCLONE_WINDOWS_BINARY.sha256
 		need_winfsp = state["winfsp"] != WINFSP_OK
 		if not (need_rclone or need_winfsp):
-			return False
+			return
 		files = {}
 		if need_rclone:
 			files[WINDOWS_RCLONE_NAME] = self.paths.windows_rclone
@@ -269,11 +276,12 @@ class ShareCommands:
 		if result["mismatch"]:
 			raise ShareError("the file Windows received does not match its SHA-256 ({}). Windows deleted it. Run wn {} again".format(result["mismatch"], SHARE_COMMAND))
 		winfsp_exit = result["winfsp_exit"]
+		if winfsp_exit and winfsp_exit != RESTART_NEEDED_EXIT_CODE:
+			raise ShareError("WinFsp setup failed in Windows with exit code {}:\n".format(winfsp_exit) + "\n".join(_log_line(line) for line in result["winfsp_log"]))
+		if need_winfsp:
+			self._print(WINFSP_NOTICE)
 		if winfsp_exit == RESTART_NEEDED_EXIT_CODE:
 			raise ShareError("WinFsp is installed but Windows needs a restart. Restart Windows, then run wn {} again".format(SHARE_COMMAND))
-		if winfsp_exit:
-			raise ShareError("WinFsp setup failed in Windows with exit code {}:\n".format(winfsp_exit) + "\n".join(result["winfsp_log"]))
-		return need_winfsp and winfsp_exit == 0
 
 	def _push_common_files(self, state):
 		"""Push the client key and the supervisor script when Windows has other copies. Return True when the script changed."""
@@ -292,8 +300,8 @@ class ShareCommands:
 		if _state_of(entry) == SERVING_STATE:
 			return
 		if entry is None:
-			raise ShareError("the wn agent did not pick up the share within {} s. Check python3 -m wn agent status. If you updated wn, run python3 -m wn agent --install so the agent runs the new code".format(AGENT_PICKUP_TIMEOUT_SECONDS))
-		raise ShareError("the Mac side of the share is {}: {}".format(_state_of(entry), entry.get("detail")))
+			raise ShareError("the wn agent did not pick up the share within {} s. Check wn agent status. If you updated wn, run python3 -m wn agent --install so the agent runs the new code".format(AGENT_PICKUP_TIMEOUT_SECONDS))
+		raise ShareError("the wn agent did not start serving the share. It reports: {}".format(_reported(entry)))
 
 	def _wait_for_mount(self, name, folder):
 		entry = self._wait(lambda: _status_entry(self._guest_status() or {}, name), lambda entry: _state_of(entry) == MOUNTED_STATE, MOUNT_TIMEOUT_SECONDS)
@@ -344,7 +352,7 @@ class ShareCommands:
 		share = dataclasses.replace(share, port=pick_port(current, self.can_bind))
 		state = self._prepare_guest(name, vm_path)
 		self._refuse_guest_state(state, vm_path)
-		installed_winfsp = self._install_guest_tools(state, tools)
+		self._install_guest_tools(state, tools)
 		script_changed = self._push_common_files(state)
 		folder = guest_share_folder(name)
 		self.runner.push(folder + "\\" + RCLONE_CONF_NAME, render_rclone_conf(share).encode("utf-8"))
@@ -364,8 +372,6 @@ class ShareCommands:
 			raise
 		self._print("{}: {} is now at {} in Windows, {}".format(name, mac_path, vm_path, READ_ONLY_TEXT if read_only else READ_WRITE_TEXT))
 		self._print("Windows writes reach the Mac about {} s after a file is closed. See wn {} --help for the limits.".format(WRITE_BACK_SECONDS, SHARE_COMMAND))
-		if installed_winfsp:
-			self._print(WINFSP_NOTICE)
 
 	def _guest_view(self):
 		"""Return the guest's shares object, or None and the text that says why Windows' view is unknown."""
@@ -460,7 +466,7 @@ class ShareCommands:
 				if self.clock() >= next_progress:
 					pending = entry.get("pending")
 					detail = entry.get("detail")
-					waiting = "Waiting for Windows to upload {} files to the Mac".format(pending) if isinstance(pending, int) else "Waiting for Windows to finish its uploads to the Mac" + (" ({})".format(detail) if detail else "")
+					waiting = "Waiting for Windows to upload {} {} to the Mac".format(pending, "file" if pending == 1 else "files") if isinstance(pending, int) else "Waiting for Windows to finish its uploads to the Mac" + (" ({})".format(detail) if detail else "")
 					self._print("{}. Press Ctrl+C to stop waiting. If you stop, Windows still removes the share after its uploads. Run wn {} {} again to remove it from the Mac.".format(waiting, REMOVE_COMMAND, name))
 					next_progress = self.clock() + REMOVE_PROGRESS_SECONDS
 			if self.clock() >= deadline:
