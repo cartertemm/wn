@@ -172,6 +172,15 @@ class LinkedParentTests(unittest.TestCase):
 		self.assertLess(remove.index("Find-LinkedParent"), remove.index("[IO.Directory]::Delete"))
 		self.assertIn("[IO.FileAttributes]::ReparsePoint", function_body(self.text, "Find-LinkedParent"))
 
+	def test_removal_skips_the_mount_path_under_a_link_and_still_deletes_the_share_folder(self):
+		remove = function_body(self.text, "Remove-Share")
+		self.assertIn("if (-not (Find-LinkedParent $share.mount_path) -and (Test-Junction $share.mount_path)) {", remove)
+		self.assertNotIn("'blocked'", remove)
+
+	def test_a_blocked_removal_that_keeps_its_cache_tells_the_mac(self):
+		remove = function_body(self.text, "Remove-Share")
+		self.assertIn("} else {\n\t\t\t$Status[$Name].remove_requested = $true\n\t\t}\n\t\treturn\n", remove)
+
 	def test_prepare_shares_the_supervisor_checks(self):
 		prepare = read_script("prepare.ps1")
 		for name in ("Find-LinkedParent", "Test-CacheFiles"):

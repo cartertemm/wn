@@ -180,7 +180,11 @@ function Remove-Share($Name, $Folder) {
 	}
 	if (-not $process -and (Test-Path -LiteralPath $shareFile) -and (Test-CacheFiles $Folder)) {
 		$process = Start-Mount $Name (Read-Share $Folder) $Folder
-		if ($process) { Set-State $Name 'removing' 'starting rclone to upload the files in its cache' $process.Id $null }
+		if ($process) {
+			Set-State $Name 'removing' 'starting rclone to upload the files in its cache' $process.Id $null
+		} else {
+			$Status[$Name].remove_requested = $true
+		}
 		return
 	}
 	if ($process) {
@@ -201,12 +205,7 @@ function Remove-Share($Name, $Folder) {
 	}
 	if (Test-Path -LiteralPath $shareFile) {
 		$share = Read-Share $Folder
-		$linked = Find-LinkedParent $share.mount_path
-		if ($linked) {
-			Set-State $Name 'blocked' ($LinkedParentDetail -f $linked) $null $null
-			return
-		}
-		if (Test-Junction $share.mount_path) {
+		if (-not (Find-LinkedParent $share.mount_path) -and (Test-Junction $share.mount_path)) {
 			try { [IO.Directory]::Delete($share.mount_path) } catch { if (Test-Path -LiteralPath $share.mount_path) { throw } }
 		}
 	}

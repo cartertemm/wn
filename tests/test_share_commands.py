@@ -938,6 +938,22 @@ class RemoveTests(SavedShareTestCase):
 		self.assertGreaterEqual(self.clock.now, 180)
 		self.assertLess(self.clock.now, 200)
 
+	def test_blocked_share_that_windows_cannot_remove_stops_at_once(self):
+		self.save(self.share())
+		detail = "C:\\Projects exists as a local folder with files. Move them out and delete the folder"
+		before_request = {SHARE_NAME: {"state": "blocked", "detail": detail, "pid": None}}
+		after_request = {SHARE_NAME: {"state": "blocked", "detail": detail, "pid": None, "remove_requested": True}}
+		self.answer_in_turn(status_text(before_request), status_text(after_request))
+		self.assert_refused_with_everything_kept("Windows cannot remove the share: {}. Windows must mount the share once more to upload the files in its cache to the Mac. Fix that, then run wn unshare Projects again".format(detail))
+		self.assertEqual(len(self.pulls()), 2)
+		self.assertLess(self.clock.now, REMOVE_PROGRESS_SECONDS)
+
+	def test_blocked_status_from_before_the_remove_request_waits(self):
+		self.save(self.share())
+		self.answer_in_turn(status_text({SHARE_NAME: {"state": "blocked", "detail": "C:\\Projects is a link or mount point", "pid": None}}), status_text({}))
+		self.assertIsNone(self.remove())
+		self.assertEqual(load_config().shares, ())
+
 	def test_status_entry_with_another_letter_case_is_not_gone(self):
 		self.save(self.share())
 		self.guest_reports({"projects": {"state": "mounted", "detail": "", "pid": 1}})

@@ -70,6 +70,7 @@ RESTART_NEEDED_EXIT_CODE = 3010
 RUNNING_STATE = "running"
 MOUNTED_STATE = "mounted"
 REMOVING_STATE = "removing"
+BLOCKED_STATE = "blocked"
 INCOMPLETE_STATE = "incomplete"
 UNKNOWN_STATE = "unknown"
 EXIT_SUCCESS = 0
@@ -460,6 +461,8 @@ class ShareCommands:
 			if guest is not None and _status_key(guest, name) is None:
 				return guest
 			entry = _status_entry(guest, name) if guest is not None else None
+			if _state_of(entry) == BLOCKED_STATE and entry.get("remove_requested"):
+				raise ShareError("Windows cannot remove the share: {}. Windows must mount the share once more to upload the files in its cache to the Mac. Fix that, then run wn {} {} again".format(entry.get("detail"), REMOVE_COMMAND, name))
 			if _state_of(entry) == REMOVING_STATE:
 				if updated != last_updated:
 					deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
