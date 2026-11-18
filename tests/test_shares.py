@@ -1,0 +1,338 @@
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from wn.shares import (
+	FIRST_PORT,
+	LAST_PORT,
+	MAC_TO_VM,
+	VM_TO_MAC,
+	Share,
+	ShareError,
+	check_mac_path,
+	check_new_share,
+	check_share_name,
+	check_vm_path,
+	default_share_name,
+	normalize_vm_path,
+	pick_port,
+	shares_for_vm,
+	shares_from_values,
+	validate_shares,
+)
+
+CONFIG_FILE = "/home/config.json"
+
+
+def make_share(name="Projects", vm="Windows", mac_path="/Users/c/Projects", vm_path="C:\\Users\\c\\Projects", port=None):
+	return Share(name, vm, MAC_TO_VM, mac_path, vm_path, False, port)
+
+
+def share_item(**changes):
+	item = {
+		"name": "Projects",
+		"vm": "Windows",
+		"direction": MAC_TO_VM,
+		"mac_path": "/Users/c/Projects",
+		"vm_path": "C:\\Users\\c\\Projects",
+		"read_only": False,
+		"port": FIRST_PORT,
+	}
+	item.update(changes)
+	return item
+
+
+class DefaultNameTests(unittest.TestCase):
+	def test_spaces_become_one_dash(self):
+		self.assertEqual(default_share_name("/Users/c/My Projects"), "My-Projects")
+
+	def test_leading_dot_is_removed(self):
+		self.assertEqual(default_share_name("/x/.hidden"), "hidden")
+
+	def test_leading_dash_is_removed(self):
+		self.assertEqual(default_share_name("/x/-a"), "a")
+
+	def test_non_ascii_run_becomes_dash(self):
+		self.assertEqual(default_share_name("/x/Fotos ü"), "Fotos-")
+
+	def test_nothing_left_gives_share(self):
+		self.assertEqual(default_share_name("/x/日本"), "share")
+
+	def test_root_gives_share(self):
+		self.assertEqual(default_share_name("/"), "share")
+
+	def test_trailing_slash_is_ignored(self):
+		self.assertEqual(default_share_name("/x/Docs/"), "Docs")
+
+	def test_long_name_is_cut(self):
+		self.assertEqual(default_share_name("/x/" + "a" * 40), "a" * 32)
+
+
+class ShareNameTests(unittest.TestCase):
+	def test_accepts_valid_names(self):
+		for name in ("Projects", "a.b_c-d", "_x", "a" * 32):
+			with self.subTest(name=name):
+				check_share_name(name)
+
+	def test_refuses_invalid_names(self):
+		for name in ("", ".x", "-x", "a" * 33, "a b", "ü", "abc\n"):
+			with self.subTest(name=name):
+				with self.assertRaisesRegex(ShareError, "--name"):
+					check_share_name(name)
+
+
+class NormalizeVmPathTests(unittest.TestCase):
+	def test_slashes_become_backslashes(self):
+		self.assertEqual(normalize_vm_path("C:/Users/c/Mac"), "C:\\Users\\c\\Mac")
+
+	def test_trailing_backslash_is_removed(self):
+		self.assertEqual(normalize_vm_path("C:\\Users\\c\\Mac\\"), "C:\\Users\\c\\Mac")
+
+	def test_lower_case_drive_is_kept(self):
+		self.assertEqual(normalize_vm_path("c:\\x"), "c:\\x")
+
+	def test_refuses_paths_that_are_not_absolute_folders(self):
+		for path in ("Users\\x", "\\\\server\\share", "C:", "C:\\", "C:/", "C:\\Users\\..\\Windows", "C:\\Users\\.\\c"):
+			with self.subTest(path=path):
+				with self.assertRaisesRegex(ShareError, "absolute Windows folder"):
+					normalize_vm_path(path)
+
+
+class VmPathTests(unittest.TestCase):
+	def test_refuses_system_folders(self):
+		for path in ("C:\\Windows", "c:\\windows\\Temp", "C:\\Program Files\\x", "C:\\Program Files (x86)\\x", "C:\\ProgramData\\wn"):
+			with self.subTest(path=path):
+				with self.assertRaises(ShareError):
+					check_vm_path(path)
+
+	def test_accepts_other_folders(self):
+		for path in ("C:\\Programs", "C:\\Users\\c\\Mac", "D:\\Data"):
+			with self.subTest(path=path):
+				check_vm_path(path)
+
+
+class MacPathTests(unittest.TestCase):
+	def setUp(self):
+		self.home = tempfile.TemporaryDirectory()
+		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		self.addCleanup(self.home.cleanup)
+		self.home_path = os.path.realpath(self.home.name)
+		self.support = os.path.join(self.home_path, "Library", "Application Support", "wn")
+
+	def make_folder(self, *parts):
+		path = os.path.join(self.home_path, *parts)
+		os.makedirs(path)
+		return path
+
+	def test_returns_realpath_of_folder(self):
+		folder = self.make_folder("Projects")
+		self.assertEqual(check_mac_path(os.path.join(self.home.name, "Projects"), False), folder)
+
+	def test_follows_symlink_to_folder(self):
+		folder = self.make_folder("Projects")
+		link = os.path.join(self.home_path, "link")
+		os.symlink(folder, link)
+		self.assertEqual(check_mac_path(link, False), folder)
+
+	def test_expands_home(self):
+		folder = self.make_folder("Projects")
+		self.assertEqual(check_mac_path("~/Projects", False), folder)
+
+	def test_refuses_missing_path(self):
+		with self.assertRaisesRegex(ShareError, "is not a folder on the Mac"):
+			check_mac_path(os.path.join(self.home_path, "missing"), False)
+
+	def test_refuses_file(self):
+		path = os.path.join(self.home_path, "file.txt")
+		with open(path, "w") as handle:
+			handle.write("x")
+		with self.assertRaisesRegex(ShareError, "is not a folder on the Mac"):
+			check_mac_path(path, False)
+
+	def test_refuses_root(self):
+		with self.assertRaises(ShareError):
+			check_mac_path("/", True)
+
+	def test_refuses_support_folder_also_read_only(self):
+		os.makedirs(self.support)
+		with self.assertRaises(ShareError):
+			check_mac_path(self.support, True)
+
+	def test_refuses_folder_inside_support_folder(self):
+		folder = self.make_folder("Library", "Application Support", "wn", "shares")
+		with self.assertRaises(ShareError):
+			check_mac_path(folder, True)
+
+	def test_refuses_home_read_write(self):
+		with self.assertRaisesRegex(ShareError, "--read-only") as caught:
+			check_mac_path(self.home_path, False)
+		self.assertIn(self.support, str(caught.exception))
+
+	def test_allows_home_read_only(self):
+		self.assertEqual(check_mac_path(self.home_path, True), self.home_path)
+
+	def test_refuses_config_parent_read_write(self):
+		folder = self.make_folder(".config")
+		with self.assertRaisesRegex(ShareError, "--read-only") as caught:
+			check_mac_path(folder, False)
+		self.assertIn(os.path.join(folder, "wn"), str(caught.exception))
+
+	def test_allows_sibling_folder_read_write(self):
+		folder = self.make_folder("Library", "Application Support", "wn-other")
+		self.assertEqual(check_mac_path(folder, False), folder)
+
+
+class NewShareTests(unittest.TestCase):
+	def setUp(self):
+		self.existing = (make_share(name="Projects", mac_path="/a/b", vm_path="C:\\a\\b"),)
+
+	def test_refuses_same_name_in_other_case(self):
+		share = make_share(name="projects", mac_path="/x", vm_path="C:\\x")
+		with self.assertRaisesRegex(ShareError, "a share named 'Projects' already exists. Pick another name with --name"):
+			check_new_share(share, self.existing)
+
+	def test_refuses_overlapping_mac_path(self):
+		for mac_path in ("/a/b", "/A/B", "/a", "/a/b/c"):
+			with self.subTest(mac_path=mac_path):
+				share = make_share(name="Other", mac_path=mac_path, vm_path="C:\\x")
+				with self.assertRaisesRegex(ShareError, "Projects"):
+					check_new_share(share, self.existing)
+
+	def test_refuses_overlapping_mac_path_of_another_vm(self):
+		share = Share("Other", "Linux", MAC_TO_VM, "/a/b/c", "C:\\x", False)
+		with self.assertRaisesRegex(ShareError, "Projects"):
+			check_new_share(share, self.existing)
+
+	def test_accepts_mac_path_with_same_prefix(self):
+		check_new_share(make_share(name="Other", mac_path="/a/bc", vm_path="C:\\x"), self.existing)
+
+	def test_refuses_overlapping_vm_path_on_same_vm(self):
+		for vm_path in ("C:\\a\\b", "c:\\A\\B", "C:\\a", "C:\\a\\b\\c"):
+			with self.subTest(vm_path=vm_path):
+				share = make_share(name="Other", mac_path="/x", vm_path=vm_path)
+				with self.assertRaisesRegex(ShareError, "Projects"):
+					check_new_share(share, self.existing)
+
+	def test_accepts_vm_path_with_same_prefix(self):
+		check_new_share(make_share(name="Other", mac_path="/x", vm_path="C:\\a\\bc"), self.existing)
+
+	def test_accepts_same_vm_path_for_another_vm(self):
+		check_new_share(Share("Other", "Linux", MAC_TO_VM, "/x", "C:\\a\\b", False), self.existing)
+
+
+class PickPortTests(unittest.TestCase):
+	def test_no_shares_gives_first_port(self):
+		self.assertEqual(pick_port((), lambda port: True), FIRST_PORT)
+
+	def test_skips_used_port(self):
+		self.assertEqual(pick_port((make_share(port=FIRST_PORT),), lambda port: True), FIRST_PORT + 1)
+
+	def test_skips_port_that_cannot_bind(self):
+		self.assertEqual(pick_port((), lambda port: port != FIRST_PORT), FIRST_PORT + 1)
+
+	def test_all_ports_used_raises(self):
+		shares = tuple(make_share(name="s{}".format(port), port=port) for port in range(FIRST_PORT, LAST_PORT + 1))
+		with self.assertRaises(ShareError) as caught:
+			pick_port(shares, lambda port: True)
+		self.assertIn("47321", str(caught.exception))
+		self.assertIn("47420", str(caught.exception))
+
+
+class ValidateSharesTests(unittest.TestCase):
+	def assert_refused(self, items, problem, index=0):
+		with self.assertRaises(ShareError) as caught:
+			validate_shares(CONFIG_FILE, items)
+		text = str(caught.exception)
+		self.assertTrue(text.startswith("{}: shares[{}]: ".format(CONFIG_FILE, index)), text)
+		self.assertIn(problem, text)
+
+	def test_valid_list_passes(self):
+		validate_shares(CONFIG_FILE, [share_item(), share_item(name="Other", port=FIRST_PORT + 1, read_only=True)])
+
+	def test_item_not_object(self):
+		self.assert_refused(["x"], "object")
+
+	def test_missing_keys(self):
+		item = share_item()
+		del item["vm"]
+		del item["port"]
+		self.assert_refused([item], "missing keys: vm, port")
+
+	def test_unknown_keys(self):
+		self.assert_refused([share_item(extra=1)], "unknown keys: extra")
+
+	def test_name_not_string(self):
+		self.assert_refused([share_item(name=3)], "name must be 1 to 32 characters")
+
+	def test_name_bad_pattern(self):
+		self.assert_refused([share_item(name=".x")], "name must be 1 to 32 characters")
+
+	def test_duplicate_name_ignoring_case(self):
+		items = [share_item(), share_item(name="projects", port=FIRST_PORT + 1)]
+		self.assert_refused(items, "share name 'projects' is used twice (names ignore case)", index=1)
+
+	def test_vm_not_string(self):
+		self.assert_refused([share_item(vm=None)], "vm must be a string")
+
+	def test_direction_not_supported(self):
+		self.assert_refused([share_item(direction="sideways")], "direction must be mac_to_vm")
+
+	def test_vm_to_mac_is_refused(self):
+		self.assert_refused([share_item(direction=VM_TO_MAC)], "direction must be mac_to_vm")
+
+	def test_mac_path_not_string(self):
+		self.assert_refused([share_item(mac_path=1)], "mac_path")
+
+	def test_mac_path_not_absolute(self):
+		self.assert_refused([share_item(mac_path="Projects")], "mac_path")
+
+	def test_vm_path_not_string(self):
+		self.assert_refused([share_item(vm_path=1)], "vm_path")
+
+	def test_vm_path_not_absolute(self):
+		self.assert_refused([share_item(vm_path="Users\\c")], "vm_path")
+
+	def test_read_only_not_bool(self):
+		self.assert_refused([share_item(read_only="yes")], "read_only")
+
+	def test_port_not_int(self):
+		self.assert_refused([share_item(port="47321")], "port")
+
+	def test_port_bool(self):
+		self.assert_refused([share_item(port=True)], "port")
+
+	def test_port_out_of_range(self):
+		for port in (FIRST_PORT - 1, LAST_PORT + 1):
+			with self.subTest(port=port):
+				self.assert_refused([share_item(port=port)], "port")
+
+	def test_duplicate_port(self):
+		items = [share_item(), share_item(name="Other")]
+		self.assert_refused(items, "port 47321 is used twice", index=1)
+
+
+class ShareValueTests(unittest.TestCase):
+	def test_to_dict_keeps_key_order(self):
+		self.assertEqual(list(make_share(port=FIRST_PORT).to_dict()), ["name", "vm", "direction", "mac_path", "vm_path", "read_only", "port"])
+
+	def test_to_dict_drops_port_when_none(self):
+		self.assertNotIn("port", make_share().to_dict())
+
+	def test_shares_from_values_matches_input(self):
+		items = [share_item(), share_item(name="Other", port=FIRST_PORT + 1)]
+		validate_shares(CONFIG_FILE, items)
+		shares = shares_from_values(items)
+		self.assertTrue(all(isinstance(share, Share) for share in shares))
+		self.assertEqual([share.to_dict() for share in shares], items)
+
+	def test_shares_for_vm_keeps_only_that_vm(self):
+		windows = make_share(name="A")
+		linux = make_share(name="B", vm="Linux")
+		self.assertEqual(shares_for_vm((windows, linux), "Windows"), (windows,))
+
+
+if __name__ == "__main__":
+	unittest.main()
