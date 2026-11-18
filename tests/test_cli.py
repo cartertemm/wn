@@ -235,12 +235,18 @@ class ShareCommandTests(CLITestCase):
 		self.share_commands().remove_share.return_value = 1
 		self.assertEqual(self.run_cli("unshare", "Projects")[0], 1)
 
-	def test_ctrl_c_during_unshare_ends_with_a_short_message(self):
+	def test_ctrl_c_during_unshare_while_the_share_is_in_the_config(self):
+		write_config(self.home.name, {"shares": [{"name": "Projects", "vm": "Windows", "direction": "mac_to_vm", "mac_path": "/a", "vm_path": "C:\\x", "read_only": False, "port": 47321}]})
+		self.share_commands().remove_share.side_effect = KeyboardInterrupt
+		exit_code, _, stderr = self.run_cli("unshare", "projects")
+		self.assertEqual(exit_code, 1)
+		self.assertEqual(stderr, "\nwn: stopped. projects is still shared on the Mac, and Windows may still remove it after its uploads. Run wn unshare projects again to finish\n")
+
+	def test_ctrl_c_during_unshare_after_the_mac_side_is_removed(self):
 		self.share_commands().remove_share.side_effect = KeyboardInterrupt
 		exit_code, _, stderr = self.run_cli("unshare", "Projects")
 		self.assertEqual(exit_code, 1)
-		self.assertIn("wn: stopped. Projects is still shared. Run wn unshare Projects again to remove it", stderr)
-		self.assertNotIn("Traceback", stderr)
+		self.assertEqual(stderr, "\nwn: stopped. Projects is removed from the Mac, but wn may not have finished removing its files from Windows\n")
 
 	def test_share_error_is_printed(self):
 		self.share_commands().add_share.side_effect = WnError("boom")

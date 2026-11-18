@@ -1,6 +1,8 @@
 """The share, list, and remove commands: checks, order of steps, rollback, and output."""
 
+import contextlib
 import dataclasses
+import fcntl
 import hashlib
 import json
 import os
@@ -80,10 +82,12 @@ KNOWN_HOSTS_NAME = "known_hosts"
 SHARE_JSON_NAME = "share.json"
 MOUNT_LOG_NAME = "mount.log"
 REMOVE_MARKER_NAME = "remove"
+LOCK_FILE_NAME = "commands.lock"
 READ_WRITE_TEXT = "read and write"
 READ_ONLY_TEXT = "read only"
 GUEST_AGENT_DOWN_MESSAGE = "Windows is still starting (no answer from the guest agent). Try again in a minute"
 SHARE_STOPPED_MESSAGE = "VM '{}' is {}. Run wn start, wait until Windows has started, then run wn {} again"
+LOCKED_MESSAGE = "another wn share or wn unshare command is running. Wait for it to finish, then try again"
 REMOVE_STOPPED_MESSAGE = "VM '{}' is {}. Start it with wn start and run wn {} again, so wn can remove the share from Windows too"
 WINFSP_NOTICE = "Uses WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos, https://github.com/winfsp/winfsp"
 
@@ -104,6 +108,15 @@ def _sha256(data):
 
 def _state_of(entry):
 	return entry.get("state") if isinstance(entry, dict) else None
+
+
+def _status_key(shares, name):
+	"""Return the key of share ``name`` in the guest's shares object, or None. The guest uses the folder name on disk, whose letter case can differ."""
+	return next((key for key in shares if key.casefold() == name.casefold()), None)
+
+
+def _status_entry(shares, name):
+	return shares.get(_status_key(shares, name))
 
 
 def _reported(entry):
@@ -159,16 +172,31 @@ class ShareCommands:
 		if not self._guest_agent_answers():
 			raise ShareError(GUEST_AGENT_DOWN_MESSAGE)
 
-	def _guest_status(self):
-		"""Return the shares object of the guest's status file, or None while it is missing or cannot be parsed."""
+	def _read_guest_status(self):
+		"""Return the shares object of the guest's status file and its updated time, or None and None while it is missing or cannot be parsed."""
 		try:
 			status = json.loads(self.runner.pull(GUEST_STATUS_FILE).lstrip(BOM_TEXT))
 		except (UnknownVMError, UTMCtlMissingError):
 			raise
 		except (BackendError, ValueError):
-			return None
+			return None, None
 		shares = status.get("shares") if isinstance(status, dict) else None
-		return shares if isinstance(shares, dict) else None
+		if not isinstance(shares, dict):
+			return None, None
+		return shares, status.get("updated")
+
+	def _guest_status(self):
+		return self._read_guest_status()[0]
+
+	@contextlib.contextmanager
+	def _command_lock(self):
+		os.makedirs(self.paths.root, exist_ok=True)
+		with open(os.path.join(self.paths.root, LOCK_FILE_NAME), "a") as handle:
+			try:
+				fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+			except BlockingIOError:
+				raise ShareError(LOCKED_MESSAGE) from None
+			yield
 
 	def _write_shares(self, shares):
 		update_config_file({"shares": [share.to_dict() for share in shares]})
@@ -268,7 +296,7 @@ class ShareCommands:
 		raise ShareError("the Mac side of the share is {}: {}".format(_state_of(entry), entry.get("detail")))
 
 	def _wait_for_mount(self, name, folder):
-		entry = self._wait(lambda: (self._guest_status() or {}).get(name), lambda entry: _state_of(entry) == MOUNTED_STATE, MOUNT_TIMEOUT_SECONDS)
+		entry = self._wait(lambda: _status_entry(self._guest_status() or {}, name), lambda entry: _state_of(entry) == MOUNTED_STATE, MOUNT_TIMEOUT_SECONDS)
 		if _state_of(entry) == MOUNTED_STATE:
 			return
 		log_path = folder + "\\" + MOUNT_LOG_NAME
@@ -285,6 +313,8 @@ class ShareCommands:
 		try:
 			self.runner.push(folder + "\\" + REMOVE_MARKER_NAME, b"")
 		except WnError as error:
+			if config_written:
+				return ["Also could not ask Windows to remove the share: {}. wn kept the share in the config. Run wn {} {} to finish".format(error, REMOVE_COMMAND, name)]
 			problems.append("Also could not ask Windows to remove the share: {}".format(error))
 		if config_written:
 			try:
@@ -294,6 +324,10 @@ class ShareCommands:
 		return problems
 
 	def add_share(self, mac_dir, vm_dir, read_only=False, name=None):
+		with self._command_lock():
+			self._add_share(mac_dir, vm_dir, read_only, name)
+
+	def _add_share(self, mac_dir, vm_dir, read_only, name):
 		mac_path = check_mac_path(mac_dir, read_only)
 		vm_path = normalize_vm_path(vm_dir)
 		check_vm_path(vm_path)
@@ -375,8 +409,8 @@ class ShareCommands:
 				mac_text = _reported(mac_entry)
 			if guest is None:
 				windows_text = unknown_text
-			elif share.name in guest:
-				windows_text = _reported(guest[share.name])
+			elif _status_key(guest, share.name) is not None:
+				windows_text = _reported(_status_entry(guest, share.name))
 			else:
 				windows_text = "not set up"
 			self._print("{}: Mac folder {} in Windows at {}, {}. Mac: {}. Windows: {}.".format(
@@ -406,31 +440,38 @@ class ShareCommands:
 			raise
 		except (BackendError, GuestError):
 			guest = self._guest_status()
-			if guest is None or name in guest:
+			if guest is None or _status_key(guest, name) is not None:
 				raise
 
 	def _wait_for_removal(self, name):
-		"""Wait until a good status read no longer lists the share, and return that status. While Windows reports the share as removing, wait without limit."""
+		"""Wait until a good status read no longer lists the share, and return that status. While Windows reports the share as removing and its status file changes, wait without limit."""
 		deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
 		next_progress = self.clock()
+		last_updated = None
 		while True:
-			guest = self._guest_status()
-			if guest is not None and name not in guest:
+			guest, updated = self._read_guest_status()
+			if guest is not None and _status_key(guest, name) is None:
 				return guest
-			entry = guest.get(name) if guest is not None else None
+			entry = _status_entry(guest, name) if guest is not None else None
 			if _state_of(entry) == REMOVING_STATE:
-				deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
+				if updated != last_updated:
+					deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
+					last_updated = updated
 				if self.clock() >= next_progress:
 					pending = entry.get("pending")
 					detail = entry.get("detail")
 					waiting = "Waiting for Windows to upload {} files to the Mac".format(pending) if isinstance(pending, int) else "Waiting for Windows to finish its uploads to the Mac" + (" ({})".format(detail) if detail else "")
-					self._print("{}. Press Ctrl+C to stop waiting. The share then stays in place until you run wn {} {} again.".format(waiting, REMOVE_COMMAND, name))
+					self._print("{}. Press Ctrl+C to stop waiting. If you stop, Windows still removes the share after its uploads. Run wn {} {} again to remove it from the Mac.".format(waiting, REMOVE_COMMAND, name))
 					next_progress = self.clock() + REMOVE_PROGRESS_SECONDS
-			elif self.clock() >= deadline:
+			if self.clock() >= deadline:
 				raise ShareError("Windows did not remove the share within {} s. Windows reports: {}. Run wn {} {} again later".format(REMOVE_TIMEOUT_SECONDS, _reported(entry), REMOVE_COMMAND, name))
 			self.sleep(STATUS_POLL_SECONDS)
 
 	def remove_share(self, name):
+		with self._command_lock():
+			self._remove_share(name)
+
+	def _remove_share(self, name):
 		share = self._find_share(name)
 		try:
 			self._check_vm(REMOVE_COMMAND, REMOVE_STOPPED_MESSAGE)
@@ -438,7 +479,10 @@ class ShareCommands:
 			self._remove_mac_side(share.name)
 			self._print("VM '{}' no longer exists in UTM, so only the Mac side was removed".format(self.config.vm_name))
 			return
+		if not self.agent_running():
+			raise ShareError("the wn agent is not running, so Windows cannot upload its last changes to the Mac. Run wn agent start, then run wn {} {} again".format(REMOVE_COMMAND, share.name))
 		self._ask_windows_to_remove(share.name)
+		self._run_script(TASK_SCRIPT, {"restart": False}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 		guest = self._wait_for_removal(share.name)
 		self._remove_mac_side(share.name)
 		self._print("Removed {}. {} is gone from Windows. The files stay in {} on the Mac.".format(share.name, share.vm_path, share.mac_path))

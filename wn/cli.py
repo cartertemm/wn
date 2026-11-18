@@ -616,7 +616,10 @@ def run_remove_share(context):
 	try:
 		return _share_commands(context).remove_share(name)
 	except KeyboardInterrupt:
-		context.stderr.write("\nwn: stopped. {name} is still shared. Run wn {remove} {name} again to remove it\n".format(name=name, remove=REMOVE_COMMAND))
+		if any(share.name.casefold() == name.casefold() for share in load_config().shares):
+			context.stderr.write("\nwn: stopped. {name} is still shared on the Mac, and Windows may still remove it after its uploads. Run wn {remove} {name} again to finish\n".format(name=name, remove=REMOVE_COMMAND))
+		else:
+			context.stderr.write("\nwn: stopped. {} is removed from the Mac, but wn may not have finished removing its files from Windows\n".format(name))
 		return EXIT_FAILURE
 
 
