@@ -85,6 +85,16 @@ class TaskScriptTests(unittest.TestCase):
 		self.assertIn("-DontStopIfGoingOnBatteries", text)
 		self.assertIn("-UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest", text)
 
+	def test_task_starts_a_killed_supervisor_again(self):
+		text = read_script("task.ps1")
+		self.assertIn("-RepetitionInterval (New-TimeSpan -Minutes $RestartMinutes)", text)
+		self.assertIn("-Trigger $t, $repeat", text)
+		self.assertIn("-MultipleInstances IgnoreNew", text)
+
+	def test_cleanup_disables_the_task_before_stopping_it(self):
+		text = read_script("cleanup.ps1")
+		self.assertLess(text.index("Disable-ScheduledTask -TaskName $TaskName"), text.index("Stop-ScheduledTask"))
+
 	def test_cleanup_removes_what_the_spec_lists(self):
 		text = read_script("cleanup.ps1")
 		self.assertIn("'bin', 'keys', 'shares'", text)

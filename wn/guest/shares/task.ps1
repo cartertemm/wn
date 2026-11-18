@@ -17,7 +17,8 @@ if (-not $task) {
 	$p = New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
 	$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount $RestartCount -RestartInterval (New-TimeSpan -Minutes $RestartMinutes) -MultipleInstances IgnoreNew
 	$t = New-ScheduledTaskTrigger -AtStartup
-	Register-ScheduledTask -TaskName $TaskName -Action $a -Principal $p -Settings $s -Trigger $t -Force | Out-Null
+	$repeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $RestartMinutes)
+	Register-ScheduledTask -TaskName $TaskName -Action $a -Principal $p -Settings $s -Trigger $t, $repeat -Force | Out-Null
 	Start-ScheduledTask -TaskName $TaskName
 	$action = 'registered'
 } elseif ($Params.restart) {

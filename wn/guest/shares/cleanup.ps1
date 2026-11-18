@@ -26,6 +26,7 @@ if (Test-Path -LiteralPath $SharesFolder) {
 }
 if ($sharesWithCache.Count -eq 0) {
 	if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+		Disable-ScheduledTask -TaskName $TaskName | Out-Null
 		Stop-ScheduledTask -TaskName $TaskName
 		Wait-TaskStopped
 		Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
