@@ -13,14 +13,16 @@ from wn.backends.utm import UnknownVMError, UTMCtlError, UTMCtlMissingError
 from wn.config import load_config, update_config_file
 from wn.downloads import RCLONE_WINDOWS_BINARY, WINFSP_SOURCE, fetch_share_tools
 from wn.errors import WnError
-from wn.guest_runner import BOM_TEXT, DEFAULT_SCRIPT_TIMEOUT_SECONDS, FileOffer, GuestRunner
+from wn.guest_runner import BOM_TEXT, DEFAULT_SCRIPT_TIMEOUT_SECONDS, FileOffer, GuestError, GuestRunner
 from wn.setup import install_agent
 from wn.share_sftp import (
+	CLEANUP_SCRIPT,
 	FETCH_SCRIPT,
 	GUEST_CLIENT_KEY,
 	GUEST_STATUS_FILE,
 	GUEST_SUPERVISOR,
 	PREPARE_SCRIPT,
+	SERVING_STATE,
 	SUPERVISOR_SCRIPT,
 	TASK_SCRIPT,
 	WINDOWS_RCLONE_NAME,
@@ -32,6 +34,7 @@ from wn.share_sftp import (
 	load_guest_script,
 	public_host_key,
 	read_mac_state,
+	remove_file,
 	render_known_hosts,
 	render_rclone_conf,
 	render_share_json,
@@ -39,6 +42,7 @@ from wn.share_sftp import (
 )
 from wn.shares import (
 	MAC_TO_VM,
+	REMOVE_COMMAND,
 	SHARE_COMMAND,
 	Share,
 	ShareError,
@@ -49,10 +53,13 @@ from wn.shares import (
 	default_share_name,
 	normalize_vm_path,
 	pick_port,
+	shares_for_vm,
 )
 
 AGENT_PICKUP_TIMEOUT_SECONDS = 15
 MOUNT_TIMEOUT_SECONDS = 30
+REMOVE_TIMEOUT_SECONDS = 180
+REMOVE_PROGRESS_SECONDS = 30
 STATUS_POLL_SECONDS = 1
 FETCH_TIMEOUT_SECONDS = 300
 WINFSP_INSTALL_TIMEOUT_SECONDS = 120
@@ -60,8 +67,9 @@ WRITE_BACK_SECONDS = 5
 RESTART_NEEDED_EXIT_CODE = 3010
 RUNNING_STATE = "running"
 MOUNTED_STATE = "mounted"
-SERVING_STATE = "serving"
+REMOVING_STATE = "removing"
 UNKNOWN_STATE = "unknown"
+EXIT_SUCCESS = 0
 WINFSP_OK = "ok"
 FILES_PATH_STATE = "files"
 JUNCTION_PATH_STATE = "junction"
@@ -75,6 +83,8 @@ REMOVE_MARKER_NAME = "remove"
 READ_WRITE_TEXT = "read and write"
 READ_ONLY_TEXT = "read only"
 GUEST_AGENT_DOWN_MESSAGE = "Windows is still starting (no answer from the guest agent). Try again in a minute"
+SHARE_STOPPED_MESSAGE = "VM '{}' is {}. Run wn start, wait until Windows has started, then run wn {} again"
+REMOVE_STOPPED_MESSAGE = "VM '{}' is {}. Start it with wn start and run wn {} again, so wn can remove the share from Windows too"
 WINFSP_NOTICE = "Uses WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos, https://github.com/winfsp/winfsp"
 
 
@@ -106,7 +116,7 @@ def _reported(entry):
 
 
 class ShareCommands:
-	"""Runs wn share. The collaborators are parameters so tests can replace them."""
+	"""Runs the share commands. The collaborators are parameters so tests can replace them."""
 
 	def __init__(self, config, backend, output, runner=None, paths=None, fetch_tools=fetch_share_tools,
 			install_binaries=install_binaries, ensure_keys=ensure_keys, agent_installed=agent_is_installed,
@@ -134,17 +144,19 @@ class ShareCommands:
 	def _run_script(self, name, params, timeout):
 		return self.runner.run_json(load_guest_script(name), params, timeout=timeout, label=name)
 
-	def _check_vm(self, command):
-		status = self.backend.status()
-		if status.state != RUNNING_STATE:
-			raise ShareError("VM '{}' is {}. Run wn start, wait until Windows has started, then run wn {} again".format(status.name, status.state, command))
+	def _guest_agent_answers(self):
 		try:
-			address = self.backend.ip()
+			return self.backend.ip() is not None
 		except UnknownVMError:
 			raise
 		except UTMCtlError:
-			address = None
-		if address is None:
+			return False
+
+	def _check_vm(self, command, stopped_message=SHARE_STOPPED_MESSAGE):
+		status = self.backend.status()
+		if status.state != RUNNING_STATE:
+			raise ShareError(stopped_message.format(status.name, status.state, command))
+		if not self._guest_agent_answers():
 			raise ShareError(GUEST_AGENT_DOWN_MESSAGE)
 
 	def _guest_status(self):
@@ -182,6 +194,15 @@ class ShareCommands:
 				self._print(line)
 		elif not self.agent_running():
 			raise ShareError("the wn agent is installed but not running. Run python3 -m wn agent start, then run wn {} again".format(SHARE_COMMAND))
+
+	def _prepare_guest(self, name, vm_path, current):
+		"""Run prepare.ps1. A remove marker left by a failed first share has no supervisor to process it, so clean the guest and prepare again."""
+		params = {"name": name, "vm_path": vm_path}
+		state = self._run_script(PREPARE_SCRIPT, params, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		if state["removing"] and not shares_for_vm(current, self.config.vm_name):
+			self._run_script(CLEANUP_SCRIPT, {}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+			state = self._run_script(PREPARE_SCRIPT, params, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		return state
 
 	def _refuse_guest_state(self, state, name, vm_path):
 		if state["removing"]:
@@ -286,7 +307,7 @@ class ShareCommands:
 		self.install_binaries(tools, self.paths)
 		self.ensure_keys(self.paths)
 		share = dataclasses.replace(share, port=pick_port(current, self.can_bind))
-		state = self._run_script(PREPARE_SCRIPT, {"name": name, "vm_path": vm_path}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		state = self._prepare_guest(name, vm_path, current)
 		self._refuse_guest_state(state, name, vm_path)
 		installed_winfsp = self._install_guest_tools(state, tools)
 		script_changed = self._push_common_files(state)
@@ -310,3 +331,114 @@ class ShareCommands:
 		self._print("Windows writes reach the Mac about {} s after a file is closed. See wn {} --help for the limits.".format(WRITE_BACK_SECONDS, SHARE_COMMAND))
 		if installed_winfsp:
 			self._print(WINFSP_NOTICE)
+
+	def _guest_view(self):
+		"""Return the guest's shares object, or None and the text that says why Windows' view is unknown."""
+		try:
+			status = self.backend.status()
+			if status.state != RUNNING_STATE:
+				return None, "{}, the VM is {}".format(UNKNOWN_STATE, status.state)
+			if not self._guest_agent_answers():
+				return None, "{}, no answer from the guest agent".format(UNKNOWN_STATE)
+			guest = self._guest_status()
+		except UnknownVMError:
+			return None, "{}, VM '{}' is not in UTM".format(UNKNOWN_STATE, self.config.vm_name)
+		except BackendError as error:
+			return None, "{}, {}".format(UNKNOWN_STATE, error)
+		if guest is None:
+			return None, "{}, Windows has no share status yet".format(UNKNOWN_STATE)
+		return guest, None
+
+	def list_shares(self):
+		shares = load_config().shares
+		if not shares:
+			self._print("No shares. Add one with wn {} <dir-on-mac> <dir-on-vm>".format(SHARE_COMMAND))
+			return EXIT_SUCCESS
+		own = shares_for_vm(shares, self.config.vm_name)
+		if own:
+			mac_state = read_mac_state(self.paths)["shares"]
+			agent_running = self.agent_running()
+			guest, unknown_text = self._guest_view()
+		for share in shares:
+			if share not in own:
+				self._print("{}: belongs to VM '{}'".format(share.name, share.vm))
+				continue
+			mac_entry = mac_state.get(share.name)
+			if not agent_running:
+				mac_text = "the agent is not running. Run wn agent start"
+			elif mac_entry is None:
+				mac_text = "no state yet"
+			elif _state_of(mac_entry) == SERVING_STATE:
+				mac_text = "serving on port {}".format(share.port)
+			else:
+				mac_text = _reported(mac_entry)
+			if guest is None:
+				windows_text = unknown_text
+			elif share.name in guest:
+				windows_text = _reported(guest[share.name])
+			else:
+				windows_text = "not set up"
+			self._print("{}: Mac folder {} in Windows at {}, {}. Mac: {}. Windows: {}.".format(
+				share.name, share.mac_path, share.vm_path, READ_ONLY_TEXT if share.read_only else READ_WRITE_TEXT, mac_text, windows_text))
+		return EXIT_SUCCESS
+
+	def _find_share(self, name):
+		shares = load_config().shares
+		for share in shares:
+			if share.name.casefold() == name.casefold():
+				if share.vm != self.config.vm_name:
+					raise ShareError("share '{}' belongs to VM '{}'. Set vm_name to '{}' in the config to remove it".format(share.name, share.vm, share.vm))
+				return share
+		if not shares:
+			raise ShareError("no share named '{}'. There are no shares".format(name))
+		raise ShareError("no share named '{}'. Shares: {}".format(name, ", ".join(share.name for share in shares)))
+
+	def _remove_mac_side(self, name):
+		self._write_shares(tuple(share for share in load_config().shares if share.name != name))
+		remove_file(self.paths.log_file(name))
+
+	def _ask_windows_to_remove(self, name):
+		"""Push the remove marker. A failed push is fine when Windows has already dropped the share."""
+		try:
+			self.runner.push(guest_share_folder(name) + "\\" + REMOVE_MARKER_NAME, b"")
+		except (UnknownVMError, UTMCtlMissingError):
+			raise
+		except (BackendError, GuestError):
+			guest = self._guest_status()
+			if guest is None or name in guest:
+				raise
+
+	def _wait_for_removal(self, name):
+		"""Wait until a good status read no longer lists the share. Pending uploads extend the wait without limit."""
+		deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
+		next_progress = self.clock()
+		while True:
+			guest = self._guest_status()
+			if guest is not None and name not in guest:
+				return
+			entry = guest.get(name) if guest is not None else None
+			pending = entry.get("pending") if _state_of(entry) == REMOVING_STATE else None
+			if isinstance(pending, int) and pending > 0:
+				deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
+				if self.clock() >= next_progress:
+					self._print("Waiting for Windows to upload {} files to the Mac. Press Ctrl+C to stop waiting. The share then stays in place until you run wn {} {} again.".format(pending, REMOVE_COMMAND, name))
+					next_progress = self.clock() + REMOVE_PROGRESS_SECONDS
+			elif self.clock() >= deadline:
+				raise ShareError("Windows did not remove the share within {} s. Windows reports: {}. Run wn {} {} again later".format(REMOVE_TIMEOUT_SECONDS, _reported(entry), REMOVE_COMMAND, name))
+			self.sleep(STATUS_POLL_SECONDS)
+
+	def remove_share(self, name):
+		share = self._find_share(name)
+		try:
+			self._check_vm(REMOVE_COMMAND, REMOVE_STOPPED_MESSAGE)
+		except UnknownVMError:
+			self._remove_mac_side(share.name)
+			self._print("VM '{}' no longer exists in UTM, so only the Mac side was removed".format(self.config.vm_name))
+			return
+		self._ask_windows_to_remove(share.name)
+		self._wait_for_removal(share.name)
+		self._remove_mac_side(share.name)
+		self._print("Removed {}. {} is gone from Windows. The files stay in {} on the Mac.".format(share.name, share.vm_path, share.mac_path))
+		if not shares_for_vm(load_config().shares, self.config.vm_name):
+			self._run_script(CLEANUP_SCRIPT, {}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+			self._print("Removed the wn share files and the wn-shares task from Windows. WinFsp stays installed. To remove it, open Settings > Apps in Windows.")

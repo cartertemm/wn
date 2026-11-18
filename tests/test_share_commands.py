@@ -8,12 +8,12 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeBackend, write_config
-from wn.backends.utm import UTMCtlError
+from wn.backends.utm import UnknownVMError, UTMCtlError
 from wn.config import ConfigError, load_config, update_config_file
 from wn.downloads import RCLONE_WINDOWS_BINARY, WINFSP_SOURCE, ShareTools
 from wn.guest_runner import GuestError, GuestScriptError
 from wn.agent import launch_agent_path, pid_file_path
-from wn.share_commands import WINFSP_NOTICE, ShareCommands, agent_is_installed, agent_is_running
+from wn.share_commands import REMOVE_PROGRESS_SECONDS, WINFSP_NOTICE, ShareCommands, agent_is_installed, agent_is_running
 from wn.share_sftp import (
 	CLEANUP_SCRIPT,
 	FETCH_SCRIPT,
@@ -403,7 +403,6 @@ class AddShareTests(ShareCommandTestCase):
 			(prepare_result(vm_path="junction"), VM_PATH + " is already a mount point in Windows"),
 			(prepare_result(vm_path="file"), VM_PATH + " is a file in Windows"),
 			(prepare_result(parent_exists=False), "the folder that holds " + VM_PATH + " does not exist in Windows. Create it first"),
-			(prepare_result(removing=True), "Windows is still removing a share named Projects. Wait a minute and try again"),
 		)
 		for result, message in cases:
 			with self.subTest(message=message):
@@ -412,6 +411,37 @@ class AddShareTests(ShareCommandTestCase):
 				self.assert_refused_with_config_unchanged(message)
 				self.assertEqual(self.runs(), [PREPARE_SCRIPT])
 				self.assertEqual(self.pushes(), [])
+
+	def test_share_that_windows_is_removing_is_refused(self):
+		other = self.make_mac_folder("Other")
+		update_config_file({"shares": [Share("Other", "Windows", "mac_to_vm", other, "C:\\Other", False, FIRST_PORT).to_dict()]})
+		self.runner.results[PREPARE_SCRIPT] = prepare_result(removing=True)
+		before = self.config_text()
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		self.assertEqual(str(caught.exception), "Windows is still removing a share named Projects. Wait a minute and try again")
+		self.assertEqual(self.config_text(), before)
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT])
+		self.assertEqual(self.pushes(), [])
+
+	def test_remove_marker_without_other_shares_is_cleaned(self):
+		self.runner.results[PREPARE_SCRIPT] = prepare_result(removing=True)
+
+		def marker_gone(call):
+			if call[:2] == ("run", CLEANUP_SCRIPT):
+				self.runner.results[PREPARE_SCRIPT] = prepare_result()
+
+		self.runner.on_call = marker_gone
+		update_config_file({"shares": [Share("Archive", "Test", "mac_to_vm", "/Archive", "C:\\Archive", False, FIRST_PORT).to_dict()]})
+		self.add()
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, CLEANUP_SCRIPT, PREPARE_SCRIPT, TASK_SCRIPT])
+		self.assertEqual([share.name for share in load_config().shares], ["Archive", SHARE_NAME])
+
+	def test_remove_marker_that_stays_after_cleaning_is_refused(self):
+		self.runner.results[PREPARE_SCRIPT] = prepare_result(removing=True)
+		self.assert_refused_with_config_unchanged("Windows is still removing a share named Projects. Wait a minute and try again")
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, CLEANUP_SCRIPT, PREPARE_SCRIPT])
+		self.assertEqual(self.pushes(), [])
 
 	def test_empty_vm_folder_is_accepted(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(vm_path="empty")
@@ -611,6 +641,284 @@ class RollbackTests(ShareCommandTestCase):
 			self.add()
 		self.assertEqual(self.config_text(), before)
 		self.assertNotIn(FOLDER + "\\remove", self.pushes())
+
+
+class SavedShareTestCase(ShareCommandTestCase):
+	def share(self, name=SHARE_NAME, vm="Windows", mac_path=None, vm_path=VM_PATH, read_only=False, port=FIRST_PORT):
+		return Share(name, vm, "mac_to_vm", mac_path or self.mac_folder, vm_path, read_only, port)
+
+	def save(self, *shares):
+		update_config_file({"shares": [share.to_dict() for share in shares]})
+
+	def serve_all(self, entries):
+		with open(self.paths.state_file, "w") as handle:
+			json.dump({"updated": "now", "shares": entries}, handle)
+
+	def guest_reports(self, shares):
+		self.runner.files[GUEST_STATUS_FILE] = status_text(shares)
+
+	def pulls(self):
+		return [call[1] for call in self.runner.calls if call[0] == "pull"]
+
+
+class ListTests(SavedShareTestCase):
+	def list_lines(self, **changes):
+		self.assertEqual(self.commands(**changes).list_shares(), 0)
+		return self.output.getvalue().splitlines()
+
+	def test_no_shares(self):
+		self.assertEqual(self.list_lines(), ["No shares. Add one with wn share <dir-on-mac> <dir-on-vm>"])
+		self.assertEqual(self.runner.calls, [])
+
+	def test_share_of_another_vm(self):
+		self.save(self.share("Archive", vm="Test"))
+		self.assertEqual(self.list_lines(), ["Archive: belongs to VM 'Test'"])
+		self.assertEqual(self.runner.calls, [])
+		self.assertNotIn(("status",), self.backend.calls)
+
+	def test_agent_not_running(self):
+		self.save(self.share())
+		self.assertEqual(self.list_lines(agent_running=lambda: False), [
+			"Projects: Mac folder {} in Windows at {}, read and write. Mac: the agent is not running. Run wn agent start. Windows: mounted.".format(self.mac_folder, VM_PATH),
+		])
+
+	def test_serving_and_mounted(self):
+		self.save(self.share(mac_path="/Users/carter/Projects", vm_path="C:\\Users\\carter\\Projects"))
+		self.assertEqual(self.list_lines(), [
+			"Projects: Mac folder /Users/carter/Projects in Windows at C:\\Users\\carter\\Projects, read and write. Mac: serving on port 47321. Windows: mounted.",
+		])
+
+	def test_waiting_and_stopped_vm(self):
+		self.save(self.share("Old", mac_path="/Users/carter/Old", vm_path="C:\\Old", read_only=True))
+		self.serve("Old", "waiting", "the VM network is not up")
+		self.backend.state = "stopped"
+		self.assertEqual(self.list_lines(), [
+			"Old: Mac folder /Users/carter/Old in Windows at C:\\Old, read only. Mac: waiting, the VM network is not up. Windows: unknown, the VM is stopped.",
+		])
+		self.assertEqual(self.runner.calls, [])
+
+	def test_guest_agent_down(self):
+		self.save(self.share())
+		self.backend.ip_address = None
+		self.assertTrue(self.list_lines()[0].endswith("Windows: unknown, no answer from the guest agent."))
+		self.output.truncate(0)
+		self.output.seek(0)
+		self.backend.ip = mock.Mock(side_effect=UTMCtlError("utmctl ip-address failed with exit code 1"))
+		self.assertTrue(self.list_lines()[0].endswith("Windows: unknown, no answer from the guest agent."))
+		self.assertEqual(self.runner.calls, [])
+
+	def test_unknown_vm(self):
+		self.save(self.share())
+		self.backend.status = mock.Mock(side_effect=UnknownVMError("UTM has no VM named 'Windows'. Known VMs: none"))
+		self.assertTrue(self.list_lines()[0].endswith("Windows: unknown, VM 'Windows' is not in UTM."))
+
+	def test_other_backend_error(self):
+		self.save(self.share())
+		self.backend.status = mock.Mock(side_effect=UTMCtlError("utmctl status timed out"))
+		self.assertTrue(self.list_lines()[0].endswith("Windows: unknown, utmctl status timed out."))
+
+	def test_guest_status_missing_or_unparsable(self):
+		self.save(self.share())
+		for answer in (None, "{"):
+			with self.subTest(answer=answer):
+				self.output.truncate(0)
+				self.output.seek(0)
+				self.runner.files[GUEST_STATUS_FILE] = answer
+				self.assertTrue(self.list_lines()[0].endswith("Windows: unknown, Windows has no share status yet."))
+
+	def test_missing_entries(self):
+		self.save(self.share())
+		os.remove(self.paths.state_file)
+		self.guest_reports({})
+		self.assertTrue(self.list_lines()[0].endswith("Mac: no state yet. Windows: not set up."))
+
+	def test_windows_state_with_detail(self):
+		self.save(self.share())
+		self.guest_reports({SHARE_NAME: {"state": "blocked", "detail": "C:\\Users\\c\\Projects exists as a local folder with files", "pid": None}})
+		self.assertTrue(self.list_lines()[0].endswith("Windows: blocked, C:\\Users\\c\\Projects exists as a local folder with files."))
+
+	def test_read_only_wording(self):
+		self.save(self.share(read_only=True))
+		self.assertIn(", read only. Mac:", self.list_lines()[0])
+
+	def test_list_pulls_the_guest_status_once(self):
+		other = self.make_mac_folder("Other")
+		self.save(self.share(), self.share("Other", mac_path=other, vm_path="C:\\Other", port=FIRST_PORT + 1), self.share("Archive", vm="Test", mac_path="/Archive", vm_path="C:\\Archive", port=FIRST_PORT + 2))
+		self.serve_all({SHARE_NAME: {"state": "serving", "detail": "", "pid": 1}, "Other": {"state": "error", "detail": "cannot start rclone", "pid": None}})
+		self.guest_reports({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 2}, "Other": {"state": "starting", "detail": "", "pid": 3}})
+		self.assertEqual(self.list_lines(), [
+			"Projects: Mac folder {} in Windows at {}, read and write. Mac: serving on port {}. Windows: mounted.".format(self.mac_folder, VM_PATH, FIRST_PORT),
+			"Other: Mac folder {} in Windows at C:\\Other, read and write. Mac: error, cannot start rclone. Windows: starting.".format(other),
+			"Archive: belongs to VM 'Test'",
+		])
+		self.assertEqual(self.pulls(), [GUEST_STATUS_FILE])
+
+
+class RemoveTests(SavedShareTestCase):
+	def setUp(self):
+		super().setUp()
+		os.makedirs(self.paths.logs)
+		with open(self.paths.log_file(SHARE_NAME), "w") as handle:
+			handle.write("rclone log\n")
+
+	def remove(self, name=SHARE_NAME, **changes):
+		return self.commands(**changes).remove_share(name)
+
+	def answer_in_turn(self, *answers):
+		answers = list(answers)
+		self.runner.files[GUEST_STATUS_FILE] = lambda: answers.pop(0) if len(answers) > 1 else answers[0]
+		return answers
+
+	def assert_refused_with_everything_kept(self, message, name=SHARE_NAME):
+		before = self.config_text()
+		with self.assertRaises(ShareError) as caught:
+			self.remove(name)
+		self.assertEqual(str(caught.exception), message)
+		self.assertEqual(self.config_text(), before)
+		self.assertTrue(os.path.exists(self.paths.log_file(SHARE_NAME)))
+		self.assertNotIn(CLEANUP_SCRIPT, self.runs())
+
+	def test_unknown_name_lists_the_names(self):
+		other = self.make_mac_folder("Other")
+		self.save(self.share(), self.share("Other", mac_path=other, vm_path="C:\\Other", port=FIRST_PORT + 1))
+		self.assert_refused_with_everything_kept("no share named 'Missing'. Shares: Projects, Other", "Missing")
+		self.save()
+		self.assert_refused_with_everything_kept("no share named 'Missing'. There are no shares", "Missing")
+		self.assertEqual(self.runner.calls, [])
+
+	def test_name_ignores_case(self):
+		self.save(self.share())
+		self.guest_reports({})
+		self.remove("projects")
+		self.assertEqual(self.pushes(), [FOLDER + "\\remove"])
+		self.assertEqual(load_config().shares, ())
+
+	def test_share_of_another_vm_is_refused(self):
+		self.save(self.share(vm="Test"))
+		self.assert_refused_with_everything_kept("share 'Projects' belongs to VM 'Test'. Set vm_name to 'Test' in the config to remove it")
+		self.assertEqual(self.runner.calls, [])
+
+	def test_unknown_vm_removes_only_the_mac_side(self):
+		self.save(self.share())
+		self.backend.status = mock.Mock(side_effect=UnknownVMError("UTM has no VM named 'Windows'. Known VMs: none"))
+		self.assertIsNone(self.remove())
+		self.assertEqual(load_config().shares, ())
+		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
+		self.assertEqual(self.output.getvalue(), "VM 'Windows' no longer exists in UTM, so only the Mac side was removed\n")
+		self.assertEqual(self.runner.calls, [])
+
+	def test_unknown_vm_without_a_log_file(self):
+		self.save(self.share())
+		os.remove(self.paths.log_file(SHARE_NAME))
+		self.backend.status = mock.Mock(side_effect=UnknownVMError("UTM has no VM named 'Windows'. Known VMs: none"))
+		self.remove()
+		self.assertEqual(load_config().shares, ())
+
+	def test_stopped_vm_keeps_everything(self):
+		self.save(self.share())
+		self.backend.state = "stopped"
+		self.assert_refused_with_everything_kept("VM 'Windows' is stopped. Start it with wn start and run wn unshare again, so wn can remove the share from Windows too")
+		self.assertEqual(self.runner.calls, [])
+
+	def test_guest_agent_down_keeps_everything(self):
+		self.save(self.share())
+		self.backend.ip_address = None
+		self.assert_refused_with_everything_kept("Windows is still starting (no answer from the guest agent). Try again in a minute")
+		self.assertEqual(self.runner.calls, [])
+
+	def test_removes_after_windows_drops_the_share(self):
+		self.save(self.share())
+		removing = {SHARE_NAME: {"state": "removing", "detail": "waiting for rclone to report its uploads", "pid": 5678}}
+		self.answer_in_turn(status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 5678}}), status_text(removing), status_text(removing), status_text({}))
+		configs = []
+		self.runner.on_call = lambda call: configs.append(tuple(share.name for share in load_config().shares)) if call[0] == "pull" else None
+		self.assertIsNone(self.remove())
+		self.assertEqual(self.pushes(), [FOLDER + "\\remove"])
+		self.assertEqual(self.runner.files[FOLDER + "\\remove"], "")
+		self.assertEqual(len(self.pulls()), 4)
+		self.assertEqual(configs, [(SHARE_NAME,)] * 4)
+		self.assertEqual(load_config().shares, ())
+		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
+		self.assertEqual(self.runs(), [CLEANUP_SCRIPT])
+		self.assertEqual(self.output.getvalue().splitlines(), [
+			"Removed Projects. {} is gone from Windows. The files stay in {} on the Mac.".format(VM_PATH, self.mac_folder),
+			"Removed the wn share files and the wn-shares task from Windows. WinFsp stays installed. To remove it, open Settings > Apps in Windows.",
+		])
+
+	def test_missing_or_half_written_status_is_not_gone(self):
+		self.save(self.share())
+		answers = self.answer_in_turn(None, "", "{\"updated\": \"2026", "\ufeff" + status_text({SHARE_NAME: {"state": "removing", "detail": "", "pid": 1}}), status_text({}))
+		self.remove()
+		self.assertEqual(len(self.pulls()), 5)
+		self.assertEqual(answers, [status_text({})])
+		self.assertEqual(load_config().shares, ())
+
+	def test_unparsable_status_never_counts_as_gone(self):
+		self.save(self.share())
+		self.runner.files[GUEST_STATUS_FILE] = "{"
+		self.assert_refused_with_everything_kept("Windows did not remove the share within 180 s. Windows reports: unknown. Run wn unshare Projects again later")
+		self.assertGreaterEqual(self.clock.now, 180)
+
+	def test_other_state_at_the_timeout_raises(self):
+		self.save(self.share())
+		self.assert_refused_with_everything_kept("Windows did not remove the share within 180 s. Windows reports: mounted. Run wn unshare Projects again later")
+
+	def test_pending_uploads_wait_without_a_time_limit(self):
+		self.save(self.share())
+		pending = {SHARE_NAME: {"state": "removing", "detail": "3 files to upload to the Mac", "pid": 1, "pending": 3}}
+		self.runner.files[GUEST_STATUS_FILE] = lambda: status_text({}) if self.clock.now >= 600 else status_text(pending)
+		configs = []
+		self.runner.on_call = lambda call: configs.append(len(load_config().shares)) if call[0] == "pull" else None
+		self.assertIsNone(self.remove())
+		self.assertGreaterEqual(self.clock.now, 600)
+		self.assertEqual(set(configs), {1})
+		self.assertEqual(load_config().shares, ())
+		lines = self.output.getvalue().splitlines()
+		progress = "Waiting for Windows to upload 3 files to the Mac. Press Ctrl+C to stop waiting. The share then stays in place until you run wn unshare Projects again."
+		self.assertEqual(lines.count(progress), 600 // REMOVE_PROGRESS_SECONDS)
+		self.assertEqual(lines[0], progress)
+
+	def test_ctrl_c_while_waiting_keeps_the_mac_side(self):
+		self.save(self.share())
+		self.guest_reports({SHARE_NAME: {"state": "removing", "detail": "3 files to upload to the Mac", "pid": 1, "pending": 3}})
+		before = self.config_text()
+
+		def interrupt(seconds):
+			raise KeyboardInterrupt
+
+		with self.assertRaises(KeyboardInterrupt):
+			self.remove(sleep=interrupt)
+		self.assertEqual(self.config_text(), before)
+		self.assertTrue(os.path.exists(self.paths.log_file(SHARE_NAME)))
+
+	def test_share_already_gone_from_windows(self):
+		self.save(self.share())
+		self.runner.push_errors[FOLDER + "\\remove"] = UTMCtlError("utmctl file failed with exit code 1: Error: cannot open file")
+		self.guest_reports({})
+		self.remove()
+		self.assertEqual(load_config().shares, ())
+
+	def test_failed_push_with_no_good_status_keeps_everything(self):
+		self.save(self.share())
+		self.runner.push_errors[FOLDER + "\\remove"] = UTMCtlError("utmctl file failed with exit code 1: Error: cannot open file")
+		for answer in (None, "{", status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 1}})):
+			with self.subTest(answer=answer):
+				self.runner.files[GUEST_STATUS_FILE] = answer
+				before = self.config_text()
+				with self.assertRaises(UTMCtlError):
+					self.remove()
+				self.assertEqual(self.config_text(), before)
+
+	def test_cleanup_runs_only_after_the_last_share(self):
+		other = self.make_mac_folder("Other")
+		self.save(self.share(), self.share("Other", mac_path=other, vm_path="C:\\Other", port=FIRST_PORT + 1), self.share("Archive", vm="Test", mac_path="/Archive", vm_path="C:\\Archive", port=FIRST_PORT + 2))
+		self.guest_reports({})
+		self.remove()
+		self.assertEqual(self.runs(), [])
+		self.assertEqual([share.name for share in load_config().shares], ["Other", "Archive"])
+		self.remove("Other")
+		self.assertEqual(self.runs(), [CLEANUP_SCRIPT])
+		self.assertEqual([share.name for share in load_config().shares], ["Archive"])
 
 
 if __name__ == "__main__":
