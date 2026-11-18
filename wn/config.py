@@ -4,13 +4,14 @@ import dataclasses
 import json
 import os
 import tempfile
-from typing import Optional
+from typing import Optional, Tuple
 
 from wn.backends.utm import DEFAULT_UTMCTL_PATH, DEFAULT_VM_NAME
 from wn.errors import WnError
+from wn.shares import CONFIG_DIRECTORY, Share, ShareError, shares_from_values, validate_shares
 from wn.text_input import DEFAULT_KEY_DELAY_MS
 
-CONFIG_RELATIVE_PATH = os.path.join("~", ".config", "wn", "config.json")
+CONFIG_RELATIVE_PATH = os.path.join(CONFIG_DIRECTORY, "config.json")
 
 
 class ConfigError(WnError):
@@ -31,6 +32,7 @@ class Config:
 	battery_sync: bool = True
 	battery_file: Optional[str] = None
 	camera: bool = False
+	shares: Tuple[Share, ...] = ()
 
 
 FIELD_TYPES = {
@@ -46,6 +48,7 @@ FIELD_TYPES = {
 	"battery_sync": (bool,),
 	"battery_file": (str, type(None)),
 	"camera": (bool,),
+	"shares": (list,),
 }
 OBSOLETE_FIELDS = ("qmp_port", "qmp_session_port")
 PATH_FIELDS = ("utmctl_path", "qmp_socket", "keygrab_binary", "keygrab_keycodes", "battery_file")
@@ -74,6 +77,11 @@ def _validate(path, values):
 		allowed_types = FIELD_TYPES[key]
 		if not isinstance(value, allowed_types) or (isinstance(value, bool) and bool not in allowed_types):
 			raise ConfigError("{}: setting '{}' has the wrong type".format(path, key))
+	if "shares" in values:
+		try:
+			validate_shares(path, values["shares"])
+		except ShareError as error:
+			raise ConfigError(str(error)) from None
 
 
 def load_config(path=None):
@@ -88,6 +96,8 @@ def load_config(path=None):
 	for field in PATH_FIELDS:
 		if values.get(field):
 			values[field] = os.path.expanduser(values[field])
+	if "shares" in values:
+		values["shares"] = shares_from_values(values["shares"])
 	return Config(**values)
 
 

@@ -5,6 +5,15 @@ import unittest
 from unittest import mock
 
 from wn.config import Config, ConfigError, config_path, load_config, update_config_file
+from wn.shares import MAC_TO_VM, Share
+
+
+SHARE_PORT = 47321
+BAD_PORT = 1
+
+
+def make_share(port=SHARE_PORT):
+	return Share(name="docs", vm="Windows", direction=MAC_TO_VM, mac_path="/Users/you/Documents", vm_path="C:\\Users\\you\\Mac", read_only=False, port=port)
 
 
 class ConfigTests(unittest.TestCase):
@@ -174,6 +183,32 @@ class ConfigTests(unittest.TestCase):
 		self.write_config("[]")
 		with self.assertRaises(ConfigError):
 			update_config_file({"camera": True})
+
+	def test_shares_default_to_none(self):
+		self.assertEqual(load_config().shares, ())
+
+	def test_shares_become_share_objects(self):
+		share = make_share()
+		self.write_config(json.dumps({"shares": [share.to_dict()]}))
+		self.assertEqual(load_config().shares, (share,))
+
+	def test_bad_share_raises_config_error_naming_the_file(self):
+		self.write_config(json.dumps({"shares": [make_share(BAD_PORT).to_dict()]}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn(config_path(), str(context.exception))
+		self.assertIn("shares[0]", str(context.exception))
+
+	def test_shares_must_be_a_list(self):
+		self.write_config(json.dumps({"shares": {}}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn("has the wrong type", str(context.exception))
+
+	def test_written_shares_load_again(self):
+		share = make_share()
+		update_config_file({"shares": [share.to_dict()]})
+		self.assertEqual(load_config().shares, (share,))
 
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")
