@@ -477,6 +477,7 @@ WINFSP_DATA = b"winfsp" * 3000
 MEMBER_NAME = "folder/rclone"
 MEMBER_DATA = b"the rclone binary" * 1000
 EXECUTABLE_MODE = 0o755
+WRONG_MODE = 0o600
 OLD_TIME_NS = 1000000000
 
 
@@ -602,6 +603,34 @@ class ShareToolsTests(unittest.TestCase):
 		modified = os.stat(destination).st_mtime_ns
 		extract_verified_member(zip_path, member, destination, EXECUTABLE_MODE)
 		self.assertEqual(os.stat(destination).st_mtime_ns, modified)
+
+	def write_old_destination(self):
+		destination = self.destination()
+		os.makedirs(os.path.dirname(destination), exist_ok=True)
+		with open(destination, "wb") as file:
+			file.write(b"old binary")
+		return destination
+
+	def test_extract_replaces_a_wrong_file(self):
+		destination = self.write_old_destination()
+		extract_verified_member(self.make_zip(), ZipMember(MEMBER_NAME, sha256_of(MEMBER_DATA)), destination, EXECUTABLE_MODE)
+		with open(destination, "rb") as file:
+			self.assertEqual(file.read(), MEMBER_DATA)
+
+	def test_extract_with_a_wrong_hash_deletes_an_old_file(self):
+		destination = self.write_old_destination()
+		with self.assertRaises(DownloadError):
+			extract_verified_member(self.make_zip(), ZipMember(MEMBER_NAME, "0" * 64), destination, EXECUTABLE_MODE)
+		self.assertEqual(os.listdir(os.path.dirname(destination)), [])
+
+	def test_extract_fixes_the_mode_of_a_matching_file(self):
+		zip_path = self.make_zip()
+		member = ZipMember(MEMBER_NAME, sha256_of(MEMBER_DATA))
+		destination = self.destination()
+		extract_verified_member(zip_path, member, destination, EXECUTABLE_MODE)
+		os.chmod(destination, WRONG_MODE)
+		extract_verified_member(zip_path, member, destination, EXECUTABLE_MODE)
+		self.assertEqual(stat.S_IMODE(os.stat(destination).st_mode), EXECUTABLE_MODE)
 
 
 if __name__ == "__main__":

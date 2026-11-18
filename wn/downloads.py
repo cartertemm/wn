@@ -591,6 +591,7 @@ def extract_verified_member(zip_path, member, destination, mode):
 	actual = digest.hexdigest()
 	if actual != member.sha256:
 		_remove_if_present(part_path)
+		_remove_if_present(destination)
 		raise DownloadError("SHA256 of {} in {} is {} but the pinned SHA256 is {}. The file was deleted.".format(member.name, zip_path, actual, member.sha256))
 	os.chmod(part_path, mode)
 	os.replace(part_path, destination)
