@@ -156,7 +156,7 @@ class UTMBackend(Backend):
 		command = self.utmctl_command + list(arguments)
 		try:
 			if input_bytes is None:
-				result = subprocess.run(command, capture_output=True, text=True, timeout=UTMCTL_TIMEOUT_SECONDS)
+				result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=UTMCTL_TIMEOUT_SECONDS)
 			else:
 				result = subprocess.run(command, input=input_bytes, capture_output=True, timeout=UTMCTL_TIMEOUT_SECONDS)
 		except subprocess.TimeoutExpired:

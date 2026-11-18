@@ -253,6 +253,10 @@ class UTMBackendGuestTests(FakeUTMCtlTestCase):
 		self.update_vm(files={"C:\\wn-setup-done": "done\r\n"})
 		self.assertEqual(self.backend().pull_file("C:\\wn-setup-done").strip(), "done")
 
+	def test_pull_file_replaces_bytes_that_are_not_utf_8(self):
+		backend = self.backend(utmctl_path=[sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'bad \\xff byte')"])
+		self.assertEqual(backend.pull_file("C:\\out.txt"), "bad \ufffd byte")
+
 	def test_pull_missing_file_raises(self):
 		with self.assertRaises(UTMCtlError):
 			self.backend().pull_file("C:\\missing")
