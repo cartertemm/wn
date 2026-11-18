@@ -66,7 +66,7 @@ SHARE_EPILOG = """Limits:
   Mac names that end in a dot or a space, or names such as nul, cannot be opened in Windows.
   Mac symlinks do not appear in Windows.
   Paths longer than 260 characters need an app with long path support.
-  File calls wait up to 30 s while the Mac side is down."""
+  While the Mac side cannot be reached (wn agent stopped, Mac asleep), file operations in the shared folder wait until it is back. Nothing is lost."""
 
 
 def build_parser():
