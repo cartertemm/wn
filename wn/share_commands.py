@@ -70,6 +70,7 @@ RESTART_NEEDED_EXIT_CODE = 3010
 RUNNING_STATE = "running"
 MOUNTED_STATE = "mounted"
 REMOVING_STATE = "removing"
+INCOMPLETE_STATE = "incomplete"
 UNKNOWN_STATE = "unknown"
 EXIT_SUCCESS = 0
 WINFSP_OK = "ok"
@@ -494,8 +495,12 @@ class ShareCommands:
 		self._print("Removed {}. {} is gone from Windows. The files stay in {} on the Mac.".format(share.name, share.vm_path, share.mac_path))
 		if shares_for_vm(load_config().shares, self.config.vm_name):
 			return
-		if guest:
-			self._print("Windows still lists other wn shares ({}), so wn kept its share files and the wn-shares task in Windows.".format(", ".join(sorted(guest))))
-		else:
-			self._run_script(CLEANUP_SCRIPT, {}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		others = sorted(key for key, entry in guest.items() if _state_of(entry) != INCOMPLETE_STATE)
+		if others:
+			self._print("Windows still lists other wn shares ({}), so wn kept its share files and the wn-shares task in Windows.".format(", ".join(others)))
+			return
+		result = self._run_script(CLEANUP_SCRIPT, {}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		if result["cleaned"]:
 			self._print("Removed the wn share files and the wn-shares task from Windows. WinFsp stays installed. To remove it, open Settings > Apps in Windows.")
+		else:
+			self._print("Windows still has files to upload to the Mac in {}, so wn kept its share files and the wn-shares task in Windows.".format(", ".join(result["shares_with_cache"])))

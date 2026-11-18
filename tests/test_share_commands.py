@@ -73,7 +73,7 @@ class FakeRunner:
 			PREPARE_SCRIPT: prepare_result(),
 			FETCH_SCRIPT: {"mismatch": None, "winfsp_exit": 0, "winfsp_log": []},
 			TASK_SCRIPT: {"task": "registered"},
-			CLEANUP_SCRIPT: {"cleaned": True},
+			CLEANUP_SCRIPT: {"cleaned": True, "shares_with_cache": []},
 		}
 		self.results.update(results or {})
 
@@ -763,6 +763,14 @@ class ListTests(SavedShareTestCase):
 		self.hold_lock()
 		self.assertTrue(self.list_lines()[0].endswith("Windows: mounted."))
 
+	def test_incomplete_and_error_states_are_shown_as_they_are(self):
+		other = self.make_mac_folder("Other")
+		self.save(self.share(), self.share("Other", mac_path=other, vm_path="C:\\Other", port=FIRST_PORT + 1))
+		self.guest_reports({SHARE_NAME: {"state": "incomplete", "detail": "the share folder has no share.json", "pid": None}, "Other": {"state": "error", "detail": "Access is denied", "pid": None}})
+		lines = self.list_lines()
+		self.assertTrue(lines[0].endswith("Windows: incomplete, the share folder has no share.json."))
+		self.assertTrue(lines[1].endswith("Windows: error, Access is denied."))
+
 	def test_read_only_wording(self):
 		self.save(self.share(read_only=True))
 		self.assertIn(", read only. Mac:", self.list_lines()[0])
@@ -1002,9 +1010,31 @@ class RemoveTests(SavedShareTestCase):
 		self.assertEqual([share.name for share in load_config().shares], ["Archive"])
 
 
+	def test_error_entry_is_not_gone(self):
+		self.save(self.share())
+		self.guest_reports({SHARE_NAME: {"state": "error", "detail": "could not delete " + FOLDER, "pid": None}})
+		self.assert_refused_with_everything_kept("Windows did not remove the share within 180 s. Windows reports: error, could not delete {}. Run wn unshare Projects again later".format(FOLDER))
+
+	def test_cleanup_ignores_incomplete_folders(self):
+		self.save(self.share())
+		self.guest_reports({"Stale": {"state": "incomplete", "detail": "the share folder has no share.json", "pid": None}})
+		self.remove()
+		self.assertEqual(self.runs(), [TASK_SCRIPT, CLEANUP_SCRIPT])
+		self.assertTrue(self.output.getvalue().splitlines()[-1].startswith("Removed the wn share files"))
+
+	def test_refused_cleanup_keeps_the_guest_files_and_says_why(self):
+		self.save(self.share())
+		self.guest_reports({})
+		self.runner.results[CLEANUP_SCRIPT] = {"cleaned": False, "shares_with_cache": ["Old", "Stale"]}
+		self.assertIsNone(self.remove())
+		self.assertEqual(load_config().shares, ())
+		self.assertEqual(self.output.getvalue().splitlines()[1:], [
+			"Windows still has files to upload to the Mac in Old, Stale, so wn kept its share files and the wn-shares task in Windows.",
+		])
+
 	def test_cleanup_waits_while_windows_lists_other_shares(self):
 		self.save(self.share())
-		self.guest_reports({"Leftover": {"state": "removing", "detail": "", "pid": 1}})
+		self.guest_reports({"Leftover": {"state": "removing", "detail": "", "pid": 1}, "Stale": {"state": "incomplete", "detail": "", "pid": None}})
 		self.remove()
 		self.assertEqual(load_config().shares, ())
 		self.assertEqual(self.runs(), [TASK_SCRIPT])
