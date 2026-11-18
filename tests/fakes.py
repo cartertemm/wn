@@ -8,6 +8,7 @@ import tempfile
 
 from wn.appbundle import CLANG_PATH
 from wn.backend import Backend, VMStatus
+from wn.backends.utm import UTMCtlError
 
 
 def write_config(home, values):
@@ -46,6 +47,8 @@ class FakeBackend(Backend):
 		self.session_socket_path = session_socket_path
 		self.ip_address = ip_address
 		self.state = state
+		self.files = {}
+		self.on_exec = None
 
 	def start(self):
 		self.calls.append(("start",))
@@ -65,6 +68,21 @@ class FakeBackend(Backend):
 	def qmp_socket_path(self, session=False):
 		self.calls.append(("qmp_socket_path", session))
 		return self.session_socket_path if session else self.socket_path
+
+	def pull_file(self, guest_path):
+		self.calls.append(("pull_file", guest_path))
+		if guest_path not in self.files:
+			raise UTMCtlError("utmctl file failed with exit code 1: Error: cannot open file")
+		return self.files[guest_path]
+
+	def push_file(self, guest_path, data):
+		self.calls.append(("push_file", guest_path))
+		self.files[guest_path] = data.decode("utf-8")
+
+	def exec_command(self, *argv):
+		self.calls.append(("exec_command",) + argv)
+		if self.on_exec is not None:
+			self.on_exec(argv)
 
 
 class RecordingQMPClient:

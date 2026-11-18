@@ -264,3 +264,28 @@ class UTMBackendGuestTests(FakeUTMCtlTestCase):
 	def test_exists(self):
 		self.assertTrue(self.backend().exists())
 		self.assertFalse(self.backend(vm_name="Other").exists())
+
+
+class UTMBackendPushAndExecTests(FakeUTMCtlTestCase):
+	def test_push_file_sends_the_bytes_on_stdin(self):
+		backend = self.backend()
+		backend.push_file("C:\\x.ps1", b"\xef\xbb\xbfhello\r\n")
+		state = self.read_state()
+		self.assertEqual(state["vms"][0]["files"]["C:\\x.ps1"], "\ufeffhello\r\n")
+		self.assertEqual(state["calls"][-1], ["file", "push", "Windows 11", "C:\\x.ps1"])
+		self.assertEqual(backend.pull_file("C:\\x.ps1"), "\ufeffhello\n")
+
+	def test_exec_command_passes_the_argv_after_cmd(self):
+		self.backend().exec_command("cmd.exe", "/c", "C:\\a.cmd")
+		self.assertEqual(self.read_state()["calls"][-1], ["exec", "Windows 11", "--cmd", "cmd.exe", "/c", "C:\\a.cmd"])
+
+	def test_push_file_to_an_unknown_vm_raises_unknown_vm_error(self):
+		with self.assertRaises(UnknownVMError):
+			self.backend(vm_name="Other").push_file("C:\\x.ps1", b"hello")
+
+	def test_exec_command_failure_raises_utmctl_error(self):
+		self.fail_command("exec", "Error: guest agent not running")
+		with self.assertRaises(UTMCtlError) as context:
+			self.backend().exec_command("cmd.exe")
+		self.assertNotIsInstance(context.exception, UnknownVMError)
+		self.assertIn("Error: guest agent not running", str(context.exception))
