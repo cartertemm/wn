@@ -1,5 +1,6 @@
 """Run PowerShell scripts as SYSTEM in the guest, move small files in and out, and offer large files over HTTP."""
 
+import base64
 import collections
 import http
 import http.server
@@ -7,6 +8,7 @@ import json
 import os
 import secrets
 import shutil
+import sys
 import threading
 import time
 
@@ -16,10 +18,50 @@ from wn.errors import WnError
 from wn.shares import GUEST_ROOT, HOST_ADDRESS
 
 EXEC_DIRECTORY = GUEST_ROOT + "\\exec"
-READY_FILE = EXEC_DIRECTORY + "\\ready.txt"
-SYSTEM_SID = "*S-1-5-18"
-ADMINISTRATORS_SID = "*S-1-5-32-544"
-READY_COMMAND = "mkdir {exec} 2>nul & icacls {root} /inheritance:r /grant:r {system}:(OI)(CI)F {administrators}:(OI)(CI)F >nul & echo {token} > {ready}"
+READY_FILE = EXEC_DIRECTORY + "\\ready-{}.txt"
+SYSTEM_SID = "S-1-5-18"
+ADMINISTRATORS_SID = "S-1-5-32-544"
+READY_COMMAND = ("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand")
+READY_VALUES = "$Root = '{root}'\n$Exec = '{exec}'\n$Ready = '{ready}'\n$Token = '{token}'\n$Sids = '{system}', '{administrators}'\n"
+READY_SCRIPT = """$ErrorActionPreference = 'Stop'
+function New-Security {
+	$security = [Security.AccessControl.DirectorySecurity]::new()
+	$security.SetAccessRuleProtection($true, $false)
+	foreach ($sid in $Sids) {
+		$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+	}
+	$security
+}
+function Get-Rules($Security) {
+	$Security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { '{0} {1} {2} {3} {4} {5}' -f $_.IdentityReference, $_.AccessControlType, $_.FileSystemRights, $_.InheritanceFlags, $_.PropagationFlags, $_.IsInherited } | Sort-Object
+}
+function Test-Protected {
+	$security = [IO.Directory]::GetAccessControl($Root)
+	$security.AreAccessRulesProtected -and ((Get-Rules $security) -join ';') -eq ((Get-Rules (New-Security)) -join ';')
+}
+function Assert-Folder($Path) {
+	$attributes = [IO.File]::GetAttributes($Path)
+	if (-not $attributes.HasFlag([IO.FileAttributes]::Directory) -or $attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { throw "$Path is not a plain folder" }
+	$owner = [IO.Directory]::GetAccessControl($Path).GetOwner([Security.Principal.SecurityIdentifier])
+	if ($Sids -notcontains $owner.Value) { throw "$Path has an unexpected owner" }
+}
+try {
+	if (-not [IO.Directory]::Exists($Root)) {
+		$security = New-Security
+		$security.SetOwner([Security.Principal.SecurityIdentifier]::new($Sids[0]))
+		[IO.Directory]::CreateDirectory($Root, $security) | Out-Null
+	}
+	Assert-Folder $Root
+	if (-not (Test-Protected)) { [IO.Directory]::SetAccessControl($Root, (New-Security)) }
+	if (-not (Test-Protected)) { throw "$Root is not protected" }
+	Assert-Folder $Root
+	[IO.Directory]::CreateDirectory($Exec) | Out-Null
+	Assert-Folder $Exec
+	[IO.File]::WriteAllText($Ready, $Token)
+} catch {
+	exit 1
+}
+"""
 READY_TIMEOUT_SECONDS = 30
 POLL_SECONDS = 1
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 120
@@ -82,7 +124,7 @@ def exec_paths(script_id):
 
 
 def render_powershell(script, params=None):
-	params_json = json.dumps({} if params is None else params).replace("'", "''")
+	params_json = json.dumps({} if params is None else params, ensure_ascii=True).replace("'", "''")
 	text = POWERSHELL_PREAMBLE + POWERSHELL_PARAMS_LINE.format(params_json) + POWERSHELL_TRAP + script
 	return UTF8_BOM + text.encode("utf-8")
 
@@ -90,6 +132,11 @@ def render_powershell(script, params=None):
 def render_wrapper(paths, token):
 	lines = [line.format(script=paths.script, output=paths.output, token=token, done=paths.done) for line in WRAPPER_LINES]
 	return ("\r\n".join(lines) + "\r\n").encode("ascii")
+
+
+def encode_ready_script(token, ready_file):
+	values = READY_VALUES.format(root=GUEST_ROOT, exec=EXEC_DIRECTORY, ready=ready_file, token=token, system=SYSTEM_SID, administrators=ADMINISTRATORS_SID)
+	return base64.b64encode((values + READY_SCRIPT).encode("utf-16-le")).decode("ascii")
 
 
 class GuestRunner:
@@ -103,17 +150,18 @@ class GuestRunner:
 		self._ready = False
 
 	def ensure_ready(self):
-		"""Create the exec folder and lock it to SYSTEM and Administrators before anything is pushed into it."""
+		"""Create the exec folder, or check that it is a plain folder locked to SYSTEM and Administrators, before anything is pushed into it."""
 		if self._ready:
 			return
 		token = self.new_id(TOKEN_BYTES)
-		command = READY_COMMAND.format(exec=EXEC_DIRECTORY, root=GUEST_ROOT, system=SYSTEM_SID, administrators=ADMINISTRATORS_SID, token=token, ready=READY_FILE)
-		self.backend.exec_command("cmd.exe", "/c", command)
+		ready_file = READY_FILE.format(token)
+		self.backend.exec_command(*READY_COMMAND, encode_ready_script(token, ready_file))
 		deadline = self.clock() + READY_TIMEOUT_SECONDS
-		while self._read_text(READY_FILE).strip() != token:
+		while self._read_text(ready_file).strip() != token:
 			if self.clock() >= deadline:
-				raise GuestError("Windows did not create {} within {} s. Check that the UTM guest tools run in Windows".format(EXEC_DIRECTORY, READY_TIMEOUT_SECONDS))
+				raise GuestError("Windows did not confirm {} within {} s. Either the UTM guest tools do not run in Windows, or {} exists with unexpected ownership or type. Check the guest tools, or inspect or delete {} in Windows, and run the command again".format(EXEC_DIRECTORY, READY_TIMEOUT_SECONDS, GUEST_ROOT, GUEST_ROOT))
 			self.sleep(POLL_SECONDS)
+		self._delete(ready_file)
 		self._ready = True
 
 	def run(self, script, params=None, timeout=DEFAULT_SCRIPT_TIMEOUT_SECONDS, label=DEFAULT_LABEL):
@@ -128,11 +176,16 @@ class GuestRunner:
 		exit_code = self._exit_code(paths.done, token)
 		while exit_code is None:
 			if self.clock() >= deadline:
-				raise GuestTimeoutError(label, timeout, self._read_text(paths.output))
+				output = self._read_text(paths.output)
+				try:
+					self._delete(paths.pattern)
+				except BackendError:
+					pass
+				raise GuestTimeoutError(label, timeout, output)
 			self.sleep(POLL_SECONDS)
 			exit_code = self._exit_code(paths.done, token)
 		output = self._read_text(paths.output)
-		self.backend.exec_command("cmd.exe", "/c", "del /q {}".format(paths.pattern))
+		self._delete(paths.pattern)
 		if exit_code != 0:
 			raise GuestScriptError(label, exit_code, output)
 		return output
@@ -167,6 +220,9 @@ class GuestRunner:
 			return ""
 		return text.lstrip(BOM_TEXT).replace("\r", "")
 
+	def _delete(self, pattern):
+		self.backend.exec_command("cmd.exe", "/c", "del /q {}".format(pattern))
+
 	def _exit_code(self, done_path, token):
 		fields = self._read_text(done_path).split()
 		if len(fields) != DONE_FIELD_COUNT or fields[1] != token:
@@ -175,6 +231,14 @@ class GuestRunner:
 			return int(fields[0])
 		except ValueError:
 			return None
+
+
+class OfferServer(http.server.ThreadingHTTPServer):
+	"""Prints no traceback when a client drops its connection."""
+
+	def handle_error(self, request, client_address):
+		if not isinstance(sys.exc_info()[1], ConnectionError):
+			super().handle_error(request, client_address)
 
 
 class FileOffer:
@@ -201,7 +265,7 @@ class FileOffer:
 			def log_message(self, format, *arguments):
 				pass
 
-		self.server = http.server.ThreadingHTTPServer((self.host, 0), Handler)
+		self.server = OfferServer((self.host, 0), Handler)
 		self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 		self.thread.start()
 		self.timer = threading.Timer(self.timeout, self._stop)
@@ -227,8 +291,8 @@ class FileOffer:
 		self.server.server_close()
 
 	def _serve(self, request):
-		prefix = "/{}/".format(self.token)
-		path = self.files.get(request.path[len(prefix):]) if request.path.startswith(prefix) else None
+		token, _, name = request.path[1:].partition("/")
+		path = self.files.get(name) if secrets.compare_digest(token.encode(), self.token.encode()) else None
 		if path is None:
 			request.send_error(http.HTTPStatus.NOT_FOUND)
 			return
