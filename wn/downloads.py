@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from typing import Optional
 
 from wn.errors import WnError
@@ -99,6 +100,46 @@ class _Source:
 	url: str
 	file_name: str
 	sha256: str
+
+
+RCLONE_MAC_LABEL = "rclone for macOS"
+RCLONE_WINDOWS_LABEL = "rclone for Windows"
+WINFSP_LABEL = "WinFsp installer"
+RCLONE_MAC_ROLE = "rclone_mac_zip"
+RCLONE_WINDOWS_ROLE = "rclone_windows_zip"
+WINFSP_ROLE = "winfsp_msi"
+RCLONE_MAC_SOURCE = _Source(
+	"https://downloads.rclone.org/v1.76.0/rclone-v1.76.0-osx-arm64.zip",
+	"rclone-v1.76.0-osx-arm64.zip",
+	"e72dc90b70f4947a7b72b61bde4a4fbba5777b2874fb448951ffdde67ebd0ab7",
+)
+RCLONE_WINDOWS_SOURCE = _Source(
+	"https://downloads.rclone.org/v1.76.0/rclone-v1.76.0-windows-arm64.zip",
+	"rclone-v1.76.0-windows-arm64.zip",
+	"c406c8a69a5a408e50624aa990fbb0a6266b3a4e83782a94de3cb96f50f86f10",
+)
+WINFSP_SOURCE = _Source(
+	"https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi",
+	"winfsp-2.1.25156.msi",
+	"073a70e00f77423e34bed98b86e600def93393ba5822204fac57a29324db9f7a",
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ZipMember:
+	name: str
+	sha256: str
+
+
+RCLONE_MAC_BINARY = ZipMember("rclone-v1.76.0-osx-arm64/rclone", "da7c43d491e41966f4af7f5f4ac34f7dac2c8866e3675393ef0316ebc57ccd42")
+RCLONE_WINDOWS_BINARY = ZipMember("rclone-v1.76.0-windows-arm64/rclone.exe", "666b57912d75ecc67b38960c4e28448e94b61d7977f5f709e25c0c7a3c6d7fcd")
+
+
+@dataclasses.dataclass(frozen=True)
+class ShareTools:
+	rclone_mac_zip: str
+	rclone_windows_zip: str
+	winfsp_msi: str
 
 
 def parse_product_edition_id(page_html):
@@ -511,3 +552,46 @@ def fetch_all(downloads_dir, include_nvda=True, report=print, opener=None):
 	guest_tools_iso = fetcher.ensure(GUEST_TOOLS_ROLE, GUEST_TOOLS_LABEL, _guest_tools_source(http))
 	nvda_installer = fetcher.ensure(NVDA_ROLE, NVDA_LABEL, _nvda_source(http)) if include_nvda else None
 	return Downloads(windows_iso, virtio_iso, guest_tools_iso, nvda_installer)
+
+
+def fetch_share_tools(downloads_dir=DEFAULT_DOWNLOADS_DIR, report=print, opener=None):
+	"""Download and verify the pinned rclone zips and the WinFsp installer into ``downloads_dir``."""
+	directory = os.path.abspath(os.path.expanduser(downloads_dir))
+	os.makedirs(directory, exist_ok=True)
+	http = _Http(opener or _default_opener())
+	fetcher = _Fetcher(directory, http, report)
+	return ShareTools(
+		fetcher.ensure(RCLONE_MAC_ROLE, RCLONE_MAC_LABEL, RCLONE_MAC_SOURCE),
+		fetcher.ensure(RCLONE_WINDOWS_ROLE, RCLONE_WINDOWS_LABEL, RCLONE_WINDOWS_SOURCE),
+		fetcher.ensure(WINFSP_ROLE, WINFSP_LABEL, WINFSP_SOURCE),
+	)
+
+
+def extract_verified_member(zip_path, member, destination, mode):
+	"""Extract only ``member.name`` from ``zip_path`` to ``destination`` and check its pinned SHA256."""
+	if os.path.exists(destination) and _sha256_of_file(destination) == member.sha256:
+		os.chmod(destination, mode)
+		return destination
+	os.makedirs(os.path.dirname(destination), exist_ok=True)
+	part_path = destination + PART_SUFFIX
+	digest = hashlib.sha256()
+	try:
+		with zipfile.ZipFile(zip_path) as archive:
+			try:
+				source = archive.open(member.name)
+			except KeyError:
+				raise DownloadError("{} has no {}".format(zip_path, member.name)) from None
+			with source, open(part_path, "wb") as part_file:
+				for chunk in iter(lambda: source.read(CHUNK_SIZE), b""):
+					part_file.write(chunk)
+					digest.update(chunk)
+	except BaseException:
+		_remove_if_present(part_path)
+		raise
+	actual = digest.hexdigest()
+	if actual != member.sha256:
+		_remove_if_present(part_path)
+		raise DownloadError("SHA256 of {} in {} is {} but the pinned SHA256 is {}. The file was deleted.".format(member.name, zip_path, actual, member.sha256))
+	os.chmod(part_path, mode)
+	os.replace(part_path, destination)
+	return destination
