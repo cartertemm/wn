@@ -936,9 +936,12 @@ class AgentShareTests(unittest.TestCase):
 	def test_status_leaves_out_shares_of_another_vm(self):
 		self.assertIn("Shares: none in the config\n", self.status([share_item(vm="Other")]))
 
-	def uninstall(self, shares):
+	def uninstall(self, shares, installed=True):
 		write_config(self.home.name, {"shares": shares})
-		with mock.patch("wn.agent.uninstall_launch_agent", return_value=True) as uninstall:
+		os.makedirs(os.path.dirname(launch_agent_path()))
+		if installed:
+			open(launch_agent_path(), "w").close()
+		with mock.patch("wn.agent.uninstall_launch_agent", return_value=installed) as uninstall:
 			exit_code, stdout, _ = self.run_cli("--uninstall")
 		self.assertEqual(exit_code, 0)
 		uninstall.assert_called_once_with()
@@ -954,6 +957,16 @@ class AgentShareTests(unittest.TestCase):
 
 	def test_uninstall_without_shares_does_not_warn(self):
 		self.assertNotIn("still in the config", self.uninstall([]))
+
+	def test_uninstall_counts_only_the_shares_of_this_vm(self):
+		stdout = self.uninstall([share_item(), share_item(name="Music", vm="Other", port=47322)])
+		self.assertTrue(stdout.startswith("1 share is still in the config."))
+
+	def test_uninstall_with_only_shares_of_another_vm_does_not_warn(self):
+		self.assertNotIn("still in the config", self.uninstall([share_item(vm="Other")]))
+
+	def test_uninstall_when_not_installed_does_not_warn(self):
+		self.assertEqual(self.uninstall([share_item()], installed=False), "The launch agent is not installed\n")
 
 
 if __name__ == "__main__":

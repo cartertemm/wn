@@ -498,8 +498,9 @@ def run_agent_command(arguments, config, output, messages=None, wait=None):
 		path = install_launch_agent(sys.executable, REPOSITORY_DIRECTORY)
 		output.write("Installed {}. The agent now starts when you log in. Log: {}\n".format(path, os.path.expanduser(LOG_PATH)))
 	elif arguments.uninstall:
-		if config.shares:
-			output.write(_uninstall_share_warning(len(config.shares)))
+		shares = shares_for_vm(config.shares, config.vm_name)
+		if shares and os.path.exists(launch_agent_path()):
+			output.write(_uninstall_share_warning(len(shares)))
 		if uninstall_launch_agent():
 			output.write("Removed {}\n".format(launch_agent_path()))
 		else:
