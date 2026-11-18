@@ -3,7 +3,8 @@ $TaskName = 'wn-shares'
 $MinimumMajor = 2
 $MinimumMinor = 1
 $LongPathPrefix = '\\?\'
-$ShareFolder = Join-Path $Root ('shares\' + $Params.name)
+$SharesFolder = Join-Path $Root 'shares'
+$ShareFolder = Join-Path $SharesFolder $Params.name
 $FinalPathSource = @'
 using System;
 using System.ComponentModel;
@@ -79,6 +80,10 @@ if ($removing -and -not (Test-ShareActive) -and -not (Test-CacheFiles $ShareFold
 	$removing = Test-Path -LiteralPath $marker
 }
 if (-not $removing) {
+	$existing = @(Get-ChildItem -LiteralPath $SharesFolder -Directory | Where-Object { $_.Name -eq $Params.name })
+	if ($existing.Count -and $existing[0].Name -cne $Params.name -and -not (Test-Path -LiteralPath (Join-Path $ShareFolder 'share.json')) -and -not (Test-CacheFiles $ShareFolder)) {
+		& cmd.exe /c rd /s /q ($LongPathPrefix + $ShareFolder)
+	}
 	New-Item -ItemType Directory -Force -Path $ShareFolder | Out-Null
 }
 

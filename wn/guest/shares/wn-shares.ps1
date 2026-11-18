@@ -14,6 +14,8 @@ $JsonDepth = 4
 $CachePattern = '^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) .*vfs cache: cleaned: .* to upload (\d+), uploading (\d+)'
 $RcloneTimeFormat = 'yyyy/MM/dd HH:mm:ss'
 $LinkedParentDetail = '{0} is a link or mount point. Use a share path with no link in it'
+$NoShareFileDetail = 'the share folder has no share.json'
+$NotDeletedDetail = 'could not delete {0}'
 $Utf8 = New-Object System.Text.UTF8Encoding $false
 $Processes = @{}
 $Status = @{}
@@ -208,6 +210,10 @@ function Remove-Share($Name, $Folder) {
 	}
 	& cmd.exe /c rd /s /q ('\\?\' + $Folder)
 	$Processes.Remove($Name)
+	if (Test-Path -LiteralPath $Folder) {
+		Set-State $Name 'error' ($NotDeletedDetail -f $Folder) $null $null
+		return
+	}
 	$Status.Remove($Name)
 	Write-Log ('{0}: removed' -f $Name)
 }
@@ -246,15 +252,25 @@ try {
 	Write-Log ('error: {0}' -f $_)
 }
 while ($true) {
-	foreach ($folder in @(Get-ChildItem -LiteralPath $SharesFolder -Directory -ErrorAction SilentlyContinue)) {
+	try {
+		$folders = @()
+		if (Test-Path -LiteralPath $SharesFolder) { $folders = @(Get-ChildItem -LiteralPath $SharesFolder -Directory) }
+	} catch {
+		Write-Log ('error: {0}' -f $_)
+		Start-Sleep -Seconds $LoopSeconds
+		continue
+	}
+	foreach ($folder in $folders) {
 		try {
 			if (Test-Path -LiteralPath (Join-Path $folder.FullName 'remove')) {
 				Remove-Share $folder.Name $folder.FullName
 			} elseif (Test-Path -LiteralPath (Join-Path $folder.FullName 'share.json')) {
 				Update-Share $folder.Name $folder.FullName
+			} else {
+				Set-State $folder.Name 'incomplete' $NoShareFileDetail $null $null
 			}
 		} catch {
-			Write-Log ('{0}: error: {1}' -f $folder.Name, $_)
+			Set-State $folder.Name 'error' ([string]$_) $null $null
 		}
 	}
 	try {
