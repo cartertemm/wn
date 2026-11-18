@@ -3,6 +3,7 @@
 import dataclasses
 import os
 import re
+import string
 from typing import Optional
 
 from wn.errors import WnError
@@ -19,6 +20,9 @@ NAME_INVALID_RUN = re.compile(r"[^A-Za-z0-9._-]+")
 NAME_LEADING = ".-"
 NAME_RULE = "name must be 1 to {} characters from A-Z, a-z, 0-9, '.', '_' and '-', and must not start with '.' or '-'".format(NAME_MAX_LENGTH)
 DEFAULT_NAME = "share"
+DOT = "."
+SPACE = " "
+RESERVED_WINDOWS_NAMES = frozenset(("con", "prn", "aux", "nul") + tuple(prefix + digit for prefix in ("com", "lpt") for digit in string.digits))
 MAC_TO_VM = "mac_to_vm"
 VM_TO_MAC = "vm_to_mac"
 SUPPORTED_DIRECTIONS = (MAC_TO_VM,)
@@ -26,7 +30,8 @@ SHARE_KEYS = ("name", "vm", "direction", "mac_path", "vm_path", "read_only", "po
 WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:\\")
 WINDOWS_SEPARATOR = "\\"
 MAC_SEPARATOR = "/"
-RELATIVE_PARTS = (".", "..")
+VM_PART_INVALID_CHARACTER = re.compile(r'[<>:"|?*\x00-\x1f]')
+VM_PART_SHORT_NAME = re.compile(r"~[0-9]")
 VM_PATH_EXAMPLE = "C:\\Users\\you\\Mac"
 REFUSED_VM_FOLDERS = ("C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)", "C:\\ProgramData")
 SUPPORT_DIRECTORY = os.path.join("~", "Library", "Application Support", "wn")
@@ -63,8 +68,48 @@ def _overlaps(first, second, separator):
 	return _is_inside(first, second, separator) or _is_inside(second, first, separator)
 
 
+def _contains_on_disk(folder, path):
+	while not os.path.exists(path):
+		path = os.path.dirname(path)
+	ancestor = path
+	while True:
+		inner = os.path.join(folder, os.path.relpath(path, ancestor))
+		if os.path.exists(inner) and os.path.samefile(inner, path):
+			return True
+		parent = os.path.dirname(ancestor)
+		if parent == ancestor:
+			return False
+		ancestor = parent
+
+
+def _mac_paths_overlap(first, second):
+	if os.path.exists(first) and os.path.exists(second):
+		first = os.path.realpath(first)
+		second = os.path.realpath(second)
+		return _contains_on_disk(first, second) or _contains_on_disk(second, first)
+	return _overlaps(first, second, MAC_SEPARATOR)
+
+
 def _real_folder(path):
 	return os.path.realpath(os.path.expanduser(path))
+
+
+def _is_mac_root(path):
+	return not os.path.normpath(path).strip(MAC_SEPARATOR)
+
+
+def _is_reserved_name(name):
+	return name.split(DOT)[0].rstrip(SPACE).casefold() in RESERVED_WINDOWS_NAMES
+
+
+def _name_problem(name):
+	if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
+		return NAME_RULE
+	if name.endswith(DOT):
+		return "name '{}' ends in a dot, which Windows drops from folder names".format(name)
+	if _is_reserved_name(name):
+		return "name '{}' is a reserved Windows device name".format(name)
+	return None
 
 
 def shares_for_vm(shares, vm_name):
@@ -73,6 +118,19 @@ def shares_for_vm(shares, vm_name):
 
 def _is_port(value):
 	return isinstance(value, int) and not isinstance(value, bool) and FIRST_PORT <= value <= LAST_PORT
+
+
+def _vm_path_problem(vm_path):
+	if not isinstance(vm_path, str) or not WINDOWS_ABSOLUTE.match(vm_path):
+		return "vm_path must be an absolute Windows path such as '{}'".format(VM_PATH_EXAMPLE)
+	try:
+		normalized = normalize_vm_path(vm_path)
+		if normalized != vm_path:
+			return "vm_path '{}' must be written as '{}'".format(vm_path, normalized)
+		check_vm_path(vm_path)
+	except ShareError as error:
+		return "vm_path {}".format(error)
+	return None
 
 
 def _item_problem(item, names, ports):
@@ -85,8 +143,9 @@ def _item_problem(item, names, ports):
 	if unknown:
 		return "unknown keys: {}".format(", ".join(unknown))
 	name = item["name"]
-	if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
-		return NAME_RULE
+	problem = _name_problem(name)
+	if problem:
+		return problem
 	if name.casefold() in names:
 		return "share name '{}' is used twice (names ignore case)".format(name)
 	names.add(name.casefold())
@@ -96,8 +155,11 @@ def _item_problem(item, names, ports):
 		return "direction must be {}".format(" or ".join(SUPPORTED_DIRECTIONS))
 	if not isinstance(item["mac_path"], str) or not os.path.isabs(item["mac_path"]):
 		return "mac_path must be an absolute Mac path"
-	if not isinstance(item["vm_path"], str) or not WINDOWS_ABSOLUTE.match(item["vm_path"]):
-		return "vm_path must be an absolute Windows path such as '{}'".format(VM_PATH_EXAMPLE)
+	if _is_mac_root(item["mac_path"]):
+		return "mac_path must not be the Mac root folder /"
+	problem = _vm_path_problem(item["vm_path"])
+	if problem:
+		return problem
 	if not isinstance(item["read_only"], bool):
 		return "read_only must be true or false"
 	port = item["port"]
@@ -124,25 +186,50 @@ def shares_from_values(items):
 
 def default_share_name(mac_path):
 	name = NAME_INVALID_RUN.sub("-", os.path.basename(mac_path.rstrip(MAC_SEPARATOR)))
-	return name.lstrip(NAME_LEADING)[:NAME_MAX_LENGTH] or DEFAULT_NAME
+	name = name.lstrip(NAME_LEADING)[:NAME_MAX_LENGTH].rstrip(DOT)
+	if not name or _is_reserved_name(name):
+		return DEFAULT_NAME
+	return name
 
 
 def check_share_name(name):
-	if not NAME_PATTERN.fullmatch(name):
-		raise ShareError("share {}. Pick another with --name".format(NAME_RULE))
+	problem = _name_problem(name)
+	if problem:
+		raise ShareError("share {}. Pick another with --name".format(problem))
+
+
+def _vm_part_problem(part):
+	if not part:
+		return "has an empty folder name"
+	character = VM_PART_INVALID_CHARACTER.search(part)
+	if character:
+		return "has the character {!r}, which Windows does not allow in folder names".format(character.group())
+	if part.endswith((DOT, SPACE)):
+		return "has the folder name '{}', which ends in a dot or a space".format(part)
+	if _is_reserved_name(part):
+		return "has the folder name '{}', which is a reserved Windows device name".format(part)
+	if VM_PART_SHORT_NAME.search(part):
+		return "has the folder name '{}', which looks like an 8.3 short name that can stand for another folder".format(part)
+	return None
 
 
 def normalize_vm_path(text):
 	path = text.replace(MAC_SEPARATOR, WINDOWS_SEPARATOR).rstrip(WINDOWS_SEPARATOR)
 	parts = path.split(WINDOWS_SEPARATOR)
-	if not WINDOWS_ABSOLUTE.match(path) or any(part in RELATIVE_PARTS for part in parts):
+	if not WINDOWS_ABSOLUTE.match(path) or any(part and not part.strip(DOT) for part in parts):
 		raise ShareError("'{}' is not an absolute Windows folder. Give an absolute Windows folder such as '{}'".format(text, VM_PATH_EXAMPLE))
+	for part in parts[1:]:
+		problem = _vm_part_problem(part)
+		if problem:
+			raise ShareError("'{}' {}. Give a Windows folder such as '{}'".format(text, problem, VM_PATH_EXAMPLE))
 	return path
 
 
 def check_vm_path(vm_path):
+	parts = normalize_vm_path(vm_path).casefold().split(WINDOWS_SEPARATOR)
 	for folder in REFUSED_VM_FOLDERS:
-		if _is_inside(vm_path.casefold(), folder.casefold(), WINDOWS_SEPARATOR):
+		folder_parts = folder.casefold().split(WINDOWS_SEPARATOR)
+		if parts[:len(folder_parts)] == folder_parts:
 			raise ShareError("wn does not share into {} or folders inside it. Pick another Windows folder".format(folder))
 
 
@@ -153,11 +240,11 @@ def check_mac_path(path, read_only):
 	if real == MAC_SEPARATOR:
 		raise ShareError("wn does not share the Mac root folder /. Pick a folder inside it")
 	support = _real_folder(SUPPORT_DIRECTORY)
-	if _is_inside(real, support, MAC_SEPARATOR):
+	if _contains_on_disk(support, real):
 		raise ShareError("{} is inside wn's own folder {}. Pick another folder".format(path, support))
 	if not read_only:
 		for folder in map(_real_folder, WN_DIRECTORIES):
-			if _is_inside(folder, real, MAC_SEPARATOR):
+			if _contains_on_disk(real, folder):
 				raise ShareError("{} contains wn's own folder {}, so Windows could change wn's settings or read its keys. Use --read-only or pick another folder".format(path, folder))
 	return real
 
@@ -166,7 +253,7 @@ def check_new_share(share, existing):
 	for other in existing:
 		if share.name.casefold() == other.name.casefold():
 			raise ShareError("a share named '{}' already exists. Pick another name with --name".format(other.name))
-		if _overlaps(share.mac_path, other.mac_path, MAC_SEPARATOR):
+		if _mac_paths_overlap(share.mac_path, other.mac_path):
 			raise ShareError("{} overlaps {}, the Mac folder of share '{}'. Shares must not contain each other".format(share.mac_path, other.mac_path, other.name))
 		if share.vm == other.vm and _overlaps(share.vm_path, other.vm_path, WINDOWS_SEPARATOR):
 			raise ShareError("{} overlaps {}, the Windows folder of share '{}'. Shares must not contain each other".format(share.vm_path, other.vm_path, other.name))
