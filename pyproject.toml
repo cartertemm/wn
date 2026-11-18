@@ -3,6 +3,7 @@ name = "wn"
 dynamic = ["version"]
 description = "Run Windows on Apple silicon Macs with UTM"
 requires-python = ">=3.9"
+license = "MIT"
 dependencies = []
 
 [project.scripts]
