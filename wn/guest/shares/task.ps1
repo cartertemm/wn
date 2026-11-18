@@ -1,0 +1,34 @@
+$TaskName = 'wn-shares'
+$Supervisor = 'C:\ProgramData\wn\wn-shares.ps1'
+$StopWaitSeconds = 10
+$RestartCount = 999
+$RestartMinutes = 1
+
+function Wait-TaskStopped {
+	for ($second = 0; $second -lt $StopWaitSeconds; $second++) {
+		if ((Get-ScheduledTask -TaskName $TaskName).State -ne 'Running') { return }
+		Start-Sleep -Seconds 1
+	}
+}
+
+$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if (-not $task) {
+	$a = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + $Supervisor)
+	$p = New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
+	$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount $RestartCount -RestartInterval (New-TimeSpan -Minutes $RestartMinutes) -MultipleInstances IgnoreNew
+	$t = New-ScheduledTaskTrigger -AtStartup
+	Register-ScheduledTask -TaskName $TaskName -Action $a -Principal $p -Settings $s -Trigger $t -Force | Out-Null
+	Start-ScheduledTask -TaskName $TaskName
+	$action = 'registered'
+} elseif ($Params.restart) {
+	Stop-ScheduledTask -TaskName $TaskName
+	Wait-TaskStopped
+	Start-ScheduledTask -TaskName $TaskName
+	$action = 'restarted'
+} elseif ($task.State -ne 'Running') {
+	Start-ScheduledTask -TaskName $TaskName
+	$action = 'started'
+} else {
+	$action = 'running'
+}
+Write-Output ('wn-result: ' + (@{ task = $action } | ConvertTo-Json -Compress))
