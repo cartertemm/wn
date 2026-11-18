@@ -52,6 +52,8 @@ CAMERA_ACCESS_PREFIX = "wn-camera: access: "
 CAMERA_ACCESS_ALLOWED = "allowed"
 LOG_TAIL_BYTES = 64 * 1024
 IDLE_WAIT_SECONDS = 3600
+BOOTOUT_POLL_SECONDS = 0.1
+BOOTOUT_WAIT_SECONDS = 10
 
 
 class AgentError(WnError):
@@ -180,16 +182,21 @@ def render_launch_agent(python, working_directory):
 	return text
 
 
-def install_launch_agent(python, working_directory, run=None, uid=None):
+def install_launch_agent(python, working_directory, run=None, uid=None, sleep=time.sleep):
 	"""Build the agent app, write the launch agent plist that runs it, and load it. Return the plist path.
 
 	The plist starts Python through the app's stub, so macOS asks once whether wn-agent may use UTM's data.
+	``launchctl bootout`` returns before the old job is gone, and a bootstrap before then fails with error 5, so wait for it.
 	"""
 	run = run or subprocess.run
 	uid = os.getuid() if uid is None else uid
 	path = launch_agent_path()
 	if os.path.exists(path):
 		_launchctl(run, "bootout", "gui/{}/{}".format(uid, LAUNCHD_LABEL))
+		for _ in range(round(BOOTOUT_WAIT_SECONDS / BOOTOUT_POLL_SECONDS)):
+			if not launchd_state(run, uid)[0]:
+				break
+			sleep(BOOTOUT_POLL_SECONDS)
 	build_app(run)
 	os.makedirs(os.path.dirname(path), exist_ok=True)
 	os.makedirs(os.path.dirname(os.path.expanduser(LOG_PATH)), exist_ok=True)

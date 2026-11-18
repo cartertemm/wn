@@ -16,6 +16,8 @@ from fake_qmp_server import TCPFakeQMPServer, reply
 from fakes import unused_port, write_config
 from wn import agent
 from wn.agent import (
+	BOOTOUT_POLL_SECONDS,
+	BOOTOUT_WAIT_SECONDS,
 	LAUNCHD_LABEL,
 	AgentError,
 	CameraSupervisor,
@@ -245,11 +247,33 @@ class LaunchAgentTests(unittest.TestCase):
 		with open(self.path, "rb") as plist_file:
 			self.assertEqual(plistlib.load(plist_file)["WorkingDirectory"], "/a&b<c>")
 
+	def launchctl_verbs(self):
+		return [call.args[0][1] for call in self.run.call_args_list if call.args[0][0] == "/bin/launchctl"]
+
+	def answer_print_with(self, results):
+		self.run.side_effect = lambda argv, **_: results.pop(0) if argv[1:2] == ["print"] else completed()
+
 	def test_install_replaces_a_loaded_agent(self):
 		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		self.answer_print_with([completed("", returncode=LAUNCHCTL_NOT_LOADED)])
 		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
-		commands = [call.args[0][1] for call in self.run.call_args_list if call.args[0][0] == "/bin/launchctl"]
-		self.assertEqual(commands, ["bootstrap", "bootout", "bootstrap"])
+		self.assertEqual(self.launchctl_verbs(), ["bootstrap", "bootout", "print", "bootstrap"])
+
+	def test_install_waits_until_the_old_agent_is_gone(self):
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		self.answer_print_with([completed(), completed(), completed("", returncode=LAUNCHCTL_NOT_LOADED)])
+		sleep = mock.Mock()
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501, sleep=sleep)
+		self.assertEqual(self.launchctl_verbs(), ["bootstrap", "bootout", "print", "print", "print", "bootstrap"])
+		sleep.assert_has_calls([mock.call(BOOTOUT_POLL_SECONDS)] * 2)
+		self.assertEqual(sleep.call_count, 2)
+
+	def test_install_stops_waiting_for_the_old_agent_after_the_limit(self):
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		sleep = mock.Mock()
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501, sleep=sleep)
+		self.assertEqual(sleep.call_count * BOOTOUT_POLL_SECONDS, BOOTOUT_WAIT_SECONDS)
+		self.assertEqual(self.launchctl_verbs()[-1], "bootstrap")
 
 	def test_install_reports_launchctl_failure(self):
 		self.run.side_effect = [completed(), completed(), completed(), subprocess.CompletedProcess([], 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")]
