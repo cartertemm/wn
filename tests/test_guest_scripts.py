@@ -14,7 +14,7 @@ MEASURED_ARGUMENTS = (
 	"'--attr-timeout', '1s'",
 	"'--file-perms', '0777'",
 	"'--dir-perms', '0777'",
-	"'-o', 'FileSecurity=D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'",
+	"$ReadWriteSecurity = 'FileSecurity=D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'",
 	"'-v'",
 )
 ADDED_ARGUMENTS = (
@@ -61,6 +61,12 @@ class MountArgumentTests(unittest.TestCase):
 	def test_mount_has_the_measured_arguments(self):
 		for argument in MEASURED_ARGUMENTS:
 			self.assertIn(argument, self.text)
+
+	def test_read_only_mount_lets_windows_only_read_and_run(self):
+		self.assertIn("$ReadOnlySecurity = 'FileSecurity=D:P(A;;FRFX;;;SY)(A;;FRFX;;;BA)(A;;FRFX;;;AU)(A;;FRFX;;;OW)'", self.text)
+		mount = function_body(self.text, "Get-MountArguments")
+		self.assertIn("\t$security = $ReadWriteSecurity\n\tif ($Share.read_only) { $security = $ReadOnlySecurity }\n", mount)
+		self.assertIn("'-o', $security,", mount)
 
 	def test_mount_has_the_added_arguments(self):
 		for argument in ADDED_ARGUMENTS:

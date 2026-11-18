@@ -11,6 +11,8 @@ $StopWaitSeconds = 10
 $LogTailLines = 200
 $TailGrowthFactor = 4
 $JsonDepth = 4
+$ReadWriteSecurity = 'FileSecurity=D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'
+$ReadOnlySecurity = 'FileSecurity=D:P(A;;FRFX;;;SY)(A;;FRFX;;;BA)(A;;FRFX;;;AU)(A;;FRFX;;;OW)'
 $CachePattern = '^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) .*vfs cache: cleaned: .* to upload (\d+), uploading (\d+)'
 $RcloneTimeFormat = 'yyyy/MM/dd HH:mm:ss'
 $LinkedParentDetail = '{0} is a link or mount point. Use a share path with no link in it'
@@ -85,6 +87,8 @@ function Quote($Text) {
 }
 
 function Get-MountArguments($Share, $Folder) {
+	$security = $ReadWriteSecurity
+	if ($Share.read_only) { $security = $ReadOnlySecurity }
 	$arguments = @(
 		'mount', 'share:', (Quote $Share.mount_path),
 		'--config', (Quote (Join-Path $Folder 'rclone.conf')),
@@ -100,7 +104,7 @@ function Get-MountArguments($Share, $Folder) {
 		'--file-perms', '0777',
 		'--dir-perms', '0777',
 		'--volname', $Share.name,
-		'-o', 'FileSecurity=D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)',
+		'-o', $security,
 		'--log-file', (Quote (Join-Path $Folder 'mount.log')),
 		'-v'
 	)
