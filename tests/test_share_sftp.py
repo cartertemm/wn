@@ -66,6 +66,8 @@ class FakeKeygen:
 
 	def __call__(self, argv, capture_output, text):
 		self.calls.append(argv)
+		if self.returncode == 0 and "-y" in argv:
+			return subprocess.CompletedProcess(argv, 0, "ssh-ed25519 AAAA wn-share\n", "")
 		if self.returncode == 0:
 			key_path = argv[argv.index("-f") + 1]
 			with open(key_path, "w") as handle:
@@ -164,6 +166,12 @@ class GuestFilesTest(unittest.TestCase):
 		self.assertEqual(values["mount_path"], vm_path)
 		self.assertEqual(values["port"], PORT)
 
+	def test_share_json_is_ascii_and_round_trips_a_non_ascii_path(self):
+		vm_path = "C:\\Users\\Zoë\\Документы\\写真"
+		text = render_share_json(make_share(vm_path=vm_path))
+		self.assertTrue(text.isascii())
+		self.assertEqual(json.loads(text)["mount_path"], vm_path)
+
 
 class KeysTest(SharePathsTestCase):
 	def setUp(self):
@@ -202,6 +210,18 @@ class KeysTest(SharePathsTestCase):
 		with open(self.paths.host_key) as handle:
 			self.assertEqual(handle.read(), "kept\n")
 
+	def test_ensure_keys_recreates_a_missing_public_key(self):
+		ensure_keys(self.paths, run=FakeKeygen())
+		os.remove(self.paths.client_public_key)
+		run = FakeKeygen()
+		ensure_keys(self.paths, run=run)
+		self.assertEqual(run.calls, [["/usr/bin/ssh-keygen", "-y", "-f", self.paths.client_key]])
+		with open(self.paths.client_public_key) as handle:
+			self.assertEqual(handle.read(), "ssh-ed25519 AAAA wn-share\n")
+		self.assertEqual(file_mode(self.paths.client_public_key), 0o644)
+		with open(self.paths.client_key) as handle:
+			self.assertEqual(handle.read(), "private\n")
+
 	def test_ensure_keys_reports_a_failure(self):
 		with self.assertRaises(ShareError) as caught:
 			ensure_keys(self.paths, run=FakeKeygen(returncode=1, stderr="no entropy"))
@@ -213,6 +233,21 @@ class KeysTest(SharePathsTestCase):
 		self.assertEqual(file_mode(self.paths.host_key), 0o600)
 		self.assertEqual(file_mode(self.paths.client_key), 0o600)
 		self.assertTrue(public_host_key(self.paths).startswith("ssh-ed25519 AAAA"))
+
+	@unittest.skipUnless(os.path.exists("/usr/bin/ssh-keygen"), "needs /usr/bin/ssh-keygen")
+	def test_ensure_keys_recreates_both_public_keys_with_the_real_ssh_keygen(self):
+		ensure_keys(self.paths)
+		keys = {}
+		for key_path in (self.paths.host_key, self.paths.client_key):
+			with open(key_path) as private, open(key_path + ".pub") as public:
+				keys[key_path] = (private.read(), public.read().split()[:2])
+			os.remove(key_path + ".pub")
+		ensure_keys(self.paths)
+		for key_path, (private_text, public_fields) in keys.items():
+			with open(key_path) as private, open(key_path + ".pub") as public:
+				self.assertEqual(private.read(), private_text)
+				self.assertEqual(public.read().split()[:2], public_fields)
+			self.assertEqual(file_mode(key_path + ".pub"), 0o644)
 
 
 class BinariesTest(SharePathsTestCase):

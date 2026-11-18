@@ -158,7 +158,7 @@ def render_known_hosts(share, host_public_key):
 
 
 def render_share_json(share):
-	return json.dumps({"name": share.name, "mount_path": share.vm_path, "read_only": share.read_only, "port": share.port})
+	return json.dumps({"name": share.name, "mount_path": share.vm_path, "read_only": share.read_only, "port": share.port}, ensure_ascii=True)
 
 
 def ensure_share_directory(paths):
@@ -168,16 +168,27 @@ def ensure_share_directory(paths):
 		os.close(os.open(paths.empty_config, os.O_WRONLY | os.O_CREAT, PRIVATE_MODE))
 
 
+def _ssh_keygen(run, *arguments):
+	result = run([SSH_KEYGEN_PATH, *arguments], capture_output=True, text=True)
+	if result.returncode != 0:
+		raise ShareError("ssh-keygen failed with exit code {}: {}".format(result.returncode, result.stderr.strip()))
+	return result.stdout
+
+
 def ensure_keys(paths, run=subprocess.run):
 	ensure_share_directory(paths)
 	for key_path in (paths.host_key, paths.client_key):
-		if os.path.exists(key_path):
-			continue
-		result = run([SSH_KEYGEN_PATH, "-q", "-t", "ed25519", "-N", "", "-C", KEY_COMMENT, "-f", key_path], capture_output=True, text=True)
-		if result.returncode != 0:
-			raise ShareError("ssh-keygen failed with exit code {}: {}".format(result.returncode, result.stderr.strip()))
-		os.chmod(key_path, PRIVATE_MODE)
-		os.chmod(key_path + PUBLIC_KEY_SUFFIX, PUBLIC_MODE)
+		public_path = key_path + PUBLIC_KEY_SUFFIX
+		if not os.path.exists(key_path):
+			_ssh_keygen(run, "-q", "-t", "ed25519", "-N", "", "-C", KEY_COMMENT, "-f", key_path)
+			os.chmod(key_path, PRIVATE_MODE)
+			os.chmod(public_path, PUBLIC_MODE)
+		elif not os.path.exists(public_path):
+			public_key = _ssh_keygen(run, "-y", "-f", key_path)
+			descriptor = os.open(public_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PUBLIC_MODE)
+			os.fchmod(descriptor, PUBLIC_MODE)
+			with os.fdopen(descriptor, "w") as handle:
+				handle.write(public_key)
 
 
 def install_binaries(tools, paths):
