@@ -12,6 +12,7 @@ from fake_keygrab_helper import read_log, write_fake_helper
 from fake_qmp_server import FakeQMPServer, error_reply, reply
 from fakes import FakeBackend, RecordingQMPClient, short_temporary_directory, write_config
 from wn.cli import main
+from wn.errors import WnError
 from wn.keys import combo_to_input_events
 from wn.qmp import QMPConnectionError
 from wn.utm_config import UTM_GROUP_CONTAINER, qmp_socket_file
@@ -138,7 +139,7 @@ class LifecycleCommandTests(CLITestCase):
 	def test_unimplemented_commands_are_hidden(self):
 		with mock.patch("sys.stdout", io.StringIO()) as help_output, self.assertRaises(SystemExit):
 			self.run_cli("--help")
-		for command in ("share", "net"):
+		for command in ("net",):
 			self.assertNotRegex(help_output.getvalue(), r"\b{}\b".format(command))
 			with mock.patch("sys.stderr", io.StringIO()) as error_output, self.assertRaises(SystemExit) as context:
 				self.run_cli(command)
@@ -150,6 +151,102 @@ class LifecycleCommandTests(CLITestCase):
 			with self.assertRaises(SystemExit) as context:
 				self.run_cli()
 		self.assertEqual(context.exception.code, 2)
+
+
+class ShareCommandTests(CLITestCase):
+	def help_text(self, *argv):
+		with mock.patch("sys.stdout", io.StringIO()) as help_output, self.assertRaises(SystemExit):
+			self.run_cli(*argv, "--help")
+		return help_output.getvalue()
+
+	def share_commands(self):
+		patcher = mock.patch("wn.cli.ShareCommands")
+		share_commands = patcher.start()
+		self.addCleanup(patcher.stop)
+		return share_commands.return_value
+
+	def test_share_commands_are_listed_in_help(self):
+		help_text = self.help_text()
+		for command in ("share", "shares", "unshare"):
+			self.assertRegex(help_text, r"\b{}\b".format(command))
+
+	def test_share_help_shows_the_paths_the_options_and_the_limits(self):
+		help_text = self.help_text("share")
+		for expected in (
+			"dir-on-mac",
+			"dir-on-vm",
+			"wn share ~/Projects 'C:\\Users\\you\\Projects'",
+			"single quotes",
+			"--read-only",
+			"--name",
+			"about 5 s after a file is closed",
+			"Windows apps that watch folders do not see Mac changes",
+			"are not kept",
+			"wn shares",
+			"wn unshare",
+		):
+			self.assertIn(expected, help_text)
+
+	def test_shares_help_is_short(self):
+		help_text = self.help_text("shares")
+		self.assertIn("List the shared folders and their state", help_text)
+		self.assertLess(len(help_text.splitlines()), 10)
+
+	def test_unshare_help_names_the_share_argument(self):
+		help_text = self.help_text("unshare")
+		self.assertIn("usage: wn unshare [-h] share", help_text)
+		self.assertIn("as wn shares shows it", help_text)
+		self.assertIn("The files stay on the Mac", help_text)
+
+	def test_share_calls_add_share(self):
+		share_commands = self.share_commands()
+		share_commands.add_share.return_value = None
+		exit_code, _, stderr = self.run_cli("share", "/a", "C:\\x", "--read-only", "--name", "X")
+		self.assertEqual(exit_code, 0, stderr)
+		share_commands.add_share.assert_called_once_with("/a", "C:\\x", True, "X")
+
+	def test_share_passes_windows_paths_intact(self):
+		share_commands = self.share_commands()
+		share_commands.add_share.return_value = None
+		for vm_dir in ("C:\\Users\\you\\My Mac Files", "C:\\Users\\you\\Bob's Mac", "D:\\-x\\--name"):
+			share_commands.add_share.reset_mock()
+			exit_code, _, stderr = self.run_cli("share", "/Users/you/My Files", vm_dir)
+			self.assertEqual(exit_code, 0, stderr)
+			share_commands.add_share.assert_called_once_with("/Users/you/My Files", vm_dir, False, None)
+
+	def test_shares_calls_list_shares(self):
+		share_commands = self.share_commands()
+		share_commands.list_shares.return_value = 0
+		self.assertEqual(self.run_cli("shares")[0], 0)
+		share_commands.list_shares.assert_called_once_with()
+
+	def test_shares_with_no_shares_says_so(self):
+		exit_code, stdout, stderr = self.run_cli("shares")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn("No shares", stdout)
+
+	def test_unshare_calls_remove_share(self):
+		share_commands = self.share_commands()
+		share_commands.remove_share.return_value = None
+		self.assertEqual(self.run_cli("unshare", "Projects")[0], 0)
+		share_commands.remove_share.assert_called_once_with("Projects")
+
+	def test_unshare_passes_on_its_exit_code(self):
+		self.share_commands().remove_share.return_value = 1
+		self.assertEqual(self.run_cli("unshare", "Projects")[0], 1)
+
+	def test_ctrl_c_during_unshare_ends_with_a_short_message(self):
+		self.share_commands().remove_share.side_effect = KeyboardInterrupt
+		exit_code, _, stderr = self.run_cli("unshare", "Projects")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("wn: stopped. Projects is still shared. Run wn unshare Projects again to remove it", stderr)
+		self.assertNotIn("Traceback", stderr)
+
+	def test_share_error_is_printed(self):
+		self.share_commands().add_share.side_effect = WnError("boom")
+		exit_code, _, stderr = self.run_cli("share", "/a", "C:\\x")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("wn: error: boom", stderr)
 
 
 FAKE_UTMCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_utmctl.py")
@@ -693,6 +790,14 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertEqual(exit_code, 0, stderr)
 		self.assertIn("python3 -m wn agent --uninstall", stdout)
 		self.assertNotIn("--install", stdout)
+
+	def test_no_camera_with_battery_sync_off_and_shares_keeps_the_agent(self):
+		share = {"name": "Projects", "vm": "Windows", "direction": "mac_to_vm", "mac_path": "/Users/you/Projects", "vm_path": "C:\\Users\\you\\Projects", "read_only": False, "port": 47321}
+		write_config(self.home.name, {"battery_sync": False, "camera": True, "shares": [share]})
+		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--no-camera")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn("python3 -m wn agent --install", stdout)
+		self.assertNotIn("--uninstall", stdout)
 
 	def read_config(self):
 		with open(os.path.join(self.home.name, ".config", "wn", "config.json")) as config_file:
