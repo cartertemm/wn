@@ -413,6 +413,7 @@ class ShareCommands:
 			except (WnError, OSError) as error:
 				problems.append("Also could not remove share '{}' from the config: {}".format(name, error))
 				return problems
+			remove_file(self.paths.log_file(name))
 		remove_host_key(self.paths, name)
 		return problems
 

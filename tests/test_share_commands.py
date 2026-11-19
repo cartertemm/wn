@@ -887,6 +887,14 @@ class RollbackTests(ShareCommandTestCase):
 			self.add()
 		self.assertNotIn("shares", json.loads(self.config_text()))
 
+	def test_rollback_removes_the_server_log_of_the_share(self):
+		os.makedirs(self.paths.logs)
+		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
+		self.runner.on_call = lambda call: open(self.paths.log_file(SHARE_NAME), "a").close() if call[:2] == ("run", TASK_SCRIPT) else None
+		with self.assertRaises(GuestScriptError):
+			self.add()
+		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
+
 	def test_failure_before_the_share_file_leaves_no_remove_marker(self):
 		self.runner.push_errors[FOLDER + "\\known_hosts"] = GuestError("utmctl file push failed")
 		before = self.config_text()
