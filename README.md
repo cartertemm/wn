@@ -1,312 +1,158 @@
 # wn
 
-Windows 11 on Apple Silicon at near native speed, driven from the terminal.
+Windows 11 on your Apple silicon Mac, fast enough to forget it is a virtual
+machine.
 
-## Why
+Parallels works well, but it costs money every year. UTM is free, but its default Windows
+experience is slow and leaves audio, the camera, the microphone, and other Mac
+hardware unfinished. Getting everything working takes more tinkering than it
+should.
 
-`wn` builds a Windows 11 ARM64 VM in UTM, which runs on Apple's
-Hypervisor.framework, the same hypervisor Parallels uses. Published Geekbench 6
-results on an M4 Mac mini put UTM at 3144 single core and 8788 multi core,
-and Parallels at 3141 and 7958. `wn setup` picks the settings that booted and
-stayed stable in tests on an M4: the in-kernel interrupt controller is off
-(it causes a reboot hang in UTM), the disk and network use virtio drivers,
-the display uses virtio-gpu, and audio goes straight to CoreAudio with a
-15 ms queue tuned for a screen reader. After the first boot, the VM reaches
-the network about 10 to 12 seconds after `wn start`. The install runs with no
-input and took under 11 minutes on an M4 Pro.
+`wn` handles that work for you by createing a fast Windows 11 ARM virtual
+machine in UTM with working audio, microphone, camera, networking, and battery
+status. Setup is unattended, and the finished VM can be controlled from the
+terminal.
 
-What it does not do. There is no 3D acceleration, so Windows renders on the
-CPU. Microsoft has not authorized this setup (Parallels is the only
-authorized VM for Windows 11 Pro on a Mac). Windows installs with Microsoft's
-generic key and is not activated until you enter your own key in Settings.
+## What you get
 
-## Requirements
+**Near native speed.** `wn` uses Apple's hardware virtualization with a UTM
+configuration tested on Apple silicon. Published Geekbench 6 results on an M4
+Mac mini put UTM at 3144 single core and 8788 multi core, compared with 3141
+and 7958 in Parallels.
 
-- A Mac with Apple Silicon.
-- macOS 15 or later. macOS 26 is recommended.
-- UTM 5.0.8 or later, from https://mac.getutm.app or GitHub, in `/Applications`.
-- Python 3.9, which comes with the Xcode Command Line Tools.
-- About 20 GB of free disk space.
-- An internet connection. The Windows ISO is 8.5 GB from Microsoft.
+**Mac hardware in Windows.** Speakers, microphone, camera, keyboard, mouse,
+networking, and battery status work in the guest. Audio is tuned for low
+latency, including screen reader use.
 
-## Set up
+**A simple unattended install.** Run setup, answer a few questions, and wait
+for your Windows desktop. `wn` downloads Windows, builds the VM, installs the
+drivers and guest tools, and finishes the configuration. The installation takes
+about ten minutes on an M4 Pro after the downloads are complete.
 
-```sh
-git clone <repository URL> windows-native
-cd windows-native
-python3 -m wn setup
-```
+**Ready for coding agents.** Start Codex or Claude Code in the cloned
+repository. It can discover the CLI and control the VM without an integration
+or additional instructions.
 
-`wn setup` asks these questions. Press Return to keep the default.
+## Quick start
 
-| Question | Flag | Default |
-|---|---|---|
-| VM name | `--name NAME` | `Windows` |
-| Windows user name | `--username NAME` | your Mac user name |
-| Windows password | `--password TEXT` | none |
-| CPU cores | `--cpus N` | `8` |
-| Memory in MiB | `--memory-mib N` | `8192` |
-| Disk size in GiB | `--disk-gib N` | `64` |
-| Run without a display window | `--headless` | no |
-| Software to install (1 is NVDA) | `--software nvda` or `--software none` | NVDA |
-| Windows 11 edition | `--edition NAME` | `Pro` |
-
-Pass `--no-battery` to leave out the [native battery](#native-battery).
-
-Then it works on its own:
-
-1. Downloads the Windows 11 ARM64 ISO, the virtio-win drivers, the UTM guest
-   tools, and NVDA, and checks each one against its SHA256 hash. Files that
-   are already there and verified are not downloaded again.
-2. Builds a setup disc with the answer file, the drivers, and the installers,
-   and creates the UTM bundle.
-3. Restarts UTM so it finds the new VM, then starts the VM.
-4. Waits while Windows installs. Setup turns off Fast Startup. At the first
-   sign in, Windows installs the drivers, the guest tools, and NVDA if you
-   chose it, sets the power button to shut down, sets the display to never
-   turn off, then restarts once.
-5. Shuts down the VM, removes the install discs, switches the display to
-   virtio-gpu, and starts it again.
-6. Writes `~/.config/wn/config.json` if it does not exist.
-7. Installs and starts `wn agent`, which feeds the
-   [native battery](#native-battery). macOS asks whether "wn-agent" may
-   access data from other apps. Click Allow.
-
-After the downloads, this takes about 11 minutes. A UTM window opens while
-Windows installs. Leave it alone until `wn` prints `Done` and the IP address.
-
-To run setup from a script, pass `--yes` and the flags you need:
+You need an Apple silicon Mac with macOS 15 or later, about 20 GB of free
+space, [UTM 5.0.8 or later](https://mac.getutm.app) in `/Applications`, and
+[uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```sh
-python3 -m wn setup --yes --name Windows --username carter --software nvda
+git clone https://github.com/cartertemm/wn
+cd wn
+uv run wn setup
 ```
 
-## Use it
+Press Return to keep each default. Setup will tell you when the VM is ready.
 
-| Command | Example | What it does |
-|---|---|---|
-| `start` | `python3 -m wn start` | Starts the VM. |
-| `stop` | `python3 -m wn stop` | Presses Shift to turn the display on, because Windows ignores the power button while the display is off. Then it shuts down Windows and waits until the VM has stopped, up to `--timeout` seconds (120). Exits with 1 if it is still running then. `--force-after-timeout` powers off instead when the wait runs out. `--no-wait` sends the shutdown and returns at once. `--force` asks, then powers off at once. Add `--yes` to skip the question. |
-| `status` | `python3 -m wn status` | Prints `Windows: running` or `Windows: stopped`. |
-| `ip` | `python3 -m wn ip` | Prints the guest IP address. |
-| `key` | `python3 -m wn key ctrl+alt+del` | Presses one or more key combos. |
-| `type` | `python3 -m wn type 'Get-ComputerInfo'` | Types ASCII text with a US layout. |
-| `mouse` | `python3 -m wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls. |
-| `screenshot` | `python3 -m wn screenshot screen.png` | Saves the guest screen as a PNG file and prints its path. |
-| `grab` | `python3 -m wn grab` | Sends every Mac key press to the guest. |
-| `update-vm-args` | `python3 -m wn update-vm-args --battery` | Changes parts of the QEMU arguments of a stopped VM and prints the change. |
-| `agent` | `python3 -m wn agent start` | Writes the Mac's battery status to the native battery in the guest. Takes `start`, `stop`, `status`, `--install`, `--uninstall`, or `--once`. See [Native battery](#native-battery). |
-| `battery` | `python3 -m wn battery status` | Reads or writes the native battery block in guest memory. See [Native battery](#native-battery). |
+## Unattended setup
 
-`key`, `type`, and `mouse` take `--dry-run` to print the QMP commands as JSON
-instead of sending them. Run `python3 -m wn <command> --help` for every option.
+The interactive setup lets you choose the Windows user, VM name, CPU and
+memory, disk size, Windows edition, and whether to install NVDA. The defaults
+create a Windows 11 Pro VM with 8 CPU cores, 8 GB of memory, a 64 GB disk, and
+NVDA.
 
-For everyday typing, use the UTM window. It already maps Command to the
-Windows key, and Ctrl+Option captures and releases the keyboard. The CLI is
-for scripts.
-
-## Screen reader
-
-If you chose NVDA, setup installs it and sets it to start after you sign in.
-Audio is tuned for low latency. On an M4 Pro, the time from a key press to
-NVDA speech was about 115 ms. Most of that time is spent inside the Windows
-audio stack.
-
-## Microphone
-
-Windows gets the Mac's default input device as "Microphone". The input goes
-through a second sound codec (`hda-micro`) on UTM's SPICE audio, because
-UTM's CoreAudio backend has no input. The first time a Windows app records,
-macOS asks whether UTM can use the microphone. Click **Allow**. If you
-clicked **Don't Allow**, turn UTM on in System Settings > Privacy & Security
-> Microphone.
-
-The Mac microphone is in use only while a Windows app records. With
-Bluetooth headphones such as AirPods, recording can switch them to headset
-mode, which lowers the sound quality until the recording stops.
-
-The microphone codec also has a speaker. At the first sign in, `wn setup`
-runs `wn/guest/hide-mic-speaker.ps1`, which disables that speaker so Windows
-keeps playing sound on the low latency CoreAudio codec. For a VM made before
-this change, run `wn update-vm-args --audio-args` with the default arguments
-in `wn/utm_config.py`, quit and open UTM, start the VM, and then run the
-script in Windows as administrator:
-
-```
-powershell -ExecutionPolicy Bypass -File hide-mic-speaker.ps1
-```
-
-## Native battery
-
-Windows shows the Mac's battery in its own battery icon, in Settings, in
-Device Manager under Batteries, and to NVDA. `wn setup` sets this up, so it
-works on the first desktop with Secure Boot on:
-
-- The VM's Secure Boot variables come with the certificate
-  `efi/dist/wn-sb.cer` in the allowed list (`db`).
-- At the first sign in, Windows copies the signed firmware driver
-  `efi/dist/wn-acpi.efi` to the EFI system partition and registers it as a
-  driver load option. The log is `C:\wn-acpi-install.log`.
-- QEMU maps the battery file
-  `~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<name>.bin`
-  into the guest as an NVDIMM. The driver adds an ACPI battery that reads it.
-- Setup installs `wn agent` as a launch agent. It writes the Mac's battery
-  status into that file and starts at every login. Setup prints the plist
-  path. To remove it, run `python3 -m wn agent --uninstall`.
-
-To make a VM without the battery, pass `--no-battery` to `wn setup`.
-
-The battery file is in UTM's app data folder, which macOS protects. So the
-launch agent runs Python through a small app,
-`~/Library/Application Support/wn/wn-agent.app`, and macOS asks you about that
-app by name: "wn-agent" would like to access data from other apps. Click
-Allow. If the repository is in your Documents folder, macOS also asks for
-access to Documents once.
-
-macOS can ask again when the agent starts, for example after you log in. To
-stop the question, add `wn-agent.app` to System Settings > Privacy & Security
-> Full Disk Access. Until you allow access, `wn-agent.log` shows "Operation not
-permitted" and Windows keeps the last status written. The `wn battery`
-commands work from Terminal.
-
-For an existing VM that has the driver and the certificate, stop the VM, then
-add the NVDIMM and install the agent:
+For a fully unattended run, pass `--yes` with any settings you want to change:
 
 ```sh
-python3 -m wn update-vm-args --battery
-python3 -m wn agent --install
+uv run wn setup --yes --name Windows --software nvda
 ```
 
-Quit UTM and open it again, then start the VM. VMs made before setup enrolled
-the certificate do not have it, so the firmware refuses the driver. Make a new
-VM with `wn setup` for those.
+The camera and native battery are enabled by default. Use `--no-camera` or
+`--no-battery` to leave either one out. Run `uv run wn setup --help` for all
+available settings.
 
-Check and control the agent:
+## Use the VM
 
-```sh
-python3 -m wn agent status
-python3 -m wn agent stop
-python3 -m wn agent start
-```
-
-The agent checks the battery every 5 seconds and writes the file when the
-status changes, and every 30 seconds otherwise. Windows sees each write within
-about a second. To test, write a fake status once, then the real one:
-
-```sh
-python3 -m wn battery set --percent 20 --discharging
-python3 -m wn battery sync
-```
-
-`wn battery status` prints the block as the guest sees it.
-
-Windows also finds QEMU's NVDIMM bus. Device Manager shows "Storage Class
-Memory Bus" under System devices with code 10. It does not affect the battery.
-
-To remove the battery from a VM, stop it and run
-`python3 -m wn update-vm-args --no-battery`.
-
-If you change the driver, sign it with your own key. Install `osslsigncode`,
-create a key pair, build, and sign:
-
-```sh
-brew install osslsigncode
-mkdir -p efi/keys
-openssl req -new -x509 -newkey rsa:2048 -nodes -subj "/CN=wn Secure Boot/" \
-	-keyout efi/keys/wn-sb.key -out efi/keys/wn-sb.crt -days 3650
-openssl x509 -in efi/keys/wn-sb.crt -outform DER -out efi/keys/wn-sb.cer
-(cd efi/wn-acpi && cargo build --release)
-efi/sign.sh
-```
-
-`efi/sign.sh` writes `efi/dist/wn-acpi.efi` and `efi/dist/wn-sb.cer`, and the
-next `wn setup` enrolls that certificate. Git ignores the `efi/keys` folder. Keep
-the private key safe: anything signed with it runs in your VM with Secure Boot
-on.
-
-## Configuration
-
-`wn` reads `~/.config/wn/config.json`. Every setting is optional.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `vm_name` | `Windows` | Name of the VM in UTM. |
-| `backend` | `utm` | Which backend drives the VM. `utm` is the only one so far. |
-| `utmctl_path` | `/Applications/UTM.app/Contents/MacOS/utmctl` | Path of UTM's `utmctl` tool. |
-| `qmp_socket` | none | QMP address: a Unix socket path or `tcp:HOST:PORT`. When set, every command uses it instead of the VM's own sockets. |
-| `key_delay_ms` | `20` | Pause after each key is released for `key` and `type`. |
-| `screen_size` | none | Guest screen size such as `1280x800`. When set, `wn mouse move` takes pixels. |
-| `keygrab_binary` | `keygrab/bin/wn-keygrab` | Path of the key grab helper. |
-| `keygrab_keycodes` | `keygrab/keycodes.json` | Table that maps macOS keycodes to QEMU key names. |
-| `keygrab_send_repeats` | `true` | Send auto-repeat key presses in `grab` mode. |
-| `battery_sync` | `true` | Write the Mac's battery status to the native battery block from `wn agent`. |
-| `battery_file` | `~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/wn-battery-<vm_name>.bin` | Battery file that QEMU maps into the guest. UTM's QEMU can open it only in that folder. |
-
-`wn` talks to QEMU through two QMP Unix sockets in
-`~/Library/Group Containers/WDNLXAD4W8.com.utmapp.UTM/`: `wn-<vm_name>.qmp`
-for `key`, `type`, `mouse`, and `screenshot`, and `wn-<vm_name>-session.qmp`
-for `grab`. That folder is open only to your user, so other users and web
-pages cannot reach them. macOS limits a socket path to 103 bytes, so a long VM
-name or home folder can be too long; `wn` says so when it is.
-
-VMs made before this change listen on TCP ports 4444 and 4445 instead. To
-move one to the sockets, stop the VM, run `python3 -m wn update-vm-args --qmp`,
-quit UTM, and open it again. `wn` ignores the old `qmp_port` and
-`qmp_session_port` settings, so you can delete them from the config.
-
-## Advanced
-
-**Key grab mode.** `wn grab` is for when you have no UTM window, for example
-a headless VM or a terminal session. It sends real key down and key up events,
-so the Windows key, `ctrl+alt+del`, and held keys all work. Press
-Control+Option+Command to release the keyboard to macOS, and again to grab
-it. Change this with `--release-hotkey`, for example `control,shift`. Build
-the helper once with `keygrab/build.sh`, then give your terminal app
-Accessibility permission in System Settings > Privacy & Security >
-Accessibility.
-
-**Headless mode.** `--headless` on `setup` creates the VM with no display
-window.
-
-**QEMU arguments.** `update-vm-args` takes these options:
-
-- `--audio-args ARGS` replaces the default audio block (`-audiodev`,
-  `intel-hda`, `hda-output`, and the `hda-micro` microphone codec), for
-  example to change the buffer sizes.
-- `--extra-args ARGS` sets the QEMU arguments that come after everything else,
-  for example `-device virtio-keyboard-pci,id=vkbd`.
-
-`update-vm-args` reads the bundle's current arguments and changes only the
-parts that its flags name. Everything else stays as it is:
-
-| Flag | Part it replaces |
+| Command | What it does |
 |---|---|
-| `--qmp` | The QMP servers, as Unix sockets |
-| `--headless` | Adds `-device ramfb` |
-| `--audio-args ARGS` | The audio arguments |
-| `--battery`, `--no-battery` | The battery NVDIMM |
-| `--extra-args ARGS` | Every argument that is not in one of the parts above |
+| `uv run wn start` | Starts Windows. |
+| `uv run wn stop` | Shuts down Windows. |
+| `uv run wn status` | Shows whether the VM is running. |
+| `uv run wn ip` | Prints the Windows IP address. |
+| `uv run wn key ctrl+alt+del` | Sends one or more key combinations. |
+| `uv run wn type 'Get-ComputerInfo'` | Types text into Windows. |
+| `uv run wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls the mouse. |
+| `uv run wn screenshot screen.png` | Saves the Windows screen as a PNG. |
+| `uv run wn grab` | Sends every Mac key press to Windows. |
 
-It prints the old and new arguments as a diff. With no flags, nothing
-changes. Afterwards, quit UTM and open it again so it reads the new
-arguments.
+Run `uv run wn <command> --help` for the options available to a command.
 
-`wn setup` restarts UTM so it finds the new VM. Stop other VMs in UTM before
-you run it.
+For everyday use, type in the UTM window. Command maps to the Windows key.
+Control and Option together capture or release the keyboard.
+
+## Hardware support
+
+### Audio and microphone
+
+Windows uses the Mac's default speakers and microphone. Audio is configured
+for low latency. The first time a Windows app records, macOS asks whether UTM
+may use the microphone.
+
+Bluetooth headphones can switch to headset mode while the microphone is
+active. Sound quality returns to normal when recording stops.
+
+### Camera
+
+Windows sees the Mac's default camera as a standard USB webcam named
+"Mac Camera." The first time it starts, macOS asks whether wn-agent may use
+the camera.
+
+The camera is active only while a Windows app is using it.
+
+### Battery
+
+Windows shows the Mac's charge level and power state in the taskbar, Settings,
+Device Manager, and NVDA. A small macOS agent keeps it in sync and also feeds
+the camera to the VM.
+
+macOS asks whether wn-agent may access UTM's data. Choose **Allow**. If access
+is denied, add wn-agent to System Settings > Privacy & Security > Full Disk
+Access.
+
+### Screen reader
+
+NVDA is installed by default and starts when you sign in. On an M4 Pro, the
+measured time from a key press to NVDA speech was about 115 ms. While most of this latency is caused by the audio stack, work is in progress to reduce it further using every hack known to man.
+
+## Use with a coding agent
+
+Start your coding agent from the cloned `wn` directory and ask it to use the
+Windows VM. The repository contains the CLI and its help, which gives the
+agent everything it needs to start Windows, inspect the screen, and send
+keyboard or mouse input.
+
+No plugin, server, or agent specific configuration is required.
+
+## Current limitations
+
+- There is no GPU acceleration yet. Windows renders the desktop on the CPU.
+- Microsoft has only authorized Parallels Desktop for running Windows 11 Pro on a Mac. Windows installs with Microsoft's generic key and remains unactivated until you enter your own key in Settings.
+
+## Roadmap
+
+1. Shared folders.
+2. GPU acceleration.
+3. Windows IoT Enterprise LTSC support.
 
 ## Development
 
-Run the tests:
+Run the tests on macOS:
 
 ```sh
-python3 -m unittest discover -s tests
+uv run python -m unittest discover -s tests
 ```
 
-- `wn/`: the CLI, setup, answer file, UTM config, and QMP code.
-- `tests/`: unit tests with fake QMP, `utmctl`, and key grab helpers.
-- `keygrab/`: the Swift key grab helper and its keycode table.
-- `tools/`: helpers that the core features do not need, such as the input and audio latency tools in `tools/latency/`.
+The main project folders are:
+
+1. `wn/` contains the CLI, setup code, UTM configuration, camera helper, and
+   VM control code.
+2. `tests/` contains the automated tests.
+3. `keygrab/` contains the Swift keyboard helper, in case you do not want to send keys through UTM.
+4. `efi/` contains the native battery firmware driver.
 
 ## License
 
-License: to be decided.
+License to be decided.
