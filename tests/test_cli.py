@@ -248,6 +248,32 @@ class ShareCommandTests(CLITestCase):
 		self.assertEqual(exit_code, 1)
 		self.assertEqual(stderr, "\nwn: stopped. Projects is removed from the Mac, but wn may not have finished removing its files from Windows\n")
 
+	def test_ctrl_c_during_share_prints_one_line(self):
+		self.share_commands().add_share.side_effect = KeyboardInterrupt
+		exit_code, stdout, stderr = self.run_cli("share", "/a", "C:\\x")
+		self.assertEqual(exit_code, 1)
+		self.assertEqual(stderr, "\nwn: stopped. Run wn shares to see whether the share exists\n")
+
+	def test_ctrl_c_during_shares_prints_one_line(self):
+		self.share_commands().list_shares.side_effect = KeyboardInterrupt
+		exit_code, _, stderr = self.run_cli("shares")
+		self.assertEqual(exit_code, 1)
+		self.assertEqual(stderr, "\nwn: stopped\n")
+
+	def test_os_error_in_a_share_command_is_printed(self):
+		share_commands = self.share_commands()
+		share_commands.add_share.side_effect = OSError(48, "Address already in use")
+		share_commands.list_shares.side_effect = PermissionError(13, "Permission denied")
+		share_commands.remove_share.side_effect = FileNotFoundError(2, "No such file or directory")
+		for argv, message in (
+			(("share", "/a", "C:\\x"), "wn: error: [Errno 48] Address already in use\n"),
+			(("shares",), "wn: error: [Errno 13] Permission denied\n"),
+			(("unshare", "Projects"), "wn: error: [Errno 2] No such file or directory\n"),
+		):
+			exit_code, _, stderr = self.run_cli(*argv)
+			self.assertEqual(exit_code, 1)
+			self.assertEqual(stderr, message)
+
 	def test_share_error_is_printed(self):
 		self.share_commands().add_share.side_effect = WnError("boom")
 		exit_code, _, stderr = self.run_cli("share", "/a", "C:\\x")

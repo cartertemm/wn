@@ -602,25 +602,36 @@ def _share_commands(context):
 	return ShareCommands(context.config, context.backend, context.stdout)
 
 
+def _run_share_action(context, action, stopped_message):
+	"""Run ``action`` with the share commands. On Ctrl+C print ``stopped_message()`` and fail, and report an OSError as a wn error."""
+	try:
+		return action(_share_commands(context))
+	except OSError as error:
+		raise WnError(str(error)) from None
+	except KeyboardInterrupt:
+		context.stderr.write(stopped_message())
+		return EXIT_FAILURE
+
+
 def run_share(context):
 	arguments = context.arguments
-	return _share_commands(context).add_share(arguments.mac_dir, arguments.vm_dir, arguments.read_only, arguments.name)
+	return _run_share_action(context, lambda commands: commands.add_share(arguments.mac_dir, arguments.vm_dir, arguments.read_only, arguments.name),
+		lambda: "\nwn: stopped. Run wn {} to see whether the share exists\n".format(LIST_COMMAND))
 
 
 def run_list_shares(context):
-	return _share_commands(context).list_shares()
+	return _run_share_action(context, lambda commands: commands.list_shares(), lambda: "\nwn: stopped\n")
+
+
+def _remove_stopped_message(name):
+	if any(share.name.casefold() == name.casefold() for share in load_config().shares):
+		return "\nwn: stopped. {name} is still shared on the Mac, and Windows may still remove it after its uploads. Run wn {remove} {name} again to finish\n".format(name=name, remove=REMOVE_COMMAND)
+	return "\nwn: stopped. {} is removed from the Mac, but wn may not have finished removing its files from Windows\n".format(name)
 
 
 def run_remove_share(context):
 	name = context.arguments.share
-	try:
-		return _share_commands(context).remove_share(name)
-	except KeyboardInterrupt:
-		if any(share.name.casefold() == name.casefold() for share in load_config().shares):
-			context.stderr.write("\nwn: stopped. {name} is still shared on the Mac, and Windows may still remove it after its uploads. Run wn {remove} {name} again to finish\n".format(name=name, remove=REMOVE_COMMAND))
-		else:
-			context.stderr.write("\nwn: stopped. {} is removed from the Mac, but wn may not have finished removing its files from Windows\n".format(name))
-		return EXIT_FAILURE
+	return _run_share_action(context, lambda commands: commands.remove_share(name), lambda: _remove_stopped_message(name))
 
 
 COMMANDS = {
