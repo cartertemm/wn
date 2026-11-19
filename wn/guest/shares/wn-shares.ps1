@@ -22,7 +22,7 @@ $RcloneTimeFormat = 'yyyy/MM/dd HH:mm:ss'
 $LinkedParentDetail = '{0} is a link or mount point. Use a share path with no link in it'
 $NoShareFileDetail = 'the share folder has no share.json'
 $NotDeletedDetail = 'could not delete {0}'
-$OpenFilesDetail = '{0} files are open in Windows. Close them so the share can be removed'
+$OpenFilesDetail = '{0} open in Windows. Close every open file in the share so it can be removed'
 $CacheUploadDetail = 'starting rclone to upload the files in its cache'
 $FailedDetail = '{0} cannot be uploaded to the Mac: {1}: {2}'
 $Utf8 = New-Object System.Text.UTF8Encoding $false
@@ -193,11 +193,15 @@ function Update-Failures($Name, $Folder) {
 	}
 }
 
+function Get-FileCount($Count) {
+	if ($Count -eq 1) { return '1 file' }
+	return ('{0} files' -f $Count)
+}
+
 function Get-FailureDetail($Name) {
 	$failures = $Failures[$Name]
 	if (-not $failures -or $failures.Count -eq 0) { return '' }
-	$files = '{0} files' -f $failures.Count
-	if ($failures.Count -eq 1) { $files = '1 file' }
+	$files = Get-FileCount $failures.Count
 	$newest = @($failures.Keys)[-1]
 	return ($FailedDetail -f $files, $newest, $failures[$newest])
 }
@@ -261,11 +265,11 @@ function Remove-Share($Name, $Folder) {
 		Update-Failures $Name $Folder
 		$counts = Get-CacheCounts $Folder $since
 		if ($counts -and $counts.open -gt 0) {
-			Set-State $Name 'removing' ($OpenFilesDetail -f $counts.open) $process.Id $null
+			Set-State $Name 'removing' ($OpenFilesDetail -f (Get-FileCount $counts.open)) $process.Id $null
 			return
 		}
 		if ($counts -and $counts.pending -gt 0) {
-			$detail = '{0} files to upload to the Mac' -f $counts.pending
+			$detail = '{0} to upload to the Mac' -f (Get-FileCount $counts.pending)
 			$failed = Get-FailureDetail $Name
 			if ($failed) {
 				Set-State $Name 'removing' ('{0}. {1}' -f $detail, $failed) $process.Id $null

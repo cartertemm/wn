@@ -135,7 +135,7 @@ class RemovalTests(unittest.TestCase):
 		counts = function_body(self.text, "Get-CacheCounts")
 		self.assertIn("$pending = [int]$Matches[3] + [int]$Matches[4]", counts)
 		self.assertIn("return @{ open = [Math]::Max(0, [int]$Matches[2] - $pending); pending = $pending }", counts)
-		self.assertIn("if ($counts -and $counts.open -gt 0) {\n\t\t\tSet-State $Name 'removing' ($OpenFilesDetail -f $counts.open) $process.Id $null\n\t\t\treturn\n", self.remove)
+		self.assertIn("if ($counts -and $counts.open -gt 0) {\n\t\t\tSet-State $Name 'removing' ($OpenFilesDetail -f (Get-FileCount $counts.open)) $process.Id $null\n\t\t\treturn\n", self.remove)
 		self.assertLess(self.remove.index("$counts.open -gt 0"), self.remove.index("Stop-Process"))
 
 	def test_removal_starts_rclone_again_when_the_cache_is_dirty_after_the_stop(self):
@@ -191,6 +191,16 @@ class UploadFailureTests(unittest.TestCase):
 		update = function_body(self.text, "Update-Share")
 		self.assertIn("\t\t\tUpdate-Failures $Name $Folder\n\t\t\tSet-State $Name 'mounted' (Get-FailureDetail $Name) $process.Id $null\n\t\t\tif ($Failures[$Name].Count) { $Status[$Name].failed = $Failures[$Name].Count }\n", update)
 		self.assertIn("$FailedDetail = '{0} cannot be uploaded to the Mac: {1}: {2}'", self.text)
+
+	def test_file_counts_in_details_use_the_singular_for_one_file(self):
+		count = function_body(self.text, "Get-FileCount")
+		self.assertIn("if ($Count -eq 1) { return '1 file' }", count)
+		self.assertIn("return ('{0} files' -f $Count)", count)
+		remove = function_body(self.text, "Remove-Share")
+		self.assertIn("($OpenFilesDetail -f (Get-FileCount $counts.open))", remove)
+		self.assertIn("$detail = '{0} to upload to the Mac' -f (Get-FileCount $counts.pending)", remove)
+		self.assertIn("$files = Get-FileCount $failures.Count", function_body(self.text, "Get-FailureDetail"))
+		self.assertIn("$OpenFilesDetail = '{0} open in Windows. Close every open file in the share so it can be removed'", self.text)
 
 	def test_a_removal_shows_its_failures_in_the_detail(self):
 		remove = function_body(self.text, "Remove-Share")
