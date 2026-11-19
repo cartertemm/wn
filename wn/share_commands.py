@@ -61,7 +61,8 @@ from wn.shares import (
 )
 
 AGENT_PICKUP_TIMEOUT_SECONDS = 15
-MOUNT_TIMEOUT_SECONDS = 30
+MOUNT_TIMEOUT_SECONDS = 90
+MISSED_READS_AFTER_DEADLINE = 3
 REMOVE_TIMEOUT_SECONDS = 180
 REMOVE_PROGRESS_SECONDS = 30
 STATUS_POLL_SECONDS = 1
@@ -73,6 +74,7 @@ RUNNING_STATE = "running"
 MOUNTED_STATE = "mounted"
 REMOVING_STATE = "removing"
 BLOCKED_STATE = "blocked"
+GUEST_ERROR_STATE = "error"
 INCOMPLETE_STATE = "incomplete"
 UNKNOWN_STATE = "unknown"
 EXIT_SUCCESS = 0
@@ -93,6 +95,7 @@ GUEST_AGENT_DOWN_MESSAGE = "Windows is still starting (no answer from the guest 
 SHARE_STOPPED_MESSAGE = "VM '{}' is {}. Run wn start, wait until Windows has started, then run wn {} again"
 LOCKED_MESSAGE = "another wn share or wn unshare command is running. Wait for it to finish, then try again"
 REMOVE_STOPPED_MESSAGE = "VM '{}' is {}. Start it with wn start and run wn {} again, so wn can remove the share from Windows too"
+NOT_READ = object()
 WINFSP_NOTICE = "Uses WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos, https://github.com/winfsp/winfsp"
 
 
@@ -128,6 +131,11 @@ def _log_line(line):
 
 def _status_entry(shares, name):
 	return shares.get(_status_key(shares, name))
+
+
+def _is_stuck(entry):
+	"""Return True when the guest reports a state that does not fix itself."""
+	return _state_of(entry) == BLOCKED_STATE or (_state_of(entry) == GUEST_ERROR_STATE and bool(entry.get("detail")))
 
 
 def _reported(entry):
@@ -213,14 +221,31 @@ class ShareCommands:
 	def _write_shares(self, shares):
 		update_config_file({"shares": [share.to_dict() for share in shares] if shares else REMOVE_SETTING})
 
-	def _wait(self, read, ready, timeout):
-		"""Call ``read`` every STATUS_POLL_SECONDS until ``ready`` accepts its value or ``timeout`` passes. Return the last value."""
+	def _wait(self, read, done, timeout, progress=None):
+		"""Call ``read`` every STATUS_POLL_SECONDS until ``done`` accepts its value. Give up only at a good read, one that is not None, that began after the deadline, or after MISSED_READS_AFTER_DEADLINE bad reads past it. A change in ``progress`` between good reads moves the deadline to ``timeout`` from then. Return the last good value."""
 		deadline = self.clock() + timeout
-		value = read()
-		while not ready(value) and self.clock() < deadline:
+		value = None
+		last_progress = NOT_READ
+		missed = 0
+		while True:
+			began = self.clock()
+			answer = read()
+			if answer is not None:
+				value = answer
+				if done(value):
+					return value
+				if progress is not None:
+					key = progress(value)
+					if last_progress is not NOT_READ and key != last_progress:
+						deadline = began + timeout
+					last_progress = key
+				if began >= deadline:
+					return value
+			elif began >= deadline:
+				missed += 1
+				if missed >= MISSED_READS_AFTER_DEADLINE:
+					return value
 			self.sleep(STATUS_POLL_SECONDS)
-			value = read()
-		return value
 
 	def _ensure_agent(self):
 		if not self.agent_installed():
@@ -301,7 +326,8 @@ class ShareCommands:
 		return script_changed
 
 	def _wait_for_agent(self, name):
-		entry = self._wait(lambda: read_mac_state(self.paths)["shares"].get(name), lambda entry: _state_of(entry) == SERVING_STATE, AGENT_PICKUP_TIMEOUT_SECONDS)
+		shares = self._wait(lambda: read_mac_state(self.paths)["shares"], lambda shares: _state_of(shares.get(name)) == SERVING_STATE, AGENT_PICKUP_TIMEOUT_SECONDS)
+		entry = shares.get(name)
 		if _state_of(entry) == SERVING_STATE:
 			return
 		if entry is None:
@@ -309,9 +335,13 @@ class ShareCommands:
 		raise ShareError("the wn agent did not start serving the share. It reports: {}".format(_reported(entry)))
 
 	def _wait_for_mount(self, name, folder):
-		entry = self._wait(lambda: _status_entry(self._guest_status() or {}, name), lambda entry: _state_of(entry) == MOUNTED_STATE, MOUNT_TIMEOUT_SECONDS)
+		guest = self._wait(self._guest_status, lambda guest: _state_of(_status_entry(guest, name)) == MOUNTED_STATE or _is_stuck(_status_entry(guest, name)),
+			MOUNT_TIMEOUT_SECONDS, lambda guest: _state_of(_status_entry(guest, name)))
+		entry = _status_entry(guest or {}, name)
 		if _state_of(entry) == MOUNTED_STATE:
 			return
+		if _is_stuck(entry):
+			raise ShareError("Windows cannot mount the share. Windows reports: {}".format(_reported(entry)))
 		log_path = folder + "\\" + MOUNT_LOG_NAME
 		try:
 			log = self.runner.pull(log_path).lstrip(BOM_TEXT).replace("\r", "")

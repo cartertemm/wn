@@ -13,6 +13,7 @@ from wn.backends.utm import UnknownVMError, UTMCtlError
 from wn.config import ConfigError, load_config, update_config_file
 from wn.downloads import RCLONE_WINDOWS_BINARY, WINFSP_SOURCE, ShareTools
 from wn.guest_runner import GuestError, GuestScriptError
+from wn import share_commands
 from wn.agent import launch_agent_path, pid_file_path
 from wn.share_commands import LOCK_FILE_NAME, REMOVE_PROGRESS_SECONDS, WINFSP_NOTICE, ShareCommands, agent_is_installed, agent_is_running
 from wn.share_sftp import (
@@ -589,8 +590,79 @@ class StatusPollTests(ShareCommandTestCase):
 		self.runner.files[GUEST_STATUS_FILE] = "{"
 		with self.assertRaises(ShareError) as caught:
 			self.add()
-		self.assertIn("Windows did not mount the share within 30 s. Windows reports: unknown.", str(caught.exception))
+		self.assertIn("Windows did not mount the share within 90 s. Windows reports: unknown.", str(caught.exception))
 		self.assert_rolled_back()
+
+	def slow_status(self, mounted_at, read_seconds=11, states=None):
+		"""Make each status read take ``read_seconds`` and return the status as it was when the read began."""
+
+		def read():
+			began = self.clock.now
+			self.clock.now += read_seconds
+			if began >= mounted_at:
+				return status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 1}})
+			state = (states or (lambda now: "starting"))(began)
+			return status_text({SHARE_NAME: {"state": state, "detail": "", "pid": 1}} if state else {})
+
+		self.runner.files[GUEST_STATUS_FILE] = read
+
+	def test_slow_reads_get_a_read_that_began_after_the_deadline(self):
+		self.slow_status(mounted_at=95)
+		self.add()
+		self.assertEqual(len(load_config().shares), 1)
+		self.assertIn("is now at", self.output.getvalue())
+
+	def test_a_stale_starting_status_times_out_after_90_s(self):
+		self.slow_status(mounted_at=float("inf"))
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		self.assertIn("Windows did not mount the share within 90 s. Windows reports: starting.", str(caught.exception))
+		self.assertGreaterEqual(self.clock.now, 90)
+		self.assertLess(self.clock.now, 120)
+		self.assert_rolled_back()
+
+	def test_a_change_of_state_moves_the_deadline(self):
+		self.slow_status(mounted_at=150, states=lambda now: None if now < 20 else "starting" if now < 80 else "waiting")
+		self.add()
+		self.assertEqual(len(load_config().shares), 1)
+
+	def test_states_that_do_not_fix_themselves_fail_at_once(self):
+		cases = (
+			({"state": "blocked", "detail": VM_PATH + " exists as a local folder with files", "pid": None}, "blocked, " + VM_PATH + " exists as a local folder with files"),
+			({"state": "error", "detail": "Access is denied", "pid": None}, "error, Access is denied"),
+		)
+		for entry, reported in cases:
+			with self.subTest(reported=reported):
+				self.runner.calls = []
+				self.clock.now = 0
+				self.runner.files.pop(FOLDER + "\\remove", None)
+				self.runner.files[GUEST_STATUS_FILE] = status_text({SHARE_NAME: entry})
+				with self.assertRaises(ShareError) as caught:
+					self.add()
+				self.assertEqual(str(caught.exception), "Windows cannot mount the share. Windows reports: " + reported)
+				self.assertLess(self.clock.now, 5)
+				self.assert_rolled_back()
+
+	def test_an_error_without_detail_is_waited_out(self):
+		answers = [status_text({SHARE_NAME: {"state": "error", "detail": "", "pid": None}}), status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 1}})]
+		self.runner.files[GUEST_STATUS_FILE] = lambda: answers.pop(0)
+		self.add()
+		self.assertEqual(answers, [])
+
+	def test_the_agent_wait_gets_a_read_that_began_after_its_deadline(self):
+		os.remove(self.paths.state_file)
+		real_read = share_commands.read_mac_state
+
+		def slow_read(paths):
+			began = self.clock.now
+			self.clock.now += 10
+			if began >= 15:
+				self.serve(SHARE_NAME)
+			return real_read(paths)
+
+		with mock.patch.object(share_commands, "read_mac_state", slow_read):
+			self.add()
+		self.assertEqual(len(load_config().shares), 1)
 
 
 class RollbackTests(ShareCommandTestCase):
@@ -600,13 +672,13 @@ class RollbackTests(ShareCommandTestCase):
 		with self.assertRaises(ShareError) as caught:
 			self.add()
 		message = str(caught.exception)
-		self.assertTrue(message.startswith("Windows did not mount the share within 30 s. Windows reports: waiting, rclone exited with code 1; last log line: no route. Last lines of {}\\mount.log:\n".format(FOLDER)))
+		self.assertTrue(message.startswith("Windows did not mount the share within 90 s. Windows reports: waiting, rclone exited with code 1; last log line: no route. Last lines of {}\\mount.log:\n".format(FOLDER)))
 		self.assertIn("log line 10\nlog line 11", message)
 		self.assertNotIn("log line 9\n", message)
 		self.assertTrue(message.endswith("log line 29"))
 		self.assertNotIn("\r", message)
 		self.assert_rolled_back()
-		self.assertGreaterEqual(self.clock.now, 30)
+		self.assertGreaterEqual(self.clock.now, 90)
 
 	def test_mount_timeout_without_a_log(self):
 		self.runner.files[GUEST_STATUS_FILE] = status_text({})
