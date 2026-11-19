@@ -64,6 +64,7 @@ try {
 """
 READY_TIMEOUT_SECONDS = 30
 POLL_SECONDS = 1
+OUTPUT_READ_ATTEMPTS = 3
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 120
 DEFAULT_LABEL = "guest script"
 MAX_PUSH_BYTES = 1024 * 1024
@@ -116,6 +117,10 @@ class GuestTimeoutError(GuestError):
 
 def output_tail(output):
 	return "\n".join(output.splitlines()[-ERROR_TAIL_LINES:])
+
+
+def clean_text(text):
+	return text.lstrip(BOM_TEXT).replace("\r", "")
 
 
 def exec_paths(script_id):
@@ -184,8 +189,10 @@ class GuestRunner:
 				raise GuestTimeoutError(label, timeout, output)
 			self.sleep(POLL_SECONDS)
 			exit_code = self._exit_code(paths.done, token)
-		output = self._read_text(paths.output)
-		self._delete(paths.pattern)
+		output, read_error = self._read_output(paths.output)
+		self._clean_up(paths.pattern)
+		if read_error is not None:
+			raise GuestError("{} finished in Windows with exit code {}, but wn could not read its output: {}".format(label, exit_code, read_error))
 		if exit_code != 0:
 			raise GuestScriptError(label, exit_code, output)
 		return output
@@ -218,10 +225,32 @@ class GuestRunner:
 			raise
 		except BackendError:
 			return ""
-		return text.lstrip(BOM_TEXT).replace("\r", "")
+		return clean_text(text)
+
+	def _read_output(self, guest_path):
+		"""Return the output file's text and None, or None and the last error when it cannot be read in OUTPUT_READ_ATTEMPTS tries."""
+		for attempt in range(OUTPUT_READ_ATTEMPTS):
+			if attempt:
+				self.sleep(POLL_SECONDS)
+			try:
+				return clean_text(self.backend.pull_file(guest_path)), None
+			except (UnknownVMError, UTMCtlMissingError):
+				raise
+			except BackendError as error:
+				read_error = error
+		return None, read_error
 
 	def _delete(self, pattern):
 		self.backend.exec_command("cmd.exe", "/c", "del /q {}".format(pattern))
+
+	def _clean_up(self, pattern):
+		"""Delete a finished run's files. A failure here does not change the run's result, unless the VM is gone."""
+		try:
+			self._delete(pattern)
+		except (UnknownVMError, UTMCtlMissingError):
+			raise
+		except BackendError:
+			pass
 
 	def _exit_code(self, done_path, token):
 		fields = self._read_text(done_path).split()

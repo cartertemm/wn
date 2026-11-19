@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 from fakes import FakeBackend
-from wn.backends.utm import UTMCtlError, UnknownVMError
+from wn.backends.utm import UTMCtlError, UTMCtlTimeoutError, UnknownVMError
 from wn.guest_runner import (
 	EXEC_DIRECTORY,
 	MAX_PUSH_BYTES,
@@ -107,6 +107,29 @@ class FailingDeleteGuest(FakeGuest):
 	def handle_exec(self, argv):
 		if argv[-1].startswith("del ") and argv[-1].endswith(".*"):
 			raise UTMCtlError("utmctl exec failed with exit code 1")
+		super().handle_exec(argv)
+
+
+class FailingOutputGuest(FakeGuest):
+	"""Fails the first ``failures`` pulls of a written .out file with a utmctl timeout, or with ``error`` when one is given."""
+
+	def __init__(self, failures, error=None, **arguments):
+		super().__init__(**arguments)
+		self.failures = failures
+		self.error = error or UTMCtlTimeoutError("utmctl file did not finish within 30 s")
+
+	def pull_file(self, guest_path):
+		if guest_path.endswith(".out") and guest_path in self.files and self.failures > 0:
+			self.failures -= 1
+			self.calls.append(("pull_file", guest_path))
+			raise self.error
+		return super().pull_file(guest_path)
+
+
+class UnknownVMDeleteGuest(FakeGuest):
+	def handle_exec(self, argv):
+		if argv[-1].startswith("del ") and argv[-1].endswith(".*"):
+			raise UnknownVMError("UTM has no VM named 'Windows'")
 		super().handle_exec(argv)
 
 
@@ -261,6 +284,37 @@ class GuestRunnerTests(unittest.TestCase):
 	def test_timeout_is_raised_when_cleanup_fails(self):
 		with self.assertRaises(GuestTimeoutError):
 			self.run_script(FailingDeleteGuest(polls_until_done=1000), timeout=SCRIPT_TIMEOUT)
+
+	def test_finished_script_succeeds_when_cleanup_fails(self):
+		self.assertEqual(self.run_script(FailingDeleteGuest(output="done\r\n")), "done\n")
+
+	def test_failed_script_keeps_its_exit_code_when_cleanup_fails(self):
+		with self.assertRaises(GuestScriptError) as caught:
+			self.run_script(FailingDeleteGuest(exit_code=2, output="bad\r\n"))
+		self.assertEqual(caught.exception.exit_code, 2)
+
+	def test_cleanup_raises_when_the_vm_is_gone(self):
+		with self.assertRaises(UnknownVMError):
+			self.run_script(UnknownVMDeleteGuest())
+
+	def test_output_read_is_tried_again(self):
+		guest = FailingOutputGuest(failures=2, output='wn-result: {"a": 1}\r\n')
+		self.assertEqual(make_runner(guest).run_json("x"), {"a": 1})
+
+	def test_output_that_cannot_be_read_says_so(self):
+		guest = FailingOutputGuest(failures=1000, output='wn-result: {"a": 1}\r\n')
+		with self.assertRaises(GuestError) as caught:
+			make_runner(guest).run_json("x", label="prepare.ps1")
+		message = str(caught.exception)
+		self.assertIn("prepare.ps1 finished in Windows with exit code 0, but wn could not read its output", message)
+		self.assertIn("utmctl file did not finish within 30 s", message)
+		self.assertNotIn("printed no result", message)
+		self.assertEqual(guest.calls[-1], ("exec_command", "cmd.exe", "/c", "del /q C:\\ProgramData\\wn\\exec\\{}.*".format(FIRST_ID)))
+
+	def test_output_read_raises_when_the_vm_is_gone(self):
+		guest = FailingOutputGuest(failures=1, error=UnknownVMError("UTM has no VM named 'Windows'"))
+		with self.assertRaises(UnknownVMError):
+			self.run_script(guest)
 
 	def test_cleanup_deletes_the_exec_files(self):
 		guest = FakeGuest()
