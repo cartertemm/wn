@@ -57,6 +57,8 @@ SHARE_DESCRIPTION = """Show a folder on the Mac as a live folder in Windows. dir
 
   wn {share} ~/Projects 'C:\\Users\\you\\Projects'
 
+Forward slashes also work, such as C:/Users/you/Projects. The folder that holds it must exist in Windows.
+
 Run wn {list} to see the shares and their state, and wn {remove} NAME to stop sharing a folder.""".format(share=SHARE_COMMAND, list=LIST_COMMAND, remove=REMOVE_COMMAND)
 SHARE_EPILOG = """Limits:
   Windows writes reach the Mac about 5 s after a file is closed. Mac changes reach Windows in under a second.

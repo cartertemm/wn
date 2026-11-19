@@ -650,7 +650,7 @@ class AddShareTests(ShareCommandTestCase):
 	def test_paths_with_special_characters_pass_as_data(self):
 		mac_folder = self.make_mac_folder("My $files & 'docs' 100%")
 		vm_path = "C:\\Users\\c\\My $files & 'docs' 100%"
-		name = "My-files-docs-100-"
+		name = "My-files-docs-100"
 		self.serve(name)
 		self.mount(name)
 		self.add(mac_dir=mac_folder, vm_dir=vm_path)

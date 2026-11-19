@@ -55,7 +55,14 @@ class DefaultNameTests(unittest.TestCase):
 		self.assertEqual(default_share_name("/x/-a"), "a")
 
 	def test_non_ascii_run_becomes_dash(self):
-		self.assertEqual(default_share_name("/x/Fotos ü"), "Fotos-")
+		self.assertEqual(default_share_name("/x/Fotos ü 1"), "Fotos-1")
+
+	def test_trailing_dashes_are_removed(self):
+		self.assertEqual(default_share_name("/Users/c/My Projects (2024)"), "My-Projects-2024")
+		self.assertEqual(default_share_name("/x/Fotos ü"), "Fotos")
+
+	def test_dash_after_cut_is_removed(self):
+		self.assertEqual(default_share_name("/x/" + "a" * 31 + " b"), "a" * 31)
 
 	def test_nothing_left_gives_share(self):
 		self.assertEqual(default_share_name("/x/日本"), "share")
@@ -129,6 +136,13 @@ class NormalizeVmPathTests(unittest.TestCase):
 			with self.subTest(path=path):
 				with self.assertRaisesRegex(ShareError, "absolute Windows folder"):
 					normalize_vm_path(path)
+
+	def test_path_without_backslashes_after_the_drive_names_the_shell(self):
+		for path, drive in (("C:Usersyouproj", "C"), ("d:Work", "d"), ("C:Users\\you", "C")):
+			with self.subTest(path=path):
+				with self.assertRaises(ShareError) as caught:
+					normalize_vm_path(path)
+				self.assertEqual(str(caught.exception), "'{path}' has no backslash after {drive}:. The Mac shell removes backslashes from a path that is not in quotes. Put the Windows path in single quotes, such as '{drive}:\\Users\\you\\Projects', or use forward slashes, such as {drive}:/Users/you/Projects".format(path=path, drive=drive))
 
 	def assert_part_refused(self, path, reason):
 		with self.assertRaises(ShareError) as caught:

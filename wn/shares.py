@@ -17,7 +17,7 @@ LAST_PORT = 47420
 NAME_MAX_LENGTH = 32
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{{0,{}}}$".format(NAME_MAX_LENGTH - 1))
 NAME_INVALID_RUN = re.compile(r"[^A-Za-z0-9._-]+")
-NAME_LEADING = ".-"
+NAME_TRIMMED = ".-"
 NAME_RULE = "name must be 1 to {} characters from A-Z, a-z, 0-9, '.', '_' and '-', and must not start with '.' or '-'".format(NAME_MAX_LENGTH)
 DEFAULT_NAME = "share"
 DOT = "."
@@ -28,6 +28,8 @@ VM_TO_MAC = "vm_to_mac"
 SUPPORTED_DIRECTIONS = (MAC_TO_VM,)
 SHARE_KEYS = ("name", "vm", "direction", "mac_path", "vm_path", "read_only", "port")
 WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:\\")
+SHELL_STRIPPED_PATH = re.compile(r"^([A-Za-z]):[^\\/]")
+SHELL_STRIPPED_MESSAGE = "'{path}' has no backslash after {drive}:. The Mac shell removes backslashes from a path that is not in quotes. Put the Windows path in single quotes, such as '{drive}:\\Users\\you\\Projects', or use forward slashes, such as {drive}:/Users/you/Projects"
 WINDOWS_SEPARATOR = "\\"
 MAC_SEPARATOR = "/"
 VM_PART_INVALID_CHARACTER = re.compile(r'[<>:"|?*\x00-\x1f]')
@@ -202,7 +204,7 @@ def shares_from_values(items):
 
 def default_share_name(mac_path):
 	name = NAME_INVALID_RUN.sub("-", os.path.basename(mac_path.rstrip(MAC_SEPARATOR)))
-	name = name.lstrip(NAME_LEADING)[:NAME_MAX_LENGTH].rstrip(DOT)
+	name = name.lstrip(NAME_TRIMMED)[:NAME_MAX_LENGTH].rstrip(NAME_TRIMMED)
 	if not name or _is_reserved_name(name):
 		return DEFAULT_NAME
 	return name
@@ -230,7 +232,10 @@ def _vm_part_problem(part):
 
 
 def normalize_vm_path(text):
-	path = text.replace(MAC_SEPARATOR, WINDOWS_SEPARATOR).rstrip(WINDOWS_SEPARATOR)
+	stripped = SHELL_STRIPPED_PATH.match(text)
+	if stripped:
+		raise ShareError(SHELL_STRIPPED_MESSAGE.format(path=text, drive=stripped.group(1)))
+	path =text.replace(MAC_SEPARATOR, WINDOWS_SEPARATOR).rstrip(WINDOWS_SEPARATOR)
 	parts = path.split(WINDOWS_SEPARATOR)
 	if not WINDOWS_ABSOLUTE.match(path) or any(part and not part.strip(DOT) for part in parts):
 		raise ShareError("'{}' is not an absolute Windows folder. Give an absolute Windows folder such as '{}'".format(text, VM_PATH_EXAMPLE))

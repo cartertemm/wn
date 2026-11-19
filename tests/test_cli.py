@@ -177,6 +177,8 @@ class ShareCommandTests(CLITestCase):
 			"dir-on-vm",
 			"wn share ~/Projects 'C:\\Users\\you\\Projects'",
 			"single quotes",
+			"Forward slashes also work, such as C:/Users/you/Projects",
+			"The folder that holds it must exist in Windows",
 			"--read-only",
 			"--name",
 			"about 5 s after a file is closed",
