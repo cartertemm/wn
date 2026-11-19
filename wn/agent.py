@@ -17,6 +17,7 @@ from wn.appbundle import build_app, camera_executable_path, executable_path, rem
 from wn.backend import create_backend
 from wn.battery_file import BatteryFile, battery_file_path, battery_writer
 from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, POLL_SECONDS, WRITE_INTERVAL_SECONDS, battery_reading, run_sync_loop, sync_message
+from wn.config import load_config_skipping_bad_shares
 from wn.errors import WnError
 from wn.qmp import qmp_client_for
 from wn.share_sftp import SERVING_STATE, SftpServerSupervisor, read_mac_state, share_paths
@@ -54,6 +55,7 @@ LOG_TAIL_BYTES = 64 * 1024
 IDLE_WAIT_SECONDS = 3600
 BOOTOUT_POLL_SECONDS = 0.1
 BOOTOUT_WAIT_SECONDS = 10
+INVALID_SHARE_LOG_PREFIX = "shares: ignoring an invalid share until it is fixed: "
 
 
 class AgentError(WnError):
@@ -326,6 +328,15 @@ class CameraSupervisor:
 			self.thread.join()
 
 
+def load_serving_config(log, path=None):
+	"""Return the config without its invalid shares, and log one line for each share left out."""
+	config, problems = load_config_skipping_bad_shares(path)
+	for problem in problems:
+		log.write(INVALID_SHARE_LOG_PREFIX + problem + "\n")
+	log.flush()
+	return config
+
+
 def serve(config, output, wait=None, popen=subprocess.Popen):
 	"""Run the battery sync loop, the camera helper and the share servers until Ctrl+C or SIGTERM, with the PID in the pid file while it runs."""
 	shares = shares_for_vm(config.shares, config.vm_name)
@@ -338,7 +349,7 @@ def serve(config, output, wait=None, popen=subprocess.Popen):
 	_write_pid_file(path, os.getpid())
 	previous_handler = signal.signal(signal.SIGTERM, _stop_on_sigterm)
 	camera = CameraSupervisor(camera_command(config), output, popen) if config.camera else None
-	share_supervisor = SftpServerSupervisor(output, popen=popen)
+	share_supervisor = SftpServerSupervisor(output, popen=popen, load=lambda path: load_serving_config(output, path))
 	try:
 		output.write("Running the agent in the foreground with PID {}. Press Ctrl+C to stop\n".format(os.getpid()))
 		output.flush()

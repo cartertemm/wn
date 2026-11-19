@@ -35,7 +35,7 @@ from wn.appbundle import AppBundleError, app_path, camera_executable_path, execu
 from wn.battery_file import BatteryFile
 from wn.battery_sync import BLOCK_SIZE, decode_block
 from wn.cli import main
-from wn.config import Config
+from wn.config import Config, config_path
 
 UPDATED = "2026-11-11T12:00:00Z"
 CHARGING_NO_ESTIMATE = (
@@ -906,8 +906,32 @@ class AgentShareTests(unittest.TestCase):
 			exit_code, stdout, _ = self.run_cli("start", "--foreground")
 		self.assertEqual(exit_code, 0)
 		self.assertEqual(self.share_supervisor_class.call_args.args, (mock.ANY,))
-		self.assertEqual(self.share_supervisor_class.call_args.kwargs, {"popen": subprocess.Popen})
+		self.assertEqual(self.share_supervisor_class.call_args.kwargs, {"popen": subprocess.Popen, "load": mock.ANY})
 		self.share_supervisor_class.return_value.start.assert_called_once_with()
+
+	def test_invalid_share_does_not_stop_battery_sync_or_the_camera(self):
+		write_config(self.home.name, {"camera": True, "shares": [share_item(), share_item(name="Bad", port=1)]})
+		with mock.patch("wn.agent.run_sync_loop") as loop, mock.patch("wn.agent.CameraSupervisor") as camera:
+			exit_code, _, stderr = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 0, stderr)
+		loop.assert_called_once()
+		camera.return_value.start.assert_called_once_with()
+		self.share_supervisor_class.return_value.start.assert_called_once_with()
+
+	def test_share_supervisor_loads_only_the_valid_shares_and_logs_the_rest(self):
+		write_config(self.home.name, {"shares": [share_item(), share_item(name="Bad", port=1)]})
+		with mock.patch("wn.agent.run_sync_loop"):
+			self.run_cli("start", "--foreground")
+		log = self.share_supervisor_class.call_args.args[0]
+		config = self.share_supervisor_class.call_args.kwargs["load"](config_path())
+		self.assertEqual([share.name for share in config.shares], ["Projects"])
+		self.assertIn("shares: ignoring an invalid share until it is fixed: {}: shares[1]: port must be a whole number from 47321 to 47420\n".format(config_path()), log.getvalue())
+
+	def test_invalid_share_still_fails_other_commands(self):
+		write_config(self.home.name, {"shares": [share_item(port=1)]})
+		exit_code, _, stderr = self.run_cli("status")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("wn: error: {}: shares[0]: port must be".format(config_path()), stderr)
 
 	def test_sigterm_stops_the_share_servers_before_the_camera(self):
 		write_config(self.home.name, {"camera": True})

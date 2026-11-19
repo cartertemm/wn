@@ -171,13 +171,29 @@ def _item_problem(item, names, ports):
 	return None
 
 
-def validate_shares(path, items):
+def split_shares(path, items):
+	"""Return the valid share items and a message for each invalid one. An invalid item does not take a name or a port from the items after it."""
 	names = set()
 	ports = set()
+	valid = []
+	problems = []
 	for index, item in enumerate(items):
-		problem = _item_problem(item, names, ports)
+		item_names = set(names)
+		item_ports = set(ports)
+		problem = _item_problem(item, item_names, item_ports)
 		if problem:
-			raise ShareError("{}: shares[{}]: {}".format(path, index, problem))
+			problems.append("{}: shares[{}]: {}".format(path, index, problem))
+		else:
+			valid.append(item)
+			names = item_names
+			ports = item_ports
+	return valid, problems
+
+
+def validate_shares(path, items):
+	problems = split_shares(path, items)[1]
+	if problems:
+		raise ShareError(problems[0])
 
 
 def shares_from_values(items):

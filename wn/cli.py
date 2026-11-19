@@ -14,7 +14,7 @@ from wn.backend import create_backend
 from wn.backends.utm import DEFAULT_VM_NAME
 from wn.battery_file import battery_writer, prepare_battery_file
 from wn.battery_sync import run_battery_command
-from wn.config import config_path, load_config, update_config_file
+from wn.config import config_path, load_config, load_config_skipping_bad_shares, update_config_file
 from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
@@ -654,12 +654,19 @@ COMMANDS = {
 }
 
 
+def _load_command_config(arguments):
+	"""Load the config. The agent that launchd runs leaves out invalid shares, so one bad share does not stop battery sync and the camera. Its share supervisor logs them."""
+	if arguments.command == "agent" and arguments.agent_command == "start" and arguments.foreground:
+		return load_config_skipping_bad_shares()[0]
+	return load_config()
+
+
 def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_client_for, stdout=None, stderr=None, stdin=None):
 	stdout = stdout or sys.stdout
 	stderr = stderr or sys.stderr
 	arguments = build_parser().parse_args(argv)
 	try:
-		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin, stderr)
+		context = CommandContext(arguments, _load_command_config(arguments), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin, stderr)
 		exit_code = COMMANDS[arguments.command](context)
 	except WnError as error:
 		stderr.write("wn: error: {}\n".format(error))
