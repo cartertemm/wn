@@ -82,6 +82,15 @@ WAITING_STATE = "waiting"
 RESTARTING_STATE = "restarting"
 ERROR_STATE = "error"
 NETWORK_DOWN_DETAIL = "the VM network is not up"
+MISSING_FOLDER_DETAIL = "{} is missing"
+NOT_ALLOWED_DETAIL = "macOS does not allow wn-agent to read {}. Allow it in System Settings > Privacy & Security > Files and Folders > wn-agent"
+UNREADABLE_DETAIL = "cannot read {}: {}"
+NOT_RESPONDING_DETAIL = "{} does not respond"
+CHECKING_DETAIL = "checking {}"
+FOLDER_CHECK_SECONDS = 30
+FOLDER_CHECK_TIMEOUT_SECONDS = 10
+THREAD_STOP_SECONDS = 10
+CHECK_PENDING = object()
 HOST_KEY_MISSING_DETAIL = "its host key {key} is missing. Run wn {remove} {name}, then wn {share} again"
 PART_SUFFIX = ".part"
 UTC_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -344,6 +353,42 @@ def kill_orphan_servers(paths, run=subprocess.run, kill=os.kill, sleep=time.slee
 		remove_file(pid_path)
 
 
+def check_folder(path):
+	"""Return why the share folder at ``path`` cannot be served, as a state and a detail, or None when wn-agent can list it."""
+	if not os.path.isdir(path):
+		return WAITING_STATE, MISSING_FOLDER_DETAIL.format(path)
+	try:
+		with os.scandir(path) as entries:
+			next(entries, None)
+	except PermissionError:
+		return ERROR_STATE, NOT_ALLOWED_DETAIL.format(path)
+	except OSError as error:
+		return WAITING_STATE, UNREADABLE_DETAIL.format(path, error.strerror or error)
+	return None
+
+
+def start_daemon_thread(target):
+	threading.Thread(target=target, daemon=True).start()
+
+
+class FolderCheck:
+	"""Runs a folder check on its own thread, so a folder that hangs holds up only its share."""
+
+	def __init__(self, path, started, check, start_thread):
+		self.path = path
+		self.started = started
+		self.check = check
+		self.result = None
+		self.finished = threading.Event()
+		start_thread(self.run)
+
+	def run(self):
+		try:
+			self.result = self.check(self.path)
+		finally:
+			self.finished.set()
+
+
 @dataclasses.dataclass
 class ShareServer:
 	share: Share
@@ -353,6 +398,9 @@ class ShareServer:
 	detail: Optional[str] = None
 	start_error: Optional[str] = None
 	log_offset: int = 0
+	check: Optional[FolderCheck] = None
+	folder_problem: Optional[tuple] = None
+	folder_checked_at: Optional[float] = None
 	logged: set = dataclasses.field(default_factory=set)
 
 
@@ -360,13 +408,15 @@ class SftpServerSupervisor:
 	"""Runs one rclone SFTP server per Mac to Windows share of the configured VM and keeps that set in line with the config."""
 
 	def __init__(self, log, paths=None, config_file=None, popen=subprocess.Popen, address_present=host_address_present, connect=can_connect,
-			monotonic=time.monotonic, wall_clock=time.time, run=subprocess.run, kill=os.kill, load=load_config):
+			check_folder=check_folder, start_thread=start_daemon_thread, monotonic=time.monotonic, wall_clock=time.time, run=subprocess.run, kill=os.kill, load=load_config):
 		self.log = log
 		self.paths = paths or share_paths()
 		self.config_file = config_file or config_path()
 		self.popen = popen
 		self.address_present = address_present
 		self.connect = connect
+		self.check_folder = check_folder
+		self.start_thread = start_thread
 		self.monotonic = monotonic
 		self.wall_clock = wall_clock
 		self.run_command = run
@@ -458,6 +508,8 @@ class SftpServerSupervisor:
 			elif share != server.share:
 				self._stop([server], now)
 				server.share = share
+				server.check = None
+				server.folder_checked_at = None
 		for name, share in self.desired.items():
 			if name not in self.servers:
 				self.servers[name] = ShareServer(share)
@@ -516,6 +568,26 @@ class SftpServerSupervisor:
 		server.logged.clear()
 		self._set(server, SERVING_STATE, "{}:{}".format(HOST_ADDRESS, server.share.port))
 
+	def _collect_check(self, server):
+		check = server.check
+		if check is not None and check.finished.is_set():
+			server.check = None
+			server.folder_problem = check.result
+			server.folder_checked_at = check.started
+
+	def _folder_problem(self, server, now):
+		"""Return why the share's folder cannot be served, None when it can, or CHECK_PENDING before the first check ends. A check runs before each start and every FOLDER_CHECK_SECONDS while the server runs."""
+		self._collect_check(server)
+		interval = FOLDER_CHECK_SECONDS if server.process is not None else 0
+		if server.check is None and (server.folder_checked_at is None or now - server.folder_checked_at >= interval):
+			server.check = FolderCheck(server.share.mac_path, now, self.check_folder, self.start_thread)
+			self._collect_check(server)
+		if server.check is not None and now - server.check.started >= FOLDER_CHECK_TIMEOUT_SECONDS:
+			return WAITING_STATE, NOT_RESPONDING_DETAIL.format(server.share.mac_path)
+		if server.folder_checked_at is None:
+			return CHECK_PENDING
+		return server.folder_problem
+
 	def _write_state(self, now):
 		"""Write the state file when it changes, and every STATE_REFRESH_SECONDS so wn share can tell that this agent runs."""
 		shares = {name: {"state": server.state, "detail": server.detail, "pid": server.process.pid if server.process else None} for name, server in self.servers.items()}
@@ -542,10 +614,13 @@ class SftpServerSupervisor:
 		else:
 			for server in self.servers.values():
 				share = server.share
-				if server.process is not None:
+				problem = self._folder_problem(server, now)
+				if problem is CHECK_PENDING:
+					self._set(server, STARTING_STATE, CHECKING_DETAIL.format(share.mac_path))
+				elif problem is not None:
+					self._set(server, *problem)
+				elif server.process is not None:
 					self._check_serving(server)
-				elif not os.path.isdir(share.mac_path):
-					self._set(server, WAITING_STATE, "{} is missing".format(share.mac_path))
 				elif not os.path.exists(self.paths.host_key(share.name)):
 					self._set(server, ERROR_STATE, HOST_KEY_MISSING_DETAIL.format(key=self.paths.host_key(share.name), remove=REMOVE_COMMAND, name=share.name, share=SHARE_COMMAND))
 				elif now >= server.restart_at:
@@ -574,6 +649,6 @@ class SftpServerSupervisor:
 	def stop(self):
 		self.stopping.set()
 		if self.thread is not None:
-			self.thread.join()
+			self.thread.join(THREAD_STOP_SECONDS)
 		self._stop(list(self.servers.values()), self.monotonic())
 		remove_file(self.paths.state_file)

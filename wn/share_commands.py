@@ -102,6 +102,14 @@ SHARE_STOPPED_MESSAGE = "VM '{}' is {}. Run wn start, wait until Windows has sta
 LOCKED_MESSAGE = "another wn share or wn unshare command is running. Wait for it to finish, then try again"
 REMOVE_STOPPED_MESSAGE = "VM '{}' is {}. Start it with wn start and run wn {} again, so wn can remove the share from Windows too"
 NOT_READ = object()
+MACOS_PROTECTED_FOLDERS = (
+	os.path.join("~", "Desktop"),
+	os.path.join("~", "Documents"),
+	os.path.join("~", "Downloads"),
+	os.path.join("~", "Library", "Mobile Documents"),
+	"/Volumes",
+)
+PRIVACY_NOTICE = "If macOS asks whether wn-agent may access {}, click Allow."
 WINFSP_NOTICE = "Uses WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos, https://github.com/winfsp/winfsp"
 
 
@@ -113,6 +121,16 @@ def agent_is_running(run=None, uid=None):
 	if agent_is_installed() and launchd_state(run or subprocess.run, os.getuid() if uid is None else uid)[1] is not None:
 		return True
 	return foreground_pid() is not None
+
+
+def macos_may_ask(mac_path):
+	"""Return True when ``mac_path`` is in a folder where macOS asks the user before wn-agent can read it."""
+	path = mac_path.casefold()
+	for folder in MACOS_PROTECTED_FOLDERS:
+		root = os.path.realpath(os.path.expanduser(folder)).casefold()
+		if path == root or path.startswith(root + os.sep):
+			return True
+	return False
 
 
 def _sha256(data):
@@ -420,6 +438,8 @@ class ShareCommands:
 			self.runner.push(folder + "\\" + SHARE_JSON_NAME, render_share_json(share).encode("utf-8"))
 			self._write_shares(load_config().shares + (share,))
 			config_written = True
+			if macos_may_ask(mac_path):
+				self._print(PRIVACY_NOTICE.format(mac_path))
 			self._wait_for_agent(name)
 			self._run_script(TASK_SCRIPT, {"restart": script_changed}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 			self._wait_for_mount(name, folder)

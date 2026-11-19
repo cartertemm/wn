@@ -7,6 +7,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -22,6 +23,7 @@ from wn.share_sftp import (
 	guest_script_bytes,
 	host_address_present,
 	can_connect,
+	check_folder,
 	install_binaries,
 	kill_orphan_servers,
 	last_log_line,
@@ -365,6 +367,32 @@ class LastLogLineTest(SharePathsTestCase):
 		self.assertIsNone(last_log_line(os.path.join(self.home.name, "missing.log")))
 
 
+class CheckFolderTest(SharePathsTestCase):
+	def test_a_readable_folder_has_no_problem(self):
+		os.makedirs(self.root)
+		self.assertIsNone(check_folder(self.root))
+
+	def test_a_missing_folder_waits(self):
+		missing = os.path.join(self.home.name, "Gone")
+		self.assertEqual(check_folder(missing), ("waiting", missing + " is missing"))
+
+	def test_a_folder_that_macos_does_not_allow_names_the_fix(self):
+		os.makedirs(self.root)
+		with mock.patch.object(share_sftp.os, "scandir", side_effect=PermissionError(1, "Operation not permitted")):
+			self.assertEqual(check_folder(self.root), ("error", "macOS does not allow wn-agent to read {}. Allow it in System Settings > Privacy & Security > Files and Folders > wn-agent".format(self.root)))
+
+	def test_a_folder_without_read_permission_is_refused(self):
+		os.makedirs(self.root)
+		os.chmod(self.root, 0)
+		self.addCleanup(os.chmod, self.root, 0o700)
+		self.assertEqual(check_folder(self.root)[0], "error")
+
+	def test_another_read_error_waits(self):
+		os.makedirs(self.root)
+		with mock.patch.object(share_sftp.os, "scandir", side_effect=OSError(5, "Input/output error")):
+			self.assertEqual(check_folder(self.root), ("waiting", "cannot read {}: Input/output error".format(self.root)))
+
+
 class GuestScriptTest(unittest.TestCase):
 	def test_load_guest_script_reads_the_file(self):
 		self.assertIn("wn-result: ", load_guest_script(PREPARE_SCRIPT))
@@ -521,7 +549,8 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		os.utime(self.config_file, ns=(self.mtime, self.mtime))
 
 	def supervisor(self, **options):
-		values = {"paths": self.paths, "config_file": self.config_file, "popen": self.popen, "address_present": lambda: self.present, "connect": lambda port: self.accepting, "monotonic": self.clock, "wall_clock": self.wall}
+		values = {"paths": self.paths, "config_file": self.config_file, "popen": self.popen, "address_present": lambda: self.present, "connect": lambda port: self.accepting,
+			"start_thread": lambda target: target(), "monotonic": self.clock, "wall_clock": self.wall}
 		values.update(options)
 		return SftpServerSupervisor(self.log, **values)
 
@@ -764,6 +793,92 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		detail = "its host key {} is missing. Run wn unshare Projects, then wn share again".format(self.paths.host_key("Projects"))
 		self.assertEqual(self.state()["Projects"], {"state": "error", "detail": detail, "pid": None})
 		self.assertEqual(self.log.getvalue().count("share Projects: error, " + detail), 1)
+
+	def test_a_folder_that_macos_does_not_allow_is_not_served(self):
+		self.write_shares(self.share_item())
+		problem = ("error", "macOS does not allow wn-agent to read {}. Allow it in System Settings > Privacy & Security > Files and Folders > wn-agent".format(self.projects))
+		answers = {"result": problem}
+		supervisor = self.supervisor(check_folder=lambda path: answers["result"])
+		supervisor.tick()
+		self.assertEqual(self.popen.commands, [])
+		self.assertEqual(self.state()["Projects"], {"state": problem[0], "detail": problem[1], "pid": None})
+		answers["result"] = None
+		supervisor.tick()
+		self.assertEqual(len(self.popen.commands), 1)
+
+	def test_a_running_server_is_checked_every_30_s_and_not_reported_serving_when_refused(self):
+		self.write_shares(self.share_item())
+		checks = []
+		answers = {"result": None}
+		supervisor = self.supervisor(check_folder=lambda path: checks.append(path) or answers["result"])
+		supervisor.tick()
+		supervisor.tick()
+		self.assertEqual(self.state()["Projects"]["state"], "serving")
+		self.assertEqual(len(checks), 1)
+		self.advance(29)
+		supervisor.tick()
+		self.assertEqual(len(checks), 1)
+		answers["result"] = ("error", "macOS does not allow wn-agent to read it")
+		self.advance(1)
+		supervisor.tick()
+		self.assertEqual(len(checks), 2)
+		self.assertEqual(self.state()["Projects"]["state"], "error")
+		self.assertFalse(self.popen.processes[0].terminated)
+		answers["result"] = None
+		self.advance(30)
+		supervisor.tick()
+		self.assertEqual(self.state()["Projects"]["state"], "serving")
+
+	def test_a_folder_that_hangs_holds_up_only_its_share(self):
+		self.write_shares(self.share_item(), self.share_item("Photos", SECOND_PORT))
+		hung = []
+
+		def start_thread(target):
+			if self.projects in repr(target.__self__.path):
+				hung.append(target)
+			else:
+				target()
+
+		supervisor = self.supervisor(start_thread=start_thread)
+		supervisor.tick()
+		self.assertEqual(self.state()["Projects"], {"state": "starting", "detail": "checking " + self.projects, "pid": None})
+		self.assertEqual(len(self.popen.commands), 1)
+		self.advance(10)
+		supervisor.tick()
+		self.assertEqual(self.state()["Projects"], {"state": "waiting", "detail": self.projects + " does not respond", "pid": None})
+		self.assertEqual(self.state()["Photos"]["state"], "serving")
+		self.assertEqual(len(hung), 1)
+		hung[0]()
+		supervisor.tick()
+		self.assertEqual(len(self.popen.commands), 2)
+
+	def test_folder_checks_run_on_their_own_threads(self):
+		self.write_shares(self.share_item())
+		release = threading.Event()
+		supervisor = self.supervisor(start_thread=share_sftp.start_daemon_thread, check_folder=lambda path: release.wait() and None)
+		supervisor.tick()
+		self.assertEqual(self.popen.commands, [])
+		release.set()
+		supervisor.servers["Projects"].check.finished.wait(1)
+		supervisor.tick()
+		self.assertEqual(len(self.popen.commands), 1)
+
+	def test_stop_does_not_wait_for_a_tick_that_hangs(self):
+		supervisor = self.supervisor(run=fake_ps(""))
+		entered = threading.Event()
+		release = threading.Event()
+		self.addCleanup(release.set)
+
+		def tick():
+			entered.set()
+			release.wait()
+
+		supervisor.tick = tick
+		supervisor.start()
+		entered.wait(1)
+		with mock.patch.object(share_sftp, "THREAD_STOP_SECONDS", 0.1):
+			supervisor.stop()
+		self.assertTrue(supervisor.thread.is_alive())
 
 	def test_bad_config_keeps_the_last_good_shares_and_logs_once(self):
 		self.write_shares(self.share_item())

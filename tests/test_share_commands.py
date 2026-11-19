@@ -609,6 +609,29 @@ class AddShareTests(ShareCommandTestCase):
 			"Windows writes reach the Mac about 5 s after a file is closed. See wn share --help for the limits.",
 		])
 
+	def test_folders_that_macos_protects_get_a_notice_before_the_wait(self):
+		for parts in (("Desktop",), ("Documents", "Work"), ("Downloads",), ("Library", "Mobile Documents", "com~apple~CloudDocs", "Notes")):
+			with self.subTest(parts=parts):
+				self.output.truncate(0)
+				self.output.seek(0)
+				self.runner.calls = []
+				update_config_file({"shares": REMOVE_SETTING})
+				folder = self.make_mac_folder(os.path.join(*parts))
+				reads = []
+				self.runner.on_call = lambda call: reads.append(self.output.getvalue()) if call[:2] == ("run", TASK_SCRIPT) else None
+				self.add(mac_dir=folder, name=SHARE_NAME)
+				notice = "If macOS asks whether wn-agent may access {}, click Allow.".format(folder)
+				self.assertEqual(self.output.getvalue().splitlines()[0], notice)
+				self.assertIn(notice, reads[0])
+
+	def test_other_folders_get_no_notice(self):
+		self.add()
+		self.assertNotIn("click Allow", self.output.getvalue())
+
+	def test_the_notice_covers_volumes(self):
+		self.assertTrue(share_commands.macos_may_ask("/Volumes/Backup/Photos"))
+		self.assertFalse(share_commands.macos_may_ask("/VolumesOther"))
+
 	def test_read_only_output_and_share(self):
 		self.add(read_only=True)
 		self.assertEqual(self.output.getvalue().splitlines()[0], "Projects: {} is now at {} in Windows, read only".format(self.mac_folder, VM_PATH))
@@ -776,6 +799,14 @@ class RollbackTests(ShareCommandTestCase):
 			self.add()
 		self.assertEqual(str(caught.exception), "the wn agent did not start serving the share. It reports: error, rclone exited with code 1: CRITICAL: bind: address already in use")
 		self.assertLess(self.clock.now, 5)
+		self.assert_rolled_back()
+
+	def test_a_folder_that_macos_does_not_allow_is_reported(self):
+		detail = "macOS does not allow wn-agent to read {}. Allow it in System Settings > Privacy & Security > Files and Folders > wn-agent".format(self.mac_folder)
+		self.serve(SHARE_NAME, "error", detail)
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		self.assertEqual(str(caught.exception), "the wn agent did not start serving the share. It reports: error, " + detail)
 		self.assert_rolled_back()
 
 	def test_agent_starting_at_the_timeout_is_reported(self):
