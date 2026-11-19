@@ -10,12 +10,12 @@ from unittest import mock
 
 from tests.fakes import FakeBackend, write_config
 from wn.backends.utm import UnknownVMError, UTMCtlError
-from wn.config import ConfigError, load_config, update_config_file
+from wn.config import REMOVE_SETTING, ConfigError, load_config, update_config_file
 from wn.downloads import RCLONE_WINDOWS_BINARY, WINFSP_SOURCE, ShareTools
 from wn.guest_runner import GuestError, GuestScriptError
 from wn import share_commands
 from wn.agent import launch_agent_path, pid_file_path
-from wn.share_commands import LOCK_FILE_NAME, REMOVE_PROGRESS_SECONDS, WINFSP_NOTICE, ShareCommands, agent_is_installed, agent_is_running
+from wn.share_commands import AGENT_PICKUP_TIMEOUT_SECONDS, LOCK_FILE_NAME, REMOVE_PROGRESS_SECONDS, WINFSP_NOTICE, ShareCommands, agent_is_installed, agent_is_running
 from wn.share_sftp import (
 	CLEANUP_SCRIPT,
 	FETCH_SCRIPT,
@@ -23,10 +23,12 @@ from wn.share_sftp import (
 	GUEST_STATUS_FILE,
 	GUEST_SUPERVISOR,
 	PREPARE_SCRIPT,
+	SHARE_PROTOCOL_VERSION,
 	SUPERVISOR_SCRIPT,
 	TASK_SCRIPT,
 	SharePaths,
 	guest_script_bytes,
+	utc_now,
 )
 from wn.shares import FIRST_PORT, Share, ShareError
 
@@ -163,7 +165,7 @@ class ShareCommandTestCase(unittest.TestCase):
 
 	def serve(self, name, state="serving", detail="192.168.64.1:47321"):
 		with open(self.paths.state_file, "w") as handle:
-			json.dump({"updated": "now", "shares": {name: {"state": state, "detail": detail, "pid": 1234}}}, handle)
+			json.dump({"protocol": SHARE_PROTOCOL_VERSION, "updated": utc_now(), "shares": {name: {"state": state, "detail": detail, "pid": 1234}}}, handle)
 
 	def mount(self, name):
 		self.runner.files[GUEST_STATUS_FILE] = status_text({name: {"state": "mounted", "detail": "", "pid": 5678}})
@@ -324,6 +326,78 @@ class AgentTests(ShareCommandTestCase):
 		self.assertEqual(self.runner.calls, [])
 		self.assertEqual(self.installs, [])
 		self.assertEqual(load_config().shares, ())
+
+
+	def write_agent_state(self, **values):
+		state = {"protocol": SHARE_PROTOCOL_VERSION, "updated": utc_now(), "shares": {}}
+		state.update(values)
+		with open(self.paths.state_file, "w") as handle:
+			json.dump(state, handle)
+
+	def test_a_current_agent_is_not_installed_again(self):
+		self.add()
+		self.assertEqual(self.installs, [])
+		self.assertNotIn("older than this wn", self.output.getvalue())
+
+	def test_an_agent_that_cannot_serve_shares_is_installed_again_before_guest_work(self):
+		cases = (
+			("no state file", None),
+			("no protocol", {"protocol": None}),
+			("another protocol", {"protocol": SHARE_PROTOCOL_VERSION + 1}),
+			("a stale state", {"updated": "2026-01-01T00:00:00Z"}),
+			("a bad time", {"updated": "now"}),
+		)
+		for case, values in cases:
+			with self.subTest(case=case):
+				self.installs.clear()
+				self.runner.calls = []
+				self.output.truncate(0)
+				self.output.seek(0)
+				if values is None:
+					os.remove(self.paths.state_file)
+				else:
+					self.write_agent_state(**values)
+				calls_at_install = []
+				commands = self.commands(install_agent=lambda: calls_at_install.append(list(self.runner.calls)) or self.serve(SHARE_NAME) or "/agents/com.wn.agent.plist")
+				commands.add_share(self.mac_folder, VM_PATH)
+				self.assertEqual(calls_at_install, [[]])
+				self.assertEqual(self.output.getvalue().splitlines()[0], "The running wn agent is older than this wn and cannot serve shares. Installed the new agent and restarted it: /agents/com.wn.agent.plist")
+				self.runner.files.pop(FOLDER + "\\remove", None)
+				update_config_file({"shares": REMOVE_SETTING})
+
+	def test_the_agent_check_waits_for_a_first_state_file(self):
+		os.remove(self.paths.state_file)
+		real_read = share_commands.read_mac_state
+
+		def read(paths):
+			if self.clock.now >= 2:
+				self.serve(SHARE_NAME)
+			return real_read(paths)
+
+		with mock.patch.object(share_commands, "read_mac_state", read):
+			self.add()
+		self.assertEqual(self.installs, [])
+
+	def test_a_stopped_agent_with_nothing_to_do_is_left_to_launchd(self):
+		update_config_file({"battery_sync": False})
+		self.commands(agent_running=lambda: False).add_share(self.mac_folder, VM_PATH)
+		self.assertEqual(self.installs, [])
+		self.assertEqual(len(load_config().shares), 1)
+
+	def test_a_stopped_agent_waits_long_enough_for_a_launchd_restart(self):
+		update_config_file({"battery_sync": False})
+		os.remove(self.paths.state_file)
+		real_read = share_commands.read_mac_state
+
+		def read(paths):
+			if self.clock.now >= 25:
+				self.serve(SHARE_NAME)
+			return real_read(paths)
+
+		with mock.patch.object(share_commands, "read_mac_state", read):
+			self.commands(agent_running=lambda: False).add_share(self.mac_folder, VM_PATH)
+		self.assertEqual(self.installs, [])
+		self.assertEqual(len(load_config().shares), 1)
 
 
 class AddShareTests(ShareCommandTestCase):
@@ -650,13 +724,13 @@ class StatusPollTests(ShareCommandTestCase):
 		self.assertEqual(answers, [])
 
 	def test_the_agent_wait_gets_a_read_that_began_after_its_deadline(self):
-		os.remove(self.paths.state_file)
+		self.serve("Other")
 		real_read = share_commands.read_mac_state
 
 		def slow_read(paths):
 			began = self.clock.now
 			self.clock.now += 10
-			if began >= 15:
+			if began >= 10 + AGENT_PICKUP_TIMEOUT_SECONDS:
 				self.serve(SHARE_NAME)
 			return real_read(paths)
 
@@ -688,10 +762,11 @@ class RollbackTests(ShareCommandTestCase):
 		self.assert_rolled_back()
 
 	def test_agent_pickup_timeout_rolls_back(self):
-		os.remove(self.paths.state_file)
+		with open(self.paths.state_file, "w") as handle:
+			json.dump({"protocol": SHARE_PROTOCOL_VERSION, "updated": utc_now(), "shares": {}}, handle)
 		with self.assertRaises(ShareError) as caught:
 			self.add()
-		self.assertEqual(str(caught.exception), "the wn agent did not pick up the share within 15 s. Check wn agent status. If you updated wn, run python3 -m wn agent --install so the agent runs the new code")
+		self.assertEqual(str(caught.exception), "the wn agent did not pick up the share within 30 s. Check wn agent status. If you updated wn, run python3 -m wn agent --install so the agent runs the new code")
 		self.assertNotIn(TASK_SCRIPT, self.runs())
 		self.assert_rolled_back()
 
@@ -799,7 +874,7 @@ class SavedShareTestCase(ShareCommandTestCase):
 
 	def serve_all(self, entries):
 		with open(self.paths.state_file, "w") as handle:
-			json.dump({"updated": "now", "shares": entries}, handle)
+			json.dump({"protocol": SHARE_PROTOCOL_VERSION, "updated": utc_now(), "shares": entries}, handle)
 
 	def guest_reports(self, shares):
 		self.runner.files[GUEST_STATUS_FILE] = status_text(shares)

@@ -802,6 +802,33 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		self.assertEqual(file_mode(self.paths.log_file("Projects")), 0o600)
 		self.assertFalse(os.path.exists(self.paths.state_file + ".part"))
 
+	def test_state_file_has_the_protocol_even_without_shares(self):
+		self.supervisor().tick()
+		with open(self.paths.state_file) as handle:
+			state = json.load(handle)
+		self.assertEqual(state["protocol"], share_sftp.SHARE_PROTOCOL_VERSION)
+		self.assertEqual(state["shares"], {})
+		self.assertRegex(state["updated"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+	def test_state_file_is_written_again_every_10_s(self):
+		supervisor = self.supervisor()
+		supervisor.tick()
+		os.utime(self.paths.state_file, ns=(FIRST_MTIME_NS, FIRST_MTIME_NS))
+		self.advance(9)
+		supervisor.tick()
+		self.assertEqual(os.stat(self.paths.state_file).st_mtime_ns, FIRST_MTIME_NS)
+		self.advance(1)
+		supervisor.tick()
+		self.assertNotEqual(os.stat(self.paths.state_file).st_mtime_ns, FIRST_MTIME_NS)
+
+	def test_state_file_appears_once_the_shares_folder_exists(self):
+		shutil.rmtree(self.root)
+		supervisor = self.supervisor()
+		supervisor.tick()
+		os.makedirs(self.root)
+		supervisor.tick()
+		self.assertEqual(self.state(), {})
+
 	def test_no_state_file_without_the_shares_folder(self):
 		shutil.rmtree(self.root)
 		self.supervisor().tick()

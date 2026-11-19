@@ -62,6 +62,8 @@ RCLONE_CONF_TEMPLATE = (
 	"sha1sum_command = sha1sum\n"
 )
 SUPERVISOR_TICK_SECONDS = 2
+SHARE_PROTOCOL_VERSION = 1
+STATE_REFRESH_SECONDS = 10
 SERVER_RESTART_SECONDS = 5
 SERVER_STOP_SECONDS = 3
 ORPHAN_POLL_SECONDS = 0.1
@@ -82,6 +84,7 @@ ERROR_STATE = "error"
 NETWORK_DOWN_DETAIL = "the VM network is not up"
 HOST_KEY_MISSING_DETAIL = "its host key {key} is missing. Run wn {remove} {name}, then wn {share} again"
 PART_SUFFIX = ".part"
+UTC_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 CONFIG_NOT_READ = -1
 
 
@@ -278,7 +281,16 @@ def read_mac_state(paths):
 
 
 def utc_now():
-	return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+	return datetime.datetime.now(datetime.timezone.utc).strftime(UTC_TIME_FORMAT)
+
+
+def seconds_since(text, now):
+	"""Return the seconds from the UTC time ``text``, as utc_now writes it, to the Unix time ``now``, or None when ``text`` is not such a time."""
+	try:
+		then = datetime.datetime.strptime(text, UTC_TIME_FORMAT).replace(tzinfo=datetime.timezone.utc)
+	except (TypeError, ValueError):
+		return None
+	return now - then.timestamp()
 
 
 def write_private_file(path, text):
@@ -369,6 +381,7 @@ class SftpServerSupervisor:
 		self.config_error = None
 		self.last_clocks = None
 		self.last_state = None
+		self.state_written_at = None
 		self.unreaped = []
 		self.last_error = None
 
@@ -503,12 +516,15 @@ class SftpServerSupervisor:
 		server.logged.clear()
 		self._set(server, SERVING_STATE, "{}:{}".format(HOST_ADDRESS, server.share.port))
 
-	def _write_state(self):
+	def _write_state(self, now):
+		"""Write the state file when it changes, and every STATE_REFRESH_SECONDS so wn share can tell that this agent runs."""
 		shares = {name: {"state": server.state, "detail": server.detail, "pid": server.process.pid if server.process else None} for name, server in self.servers.items()}
-		if shares == self.last_state or not os.path.isdir(self.paths.root):
+		fresh = self.state_written_at is not None and now - self.state_written_at < STATE_REFRESH_SECONDS
+		if (shares == self.last_state and fresh) or not os.path.isdir(self.paths.root):
 			return
-		write_private_file(self.paths.state_file, json.dumps({"updated": utc_now(), "shares": shares}))
+		write_private_file(self.paths.state_file, json.dumps({"protocol": SHARE_PROTOCOL_VERSION, "updated": utc_now(), "shares": shares}))
 		self.last_state = shares
+		self.state_written_at = now
 
 	def tick(self):
 		now = self.monotonic()
@@ -534,7 +550,7 @@ class SftpServerSupervisor:
 					self._set(server, ERROR_STATE, HOST_KEY_MISSING_DETAIL.format(key=self.paths.host_key(share.name), remove=REMOVE_COMMAND, name=share.name, share=SHARE_COMMAND))
 				elif now >= server.restart_at:
 					self._start(server, now)
-		self._write_state()
+		self._write_state(now)
 
 	def _log_errors(self, action, context):
 		try:

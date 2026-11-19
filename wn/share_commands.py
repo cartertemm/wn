@@ -26,6 +26,8 @@ from wn.share_sftp import (
 	GUEST_SUPERVISOR,
 	PREPARE_SCRIPT,
 	SERVING_STATE,
+	SHARE_PROTOCOL_VERSION,
+	STATE_REFRESH_SECONDS,
 	SUPERVISOR_SCRIPT,
 	TASK_SCRIPT,
 	WINDOWS_RCLONE_NAME,
@@ -43,6 +45,7 @@ from wn.share_sftp import (
 	render_known_hosts,
 	render_rclone_conf,
 	render_share_json,
+	seconds_since,
 	share_paths,
 )
 from wn.shares import (
@@ -61,7 +64,9 @@ from wn.shares import (
 	shares_for_vm,
 )
 
-AGENT_PICKUP_TIMEOUT_SECONDS = 15
+AGENT_PICKUP_TIMEOUT_SECONDS = 30
+AGENT_STATE_TIMEOUT_SECONDS = 5
+AGENT_STATE_MAX_AGE_SECONDS = 3 * STATE_REFRESH_SECONDS
 MOUNT_TIMEOUT_SECONDS = 90
 MISSED_READS_AFTER_DEADLINE = 3
 REMOVE_TIMEOUT_SECONDS = 180
@@ -154,7 +159,7 @@ class ShareCommands:
 	def __init__(self, config, backend, output, runner=None, paths=None, fetch_tools=fetch_share_tools,
 			install_binaries=install_binaries, ensure_keys=ensure_keys, new_host_key=new_host_key, agent_installed=agent_is_installed,
 			agent_running=agent_is_running, install_agent=install_agent, offer_factory=FileOffer,
-			can_bind=can_bind, clock=time.monotonic, sleep=time.sleep):
+			can_bind=can_bind, clock=time.monotonic, wall_clock=time.time, sleep=time.sleep):
 		self.config = config
 		self.backend = backend
 		self.output = output
@@ -170,6 +175,7 @@ class ShareCommands:
 		self.offer_factory = offer_factory
 		self.can_bind = can_bind
 		self.clock = clock
+		self.wall_clock = wall_clock
 		self.sleep = sleep
 
 	def _print(self, line):
@@ -248,6 +254,11 @@ class ShareCommands:
 					return value
 			self.sleep(STATUS_POLL_SECONDS)
 
+	def _agent_serves_shares(self, state):
+		"""Return True when the agent's state file comes from a share supervisor of this wn that wrote it lately."""
+		age = seconds_since(state.get("updated"), self.wall_clock())
+		return state.get("protocol") == SHARE_PROTOCOL_VERSION and age is not None and age < AGENT_STATE_MAX_AGE_SECONDS
+
 	def _ensure_agent(self):
 		if not self.agent_installed():
 			path = self.install_agent()
@@ -259,7 +270,12 @@ class ShareCommands:
 			):
 				self._print(line)
 		elif not self.agent_running():
-			raise ShareError("the wn agent is installed but not running. Run wn agent start, then run wn {} again".format(SHARE_COMMAND))
+			config = load_config()
+			if config.battery_sync or config.camera or shares_for_vm(config.shares, config.vm_name):
+				raise ShareError("the wn agent is installed but not running. Run wn agent start, then run wn {} again".format(SHARE_COMMAND))
+		elif not self._agent_serves_shares(self._wait(lambda: read_mac_state(self.paths), self._agent_serves_shares, AGENT_STATE_TIMEOUT_SECONDS)):
+			path = self.install_agent()
+			self._print("The running wn agent is older than this wn and cannot serve shares. Installed the new agent and restarted it: {}".format(path))
 
 	def _prepare_guest(self, name, vm_path):
 		"""Run prepare.ps1. Windows removes a share folder in the supervisor's next pass, after its uploads, so make sure the supervisor runs."""
