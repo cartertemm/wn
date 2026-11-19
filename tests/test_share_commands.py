@@ -196,6 +196,7 @@ class ShareCommandTestCase(unittest.TestCase):
 			install_agent=self.install_agent,
 			offer_factory=lambda files: FakeOffer(files, self.offers),
 			can_bind=lambda port: True,
+			address_present=lambda: True,
 			clock=self.clock,
 			sleep=self.clock.sleep,
 		)
@@ -248,13 +249,21 @@ class VMCheckTests(ShareCommandTestCase):
 
 	def test_guest_agent_down_is_refused(self):
 		self.backend.ip_address = None
-		self.assert_refused_with_config_unchanged("Windows is still starting (no answer from the guest agent). Try again in a minute")
+		self.assert_refused_with_config_unchanged("Windows is still starting (no answer from the guest agent). Try again in a minute. If this keeps happening, install the UTM guest tools in Windows")
 		self.assertEqual(self.runner.calls, [])
 
 	def test_guest_agent_error_is_refused(self):
 		self.backend.ip = mock.Mock(side_effect=UTMCtlError("utmctl ip-address failed with exit code 1"))
-		self.assert_refused_with_config_unchanged("Windows is still starting (no answer from the guest agent). Try again in a minute")
+		self.assert_refused_with_config_unchanged("Windows is still starting (no answer from the guest agent). Try again in a minute. If this keeps happening, install the UTM guest tools in Windows")
 		self.assertEqual(self.runner.calls, [])
+
+	def test_vm_off_the_shared_network_is_refused_before_any_work(self):
+		with self.assertRaises(ShareError) as caught:
+			self.commands(address_present=lambda: False).add_share(self.mac_folder, VM_PATH)
+		self.assertEqual(str(caught.exception), "192.168.64.1 is not on this Mac. wn shares need the VM's network set to Shared Network in UTM. Change it in the VM's Network settings, restart the VM, then run wn share again")
+		self.assertEqual(self.runner.calls, [])
+		self.assertEqual(self.installs, [])
+		self.assertEqual(load_config().shares, ())
 
 	def test_duplicate_name_and_overlap_are_refused_before_the_vm_check(self):
 		update_config_file({"shares": [Share(SHARE_NAME, "Windows", "mac_to_vm", "/elsewhere", "C:\\Other", False, FIRST_PORT).to_dict()]})
@@ -935,6 +944,10 @@ class ListTests(SavedShareTestCase):
 			"Projects: Mac folder {} in Windows at {}, read and write. Mac: the agent is not running. Run wn agent start. Windows: mounted.".format(self.mac_folder, VM_PATH),
 		])
 
+	def test_agent_not_installed(self):
+		self.save(self.share())
+		self.assertIn("Mac: the agent is not installed. Run python3 -m wn agent --install. Windows: mounted.", self.list_lines(agent_installed=lambda: False, agent_running=lambda: False)[0])
+
 	def test_serving_and_mounted(self):
 		self.save(self.share(mac_path="/Users/carter/Projects", vm_path="C:\\Users\\carter\\Projects"))
 		self.assertEqual(self.list_lines(), [
@@ -1097,7 +1110,7 @@ class RemoveTests(SavedShareTestCase):
 	def test_guest_agent_down_keeps_everything(self):
 		self.save(self.share())
 		self.backend.ip_address = None
-		self.assert_refused_with_everything_kept("Windows is still starting (no answer from the guest agent). Try again in a minute")
+		self.assert_refused_with_everything_kept("Windows is still starting (no answer from the guest agent). Try again in a minute. If this keeps happening, install the UTM guest tools in Windows")
 		self.assertEqual(self.runner.calls, [])
 
 	def test_removes_after_windows_drops_the_share(self):
@@ -1215,6 +1228,15 @@ class RemoveTests(SavedShareTestCase):
 		with self.assertRaises(ShareError) as caught:
 			self.remove(agent_running=lambda: False)
 		self.assertEqual(str(caught.exception), "the wn agent is not running, so Windows cannot upload its last changes to the Mac. Run wn agent start, then run wn unshare Projects again")
+		self.assertEqual(self.config_text(), before)
+		self.assertEqual(self.runner.calls, [])
+
+	def test_agent_not_installed_is_refused_with_the_install_command(self):
+		self.save(self.share())
+		before = self.config_text()
+		with self.assertRaises(ShareError) as caught:
+			self.remove(agent_installed=lambda: False, agent_running=lambda: False)
+		self.assertEqual(str(caught.exception), "the wn agent is not installed, so Windows cannot upload its last changes to the Mac. Run python3 -m wn agent --install, then run wn unshare Projects again")
 		self.assertEqual(self.config_text(), before)
 		self.assertEqual(self.runner.calls, [])
 

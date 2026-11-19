@@ -35,6 +35,7 @@ from wn.share_sftp import (
 	ensure_keys,
 	guest_script_bytes,
 	guest_share_folder,
+	host_address_present,
 	install_binaries,
 	load_guest_script,
 	new_host_key,
@@ -49,6 +50,7 @@ from wn.share_sftp import (
 	share_paths,
 )
 from wn.shares import (
+	HOST_ADDRESS,
 	MAC_TO_VM,
 	REMOVE_COMMAND,
 	SHARE_COMMAND,
@@ -97,7 +99,9 @@ REMOVE_MARKER_NAME = "remove"
 LOCK_FILE_NAME = "commands.lock"
 READ_WRITE_TEXT = "read and write"
 READ_ONLY_TEXT = "read only"
-GUEST_AGENT_DOWN_MESSAGE = "Windows is still starting (no answer from the guest agent). Try again in a minute"
+GUEST_AGENT_DOWN_MESSAGE = "Windows is still starting (no answer from the guest agent). Try again in a minute. If this keeps happening, install the UTM guest tools in Windows"
+NO_HOST_ADDRESS_MESSAGE = "{} is not on this Mac. wn shares need the VM's network set to Shared Network in UTM. Change it in the VM's Network settings, restart the VM, then run wn {} again"
+INSTALL_AGENT_COMMAND = "python3 -m wn agent --install"
 SHARE_STOPPED_MESSAGE = "VM '{}' is {}. Run wn start, wait until Windows has started, then run wn {} again"
 LOCKED_MESSAGE = "another wn share or wn unshare command is running. Wait for it to finish, then try again"
 REMOVE_STOPPED_MESSAGE = "VM '{}' is {}. Start it with wn start and run wn {} again, so wn can remove the share from Windows too"
@@ -177,7 +181,7 @@ class ShareCommands:
 	def __init__(self, config, backend, output, runner=None, paths=None, fetch_tools=fetch_share_tools,
 			install_binaries=install_binaries, ensure_keys=ensure_keys, new_host_key=new_host_key, agent_installed=agent_is_installed,
 			agent_running=agent_is_running, install_agent=install_agent, offer_factory=FileOffer,
-			can_bind=can_bind, clock=time.monotonic, wall_clock=time.time, sleep=time.sleep):
+			can_bind=can_bind, address_present=host_address_present, clock=time.monotonic, wall_clock=time.time, sleep=time.sleep):
 		self.config = config
 		self.backend = backend
 		self.output = output
@@ -192,6 +196,7 @@ class ShareCommands:
 		self.install_agent = install_agent
 		self.offer_factory = offer_factory
 		self.can_bind = can_bind
+		self.address_present = address_present
 		self.clock = clock
 		self.wall_clock = wall_clock
 		self.sleep = sleep
@@ -418,6 +423,8 @@ class ShareCommands:
 		share = Share(name, self.config.vm_name, MAC_TO_VM, mac_path, vm_path, read_only)
 		check_new_share(share, current)
 		self._check_vm(SHARE_COMMAND)
+		if not self.address_present():
+			raise ShareError(NO_HOST_ADDRESS_MESSAGE.format(HOST_ADDRESS, SHARE_COMMAND))
 		self._ensure_agent()
 		tools = self.fetch_tools(report=self._print)
 		self.install_binaries(tools, self.paths)
@@ -476,6 +483,7 @@ class ShareCommands:
 		own = shares_for_vm(shares, self.config.vm_name)
 		if own:
 			mac_state = read_mac_state(self.paths)["shares"]
+			agent_installed = self.agent_installed()
 			agent_running = self.agent_running()
 			guest, unknown_text = self._guest_view()
 		for share in shares:
@@ -483,7 +491,9 @@ class ShareCommands:
 				self._print("{}: belongs to VM '{}'".format(share.name, share.vm))
 				continue
 			mac_entry = mac_state.get(share.name)
-			if not agent_running:
+			if not agent_running and not agent_installed:
+				mac_text = "the agent is not installed. Run {}".format(INSTALL_AGENT_COMMAND)
+			elif not agent_running:
 				mac_text = "the agent is not running. Run wn agent start"
 			elif mac_entry is None:
 				mac_text = "no state yet"
@@ -566,6 +576,8 @@ class ShareCommands:
 			self._remove_mac_side(share.name)
 			self._print("VM '{}' no longer exists in UTM, so only the Mac side was removed".format(self.config.vm_name))
 			return
+		if not self.agent_running() and not self.agent_installed():
+			raise ShareError("the wn agent is not installed, so Windows cannot upload its last changes to the Mac. Run {}, then run wn {} {} again".format(INSTALL_AGENT_COMMAND, REMOVE_COMMAND, share.name))
 		if not self.agent_running():
 			raise ShareError("the wn agent is not running, so Windows cannot upload its last changes to the Mac. Run wn agent start, then run wn {} {} again".format(REMOVE_COMMAND, share.name))
 		self._ask_windows_to_remove(share.name)
