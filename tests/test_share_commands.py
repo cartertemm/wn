@@ -954,6 +954,13 @@ class ListTests(SavedShareTestCase):
 			"Projects: Mac folder /Users/carter/Projects in Windows at C:\\Users\\carter\\Projects, read and write. Mac: serving on port 47321. Windows: mounted.",
 		])
 
+	def test_mounted_share_with_refused_uploads_shows_the_detail(self):
+		self.save(self.share(mac_path="/Users/carter/Projects", vm_path="C:\\Projects"))
+		self.guest_reports({SHARE_NAME: {"state": "mounted", "detail": "1 file cannot be uploaded to the Mac: locked.txt: operation not permitted", "pid": 1, "failed": 1}})
+		self.assertEqual(self.list_lines(), [
+			"Projects: Mac folder /Users/carter/Projects in Windows at C:\\Projects, read and write. Mac: serving on port 47321. Windows: mounted, 1 file cannot be uploaded to the Mac: locked.txt: operation not permitted.",
+		])
+
 	def test_waiting_and_stopped_vm(self):
 		self.save(self.share("Old", mac_path="/Users/carter/Old", vm_path="C:\\Old", read_only=True))
 		self.serve("Old", "waiting", "the VM network is not up")
@@ -1201,6 +1208,23 @@ class RemoveTests(SavedShareTestCase):
 		self.assert_refused_with_everything_kept("Windows cannot remove the share: {}. Windows must mount the share once more to upload the files in its cache to the Mac. Fix that, then run wn unshare Projects again".format(detail))
 		self.assertEqual(len(self.pulls()), 2)
 		self.assertLess(self.clock.now, REMOVE_PROGRESS_SECONDS)
+
+	def test_uploads_that_the_mac_refuses_stop_the_wait(self):
+		self.save(self.share())
+		detail = "2 files to upload to the Mac. 2 files cannot be uploaded to the Mac: locked.txt: operation not permitted"
+		refused = {SHARE_NAME: {"state": "removing", "detail": detail, "pid": 1, "failed": 2, "to_upload": 2}}
+		self.answer_in_turn(status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 1}}), status_text(refused))
+		self.assert_refused_with_everything_kept("Windows cannot upload some files to the Mac, so wn did not remove the share. Windows reports: {}. Fix the cause on the Mac (a locked file, permissions, or a full disk), then run wn unshare Projects again. Windows keeps the files and uploads them when it can, which can take a few minutes after the fix".format(detail))
+		self.assertEqual(len(self.pulls()), 2)
+		self.assertNotIn("Waiting", self.output.getvalue())
+
+	def test_other_uploads_next_to_refused_ones_keep_the_wait(self):
+		self.save(self.share())
+		waiting = {SHARE_NAME: {"state": "removing", "detail": "3 files to upload to the Mac. 1 file cannot be uploaded to the Mac: locked.txt: operation not permitted", "pid": 1, "failed": 1, "to_upload": 3}}
+		self.answer_in_turn(status_text(waiting), status_text({}))
+		self.assertIsNone(self.remove())
+		self.assertEqual(load_config().shares, ())
+		self.assertIn("Waiting for Windows to finish its uploads to the Mac (3 files to upload", self.output.getvalue())
 
 	def test_blocked_status_from_before_the_remove_request_waits(self):
 		self.save(self.share())

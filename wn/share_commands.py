@@ -166,6 +166,13 @@ def _is_stuck(entry):
 	return _state_of(entry) == BLOCKED_STATE or (_state_of(entry) == GUEST_ERROR_STATE and bool(entry.get("detail")))
 
 
+def _only_refused_uploads(entry):
+	"""Return True when every file Windows still has to upload is one the Mac refuses."""
+	failed = entry.get("failed")
+	to_upload = entry.get("to_upload")
+	return isinstance(failed, int) and isinstance(to_upload, int) and failed >= 1 and failed >= to_upload
+
+
 def _reported(entry):
 	"""Return the guest's view of one share as "state, detail", or just the state when there is no detail."""
 	if not isinstance(entry, dict):
@@ -550,6 +557,8 @@ class ShareCommands:
 			entry = _status_entry(guest, name) if guest is not None else None
 			if _state_of(entry) == BLOCKED_STATE and entry.get("remove_requested"):
 				raise ShareError("Windows cannot remove the share: {}. Windows must mount the share once more to upload the files in its cache to the Mac. Fix that, then run wn {} {} again".format(entry.get("detail"), REMOVE_COMMAND, name))
+			if _state_of(entry) == REMOVING_STATE and _only_refused_uploads(entry):
+				raise ShareError("Windows cannot upload some files to the Mac, so wn did not remove the share. Windows reports: {}. Fix the cause on the Mac (a locked file, permissions, or a full disk), then run wn {} {} again. Windows keeps the files and uploads them when it can, which can take a few minutes after the fix".format(entry.get("detail"), REMOVE_COMMAND, name))
 			if _state_of(entry) == REMOVING_STATE:
 				if updated != last_updated:
 					deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
