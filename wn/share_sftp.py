@@ -15,13 +15,13 @@ from typing import Optional
 from wn.config import config_path, load_config
 from wn.downloads import RCLONE_MAC_BINARY, RCLONE_WINDOWS_BINARY, extract_verified_member
 from wn.errors import WnError
-from wn.shares import GUEST_ROOT, HOST_ADDRESS, SUPPORT_DIRECTORY, Share, ShareError, shares_for_vm
+from wn.shares import GUEST_ROOT, HOST_ADDRESS, REMOVE_COMMAND, SHARE_COMMAND, SUPPORT_DIRECTORY, Share, ShareError, shares_for_vm
 
 SHARES_DIRECTORY_NAME = "shares"
 LOGS_DIRECTORY = os.path.join("~", "Library", "Logs")
 LOG_NAME = "wn-share-{}.log"
 PID_SUFFIX = ".pid"
-HOST_KEY_NAME = "host_ed25519"
+HOST_KEY_NAME = "host_ed25519-{}"
 CLIENT_KEY_NAME = "client_ed25519"
 PUBLIC_KEY_SUFFIX = ".pub"
 EMPTY_CONFIG_NAME = "empty-rclone.conf"
@@ -75,6 +75,7 @@ WAITING_STATE = "waiting"
 RESTARTING_STATE = "restarting"
 ERROR_STATE = "error"
 NETWORK_DOWN_DETAIL = "the VM network is not up"
+HOST_KEY_MISSING_DETAIL = "its host key {key} is missing. Run wn {remove} {name}, then wn {share} again"
 PART_SUFFIX = ".part"
 CONFIG_NOT_READ = -1
 
@@ -85,20 +86,12 @@ class SharePaths:
 	logs: str
 
 	@property
-	def host_key(self):
-		return os.path.join(self.root, HOST_KEY_NAME)
-
-	@property
 	def client_key(self):
 		return os.path.join(self.root, CLIENT_KEY_NAME)
 
 	@property
 	def client_public_key(self):
 		return self.client_key + PUBLIC_KEY_SUFFIX
-
-	@property
-	def host_public_key(self):
-		return self.host_key + PUBLIC_KEY_SUFFIX
 
 	@property
 	def empty_config(self):
@@ -115,6 +108,12 @@ class SharePaths:
 	@property
 	def state_file(self):
 		return os.path.join(self.root, STATE_FILE_NAME)
+
+	def host_key(self, name):
+		return os.path.join(self.root, HOST_KEY_NAME.format(name))
+
+	def host_public_key(self, name):
+		return self.host_key(name) + PUBLIC_KEY_SUFFIX
 
 	def pid_file(self, name):
 		return os.path.join(self.root, name + PID_SUFFIX)
@@ -133,7 +132,7 @@ def server_command(share, paths):
 		paths.mac_rclone, "serve", "sftp", share.mac_path,
 		"--config", paths.empty_config,
 		"--addr", "{}:{}".format(HOST_ADDRESS, share.port),
-		"--key", paths.host_key,
+		"--key", paths.host_key(share.name),
 		"--authorized-keys", paths.client_public_key,
 		"--dir-cache-time", DIR_CACHE_TIME,
 		"-v",
@@ -175,20 +174,37 @@ def _ssh_keygen(run, *arguments):
 	return result.stdout
 
 
+def _generate_key(run, key_path):
+	_ssh_keygen(run, "-q", "-t", "ed25519", "-N", "", "-C", KEY_COMMENT, "-f", key_path)
+	os.chmod(key_path, PRIVATE_MODE)
+	os.chmod(key_path + PUBLIC_KEY_SUFFIX, PUBLIC_MODE)
+
+
 def ensure_keys(paths, run=subprocess.run):
+	"""Make the client key that every share uses, when it is missing."""
 	ensure_share_directory(paths)
-	for key_path in (paths.host_key, paths.client_key):
-		public_path = key_path + PUBLIC_KEY_SUFFIX
-		if not os.path.exists(key_path):
-			_ssh_keygen(run, "-q", "-t", "ed25519", "-N", "", "-C", KEY_COMMENT, "-f", key_path)
-			os.chmod(key_path, PRIVATE_MODE)
-			os.chmod(public_path, PUBLIC_MODE)
-		elif not os.path.exists(public_path):
-			public_key = _ssh_keygen(run, "-y", "-f", key_path)
-			descriptor = os.open(public_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PUBLIC_MODE)
-			os.fchmod(descriptor, PUBLIC_MODE)
-			with os.fdopen(descriptor, "w") as handle:
-				handle.write(public_key)
+	key_path = paths.client_key
+	public_path = paths.client_public_key
+	if not os.path.exists(key_path):
+		_generate_key(run, key_path)
+	elif not os.path.exists(public_path):
+		public_key = _ssh_keygen(run, "-y", "-f", key_path)
+		descriptor = os.open(public_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PUBLIC_MODE)
+		os.fchmod(descriptor, PUBLIC_MODE)
+		with os.fdopen(descriptor, "w") as handle:
+			handle.write(public_key)
+
+
+def new_host_key(paths, name, run=subprocess.run):
+	"""Make a new host key for share ``name``. A Windows mount left from an old share then refuses this share's server."""
+	ensure_share_directory(paths)
+	remove_host_key(paths, name)
+	_generate_key(run, paths.host_key(name))
+
+
+def remove_host_key(paths, name):
+	remove_file(paths.host_key(name))
+	remove_file(paths.host_public_key(name))
 
 
 def install_binaries(tools, paths):
@@ -196,8 +212,8 @@ def install_binaries(tools, paths):
 	extract_verified_member(tools.rclone_windows_zip, RCLONE_WINDOWS_BINARY, paths.windows_rclone, PUBLIC_MODE)
 
 
-def public_host_key(paths):
-	with open(paths.host_public_key) as handle:
+def public_host_key(paths, name):
+	with open(paths.host_public_key(name)) as handle:
 		return " ".join(handle.read().split()[:PUBLIC_KEY_FIELD_COUNT])
 
 
@@ -467,6 +483,8 @@ class SftpServerSupervisor:
 					self._set(server, SERVING_STATE, "{}:{}".format(HOST_ADDRESS, share.port))
 				elif not os.path.isdir(share.mac_path):
 					self._set(server, WAITING_STATE, "{} is missing".format(share.mac_path))
+				elif not os.path.exists(self.paths.host_key(share.name)):
+					self._set(server, ERROR_STATE, HOST_KEY_MISSING_DETAIL.format(key=self.paths.host_key(share.name), remove=REMOVE_COMMAND, name=share.name, share=SHARE_COMMAND))
 				elif now >= server.restart_at:
 					self._start(server, now)
 		self._write_state()

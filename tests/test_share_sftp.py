@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shutil
 import signal
 import socket
 import stat
@@ -22,9 +23,11 @@ from wn.share_sftp import (
 	host_address_present,
 	install_binaries,
 	kill_orphan_servers,
+	new_host_key,
 	load_guest_script,
 	public_host_key,
 	read_mac_state,
+	remove_host_key,
 	render_known_hosts,
 	render_rclone_conf,
 	render_share_json,
@@ -95,7 +98,7 @@ class ServerCommandTest(SharePathsTestCase):
 			os.path.join(self.root, "bin", "rclone"), "serve", "sftp", "/Users/c/Projects",
 			"--config", os.path.join(self.root, "empty-rclone.conf"),
 			"--addr", "192.168.64.1:47321",
-			"--key", os.path.join(self.root, "host_ed25519"),
+			"--key", os.path.join(self.root, "host_ed25519-Projects"),
 			"--authorized-keys", os.path.join(self.root, "client_ed25519.pub"),
 			"--dir-cache-time", "1s",
 			"-v",
@@ -182,14 +185,13 @@ class KeysTest(SharePathsTestCase):
 	def keygen_argv(self, key_path):
 		return ["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "wn-share", "-f", key_path]
 
-	def test_ensure_keys_runs_ssh_keygen_once_per_missing_key(self):
+	def test_ensure_keys_makes_only_the_client_key_once(self):
 		run = FakeKeygen()
 		ensure_keys(self.paths, run=run)
-		self.assertEqual(run.calls, [self.keygen_argv(self.paths.host_key), self.keygen_argv(self.paths.client_key)])
+		self.assertEqual(run.calls, [self.keygen_argv(self.paths.client_key)])
 		self.assertEqual(file_mode(self.root), 0o700)
-		for key_path in (self.paths.host_key, self.paths.client_key):
-			self.assertEqual(file_mode(key_path), 0o600)
-			self.assertEqual(file_mode(key_path + ".pub"), 0o644)
+		self.assertEqual(file_mode(self.paths.client_key), 0o600)
+		self.assertEqual(file_mode(self.paths.client_public_key), 0o644)
 		self.assertTrue(os.path.isfile(self.paths.empty_config))
 		self.assertEqual(os.path.getsize(self.paths.empty_config), 0)
 		self.assertEqual(file_mode(self.paths.empty_config), 0o600)
@@ -202,12 +204,12 @@ class KeysTest(SharePathsTestCase):
 		ensure_keys(self.paths, run=FakeKeygen())
 		self.assertEqual(file_mode(self.root), 0o700)
 
-	def test_ensure_keys_keeps_existing_keys(self):
+	def test_ensure_keys_keeps_an_existing_key(self):
 		ensure_keys(self.paths, run=FakeKeygen())
-		with open(self.paths.host_key, "w") as handle:
+		with open(self.paths.client_key, "w") as handle:
 			handle.write("kept\n")
 		ensure_keys(self.paths, run=FakeKeygen())
-		with open(self.paths.host_key) as handle:
+		with open(self.paths.client_key) as handle:
 			self.assertEqual(handle.read(), "kept\n")
 
 	def test_ensure_keys_recreates_a_missing_public_key(self):
@@ -227,27 +229,57 @@ class KeysTest(SharePathsTestCase):
 			ensure_keys(self.paths, run=FakeKeygen(returncode=1, stderr="no entropy"))
 		self.assertEqual(str(caught.exception), "ssh-keygen failed with exit code 1: no entropy")
 
-	@unittest.skipUnless(os.path.exists("/usr/bin/ssh-keygen"), "needs /usr/bin/ssh-keygen")
-	def test_ensure_keys_with_the_real_ssh_keygen(self):
-		ensure_keys(self.paths)
-		self.assertEqual(file_mode(self.paths.host_key), 0o600)
-		self.assertEqual(file_mode(self.paths.client_key), 0o600)
-		self.assertTrue(public_host_key(self.paths).startswith("ssh-ed25519 AAAA"))
+	def test_new_host_key_makes_a_key_named_after_the_share(self):
+		run = FakeKeygen()
+		new_host_key(self.paths, "Projects", run=run)
+		key_path = os.path.join(self.root, "host_ed25519-Projects")
+		self.assertEqual(self.paths.host_key("Projects"), key_path)
+		self.assertEqual(self.paths.host_public_key("Projects"), key_path + ".pub")
+		self.assertEqual(run.calls, [self.keygen_argv(key_path)])
+		self.assertEqual(file_mode(self.root), 0o700)
+		self.assertEqual(file_mode(key_path), 0o600)
+		self.assertEqual(file_mode(key_path + ".pub"), 0o644)
+		self.assertTrue(os.path.isfile(self.paths.empty_config))
+
+	def test_new_host_key_replaces_a_leftover_key(self):
+		os.makedirs(self.root)
+		for path in (self.paths.host_key("Projects"), self.paths.host_public_key("Projects")):
+			with open(path, "w") as handle:
+				handle.write("old\n")
+		new_host_key(self.paths, "Projects", run=FakeKeygen())
+		with open(self.paths.host_key("Projects")) as handle:
+			self.assertEqual(handle.read(), "private\n")
+
+	def test_remove_host_key_removes_both_files_and_tolerates_missing_ones(self):
+		new_host_key(self.paths, "Projects", run=FakeKeygen())
+		new_host_key(self.paths, "Photos", run=FakeKeygen())
+		remove_host_key(self.paths, "Projects")
+		self.assertFalse(os.path.exists(self.paths.host_key("Projects")))
+		self.assertFalse(os.path.exists(self.paths.host_public_key("Projects")))
+		self.assertTrue(os.path.exists(self.paths.host_key("Photos")))
+		remove_host_key(self.paths, "Projects")
 
 	@unittest.skipUnless(os.path.exists("/usr/bin/ssh-keygen"), "needs /usr/bin/ssh-keygen")
-	def test_ensure_keys_recreates_both_public_keys_with_the_real_ssh_keygen(self):
+	def test_keys_with_the_real_ssh_keygen(self):
 		ensure_keys(self.paths)
-		keys = {}
-		for key_path in (self.paths.host_key, self.paths.client_key):
-			with open(key_path) as private, open(key_path + ".pub") as public:
-				keys[key_path] = (private.read(), public.read().split()[:2])
-			os.remove(key_path + ".pub")
+		new_host_key(self.paths, "Projects")
+		new_host_key(self.paths, "Photos")
+		self.assertEqual(file_mode(self.paths.client_key), 0o600)
+		self.assertEqual(file_mode(self.paths.host_key("Projects")), 0o600)
+		self.assertTrue(public_host_key(self.paths, "Projects").startswith("ssh-ed25519 AAAA"))
+		self.assertNotEqual(public_host_key(self.paths, "Projects"), public_host_key(self.paths, "Photos"))
+
+	@unittest.skipUnless(os.path.exists("/usr/bin/ssh-keygen"), "needs /usr/bin/ssh-keygen")
+	def test_ensure_keys_recreates_the_public_key_with_the_real_ssh_keygen(self):
 		ensure_keys(self.paths)
-		for key_path, (private_text, public_fields) in keys.items():
-			with open(key_path) as private, open(key_path + ".pub") as public:
-				self.assertEqual(private.read(), private_text)
-				self.assertEqual(public.read().split()[:2], public_fields)
-			self.assertEqual(file_mode(key_path + ".pub"), 0o644)
+		with open(self.paths.client_key) as private, open(self.paths.client_public_key) as public:
+			private_text, public_fields = private.read(), public.read().split()[:2]
+		os.remove(self.paths.client_public_key)
+		ensure_keys(self.paths)
+		with open(self.paths.client_key) as private, open(self.paths.client_public_key) as public:
+			self.assertEqual(private.read(), private_text)
+			self.assertEqual(public.read().split()[:2], public_fields)
+		self.assertEqual(file_mode(self.paths.client_public_key), 0o644)
 
 
 class BinariesTest(SharePathsTestCase):
@@ -264,9 +296,9 @@ class BinariesTest(SharePathsTestCase):
 class HostKeyTest(SharePathsTestCase):
 	def test_public_host_key_drops_the_comment(self):
 		os.makedirs(self.root)
-		with open(self.paths.host_public_key, "w") as handle:
+		with open(self.paths.host_public_key("Projects"), "w") as handle:
 			handle.write("ssh-ed25519 AAAAkey wn-share\n")
-		self.assertEqual(public_host_key(self.paths), HOST_KEY_TEXT)
+		self.assertEqual(public_host_key(self.paths, "Projects"), HOST_KEY_TEXT)
 
 
 class AddressTest(unittest.TestCase):
@@ -413,6 +445,8 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		self.wall = FakeClock(WALL_START)
 		self.projects = self.make_folder("Projects")
 		self.photos = self.make_folder("Photos")
+		for name in ("Projects", "Photos"):
+			open(self.paths.host_key(name), "w").close()
 
 	def make_folder(self, name):
 		path = os.path.join(self.home.name, name)
@@ -620,6 +654,18 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.tick()
 		self.assertEqual(len(self.popen.commands), 1)
 
+	def test_a_missing_host_key_is_an_error_and_starts_nothing(self):
+		os.remove(self.paths.host_key("Projects"))
+		self.write_shares(self.share_item(), self.share_item("Photos", SECOND_PORT))
+		supervisor = self.supervisor()
+		for _ in range(3):
+			supervisor.tick()
+			self.advance(SUPERVISOR_TICK * 5)
+		self.assertEqual(self.popen.commands, [server_command(Share(**self.share_item("Photos", SECOND_PORT)), self.paths)])
+		detail = "its host key {} is missing. Run wn unshare Projects, then wn share again".format(self.paths.host_key("Projects"))
+		self.assertEqual(self.state()["Projects"], {"state": "error", "detail": detail, "pid": None})
+		self.assertEqual(self.log.getvalue().count("share Projects: error, " + detail), 1)
+
 	def test_bad_config_keeps_the_last_good_shares_and_logs_once(self):
 		self.write_shares(self.share_item())
 		supervisor = self.supervisor()
@@ -657,7 +703,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		self.assertFalse(os.path.exists(self.paths.state_file + ".part"))
 
 	def test_no_state_file_without_the_shares_folder(self):
-		os.rmdir(self.root)
+		shutil.rmtree(self.root)
 		self.supervisor().tick()
 		self.assertFalse(os.path.exists(self.root))
 

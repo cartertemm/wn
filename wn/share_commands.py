@@ -34,9 +34,11 @@ from wn.share_sftp import (
 	guest_share_folder,
 	install_binaries,
 	load_guest_script,
+	new_host_key,
 	public_host_key,
 	read_mac_state,
 	remove_file,
+	remove_host_key,
 	render_known_hosts,
 	render_rclone_conf,
 	render_share_json,
@@ -141,7 +143,7 @@ class ShareCommands:
 	"""Runs the share commands. The collaborators are parameters so tests can replace them."""
 
 	def __init__(self, config, backend, output, runner=None, paths=None, fetch_tools=fetch_share_tools,
-			install_binaries=install_binaries, ensure_keys=ensure_keys, agent_installed=agent_is_installed,
+			install_binaries=install_binaries, ensure_keys=ensure_keys, new_host_key=new_host_key, agent_installed=agent_is_installed,
 			agent_running=agent_is_running, install_agent=install_agent, offer_factory=FileOffer,
 			can_bind=can_bind, clock=time.monotonic, sleep=time.sleep):
 		self.config = config
@@ -152,6 +154,7 @@ class ShareCommands:
 		self.fetch_tools = fetch_tools
 		self.install_binaries = install_binaries
 		self.ensure_keys = ensure_keys
+		self.new_host_key = new_host_key
 		self.agent_installed = agent_installed
 		self.agent_running = agent_running
 		self.install_agent = install_agent
@@ -317,20 +320,23 @@ class ShareCommands:
 		lines = "\n".join(log.splitlines()[-MOUNT_LOG_TAIL_LINES:])
 		raise ShareError("Windows did not mount the share within {} s. Windows reports: {}. Last lines of {}:\n{}".format(MOUNT_TIMEOUT_SECONDS, _reported(entry), log_path, lines))
 
-	def _roll_back(self, name, folder, config_written):
-		"""Ask Windows to remove the share and take it out of the config. Return what could not be done, as message lines."""
+	def _roll_back(self, name, folder, share_file_sent, config_written):
+		"""Ask Windows to remove the share, take it out of the config, and delete its host key. Return what could not be done, as message lines."""
 		problems = []
-		try:
-			self.runner.push(folder + "\\" + REMOVE_MARKER_NAME, b"")
-		except WnError as error:
-			if config_written:
-				return ["Also could not ask Windows to remove the share: {}. wn kept the share in the config. Run wn {} {} to finish".format(error, REMOVE_COMMAND, name)]
-			problems.append("Also could not ask Windows to remove the share: {}".format(error))
+		if share_file_sent:
+			try:
+				self.runner.push(folder + "\\" + REMOVE_MARKER_NAME, b"")
+			except WnError as error:
+				if config_written:
+					return ["Also could not ask Windows to remove the share: {}. wn kept the share in the config. Run wn {} {} to finish".format(error, REMOVE_COMMAND, name)]
+				problems.append("Also could not ask Windows to remove the share: {}".format(error))
 		if config_written:
 			try:
 				self._write_shares(tuple(share for share in load_config().shares if share.name != name))
 			except (WnError, OSError) as error:
 				problems.append("Also could not remove share '{}' from the config: {}".format(name, error))
+				return problems
+		remove_host_key(self.paths, name)
 		return problems
 
 	def add_share(self, mac_dir, vm_dir, read_only=False, name=None):
@@ -357,10 +363,13 @@ class ShareCommands:
 		self._install_guest_tools(state, tools)
 		script_changed = self._push_common_files(state)
 		folder = guest_share_folder(name)
-		self.runner.push(folder + "\\" + RCLONE_CONF_NAME, render_rclone_conf(share).encode("utf-8"))
-		self.runner.push(folder + "\\" + KNOWN_HOSTS_NAME, render_known_hosts(share, public_host_key(self.paths)).encode("utf-8"))
+		share_file_sent = False
 		config_written = False
 		try:
+			self.new_host_key(self.paths, name)
+			self.runner.push(folder + "\\" + RCLONE_CONF_NAME, render_rclone_conf(share).encode("utf-8"))
+			self.runner.push(folder + "\\" + KNOWN_HOSTS_NAME, render_known_hosts(share, public_host_key(self.paths, name)).encode("utf-8"))
+			share_file_sent = True
 			self.runner.push(folder + "\\" + SHARE_JSON_NAME, render_share_json(share).encode("utf-8"))
 			self._write_shares(load_config().shares + (share,))
 			config_written = True
@@ -368,7 +377,7 @@ class ShareCommands:
 			self._run_script(TASK_SCRIPT, {"restart": script_changed}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 			self._wait_for_mount(name, folder)
 		except BaseException as error:
-			problems = self._roll_back(name, folder, config_written)
+			problems = self._roll_back(name, folder, share_file_sent, config_written)
 			if problems and isinstance(error, WnError):
 				raise ShareError("\n".join([str(error)] + problems)) from error
 			raise
@@ -439,6 +448,7 @@ class ShareCommands:
 	def _remove_mac_side(self, name):
 		self._write_shares(tuple(share for share in load_config().shares if share.name != name))
 		remove_file(self.paths.log_file(name))
+		remove_host_key(self.paths, name)
 
 	def _ask_windows_to_remove(self, name):
 		"""Push the remove marker. A failed push is fine when Windows has already dropped the share."""

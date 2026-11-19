@@ -145,8 +145,6 @@ class ShareCommandTestCase(unittest.TestCase):
 		os.makedirs(self.paths.root)
 		with open(self.paths.client_key, "w") as handle:
 			handle.write(CLIENT_KEY_TEXT)
-		with open(self.paths.host_public_key, "w") as handle:
-			handle.write(HOST_PUBLIC_KEY_TEXT)
 		write_config(self.home.name, {})
 		self.runner = FakeRunner()
 		self.backend = FakeBackend()
@@ -169,6 +167,15 @@ class ShareCommandTestCase(unittest.TestCase):
 	def mount(self, name):
 		self.runner.files[GUEST_STATUS_FILE] = status_text({name: {"state": "mounted", "detail": "", "pid": 5678}})
 
+	def new_host_key(self, paths, name):
+		for path, text in ((paths.host_key(name), "private\n"), (paths.host_public_key(name), HOST_PUBLIC_KEY_TEXT)):
+			with open(path, "w") as handle:
+				handle.write(text)
+
+	def assert_no_host_key(self, name=SHARE_NAME):
+		self.assertFalse(os.path.exists(self.paths.host_key(name)))
+		self.assertFalse(os.path.exists(self.paths.host_public_key(name)))
+
 	def install_agent(self):
 		self.installs.append(True)
 		return "/agents/com.wn.agent.plist"
@@ -180,6 +187,7 @@ class ShareCommandTestCase(unittest.TestCase):
 			fetch_tools=lambda report: TOOLS,
 			install_binaries=lambda tools, paths: None,
 			ensure_keys=lambda paths: None,
+			new_host_key=self.new_host_key,
 			agent_installed=lambda: True,
 			agent_running=lambda: True,
 			install_agent=self.install_agent,
@@ -221,6 +229,7 @@ class ShareCommandTestCase(unittest.TestCase):
 		self.assertIn(FOLDER + "\\remove", self.runner.files)
 		self.assertEqual(self.runner.files[FOLDER + "\\remove"], "")
 		self.assertEqual(load_config().shares, ())
+		self.assert_no_host_key()
 
 	def hold_lock(self):
 		handle = open(os.path.join(self.paths.root, LOCK_FILE_NAME), "a")
@@ -348,6 +357,24 @@ class AddShareTests(ShareCommandTestCase):
 		self.assertIn("port = {}\n".format(FIRST_PORT), self.runner.files[FOLDER + "\\rclone.conf"])
 		self.assertEqual(self.runner.files[FOLDER + "\\known_hosts"], "192.168.64.1 ssh-ed25519 AAAAhost\n[192.168.64.1]:47321 ssh-ed25519 AAAAhost\n")
 		self.assertEqual(json.loads(self.runner.files[FOLDER + "\\share.json"]), {"name": SHARE_NAME, "mount_path": VM_PATH, "read_only": False, "port": FIRST_PORT})
+
+	def test_each_share_gets_its_own_host_key(self):
+		keys = []
+
+		def new_host_key(paths, name):
+			keys.append(name)
+			self.new_host_key(paths, name)
+			with open(paths.host_public_key(name), "w") as handle:
+				handle.write("ssh-ed25519 AAAA{} wn-share\n".format(name))
+
+		self.commands(new_host_key=new_host_key).add_share(self.mac_folder, VM_PATH)
+		other = self.make_mac_folder("Other")
+		self.serve("Other")
+		self.mount("Other")
+		self.commands(new_host_key=new_host_key).add_share(other, "C:\\Other")
+		self.assertEqual(keys, [SHARE_NAME, "Other"])
+		self.assertIn("ssh-ed25519 AAAAProjects\n", self.runner.files[FOLDER + "\\known_hosts"])
+		self.assertIn("[192.168.64.1]:47322 ssh-ed25519 AAAAOther\n", self.runner.files["C:\\ProgramData\\wn\\shares\\Other\\known_hosts"])
 
 	def test_no_fetch_when_winfsp_and_rclone_are_present(self):
 		self.add()
@@ -619,6 +646,7 @@ class RollbackTests(ShareCommandTestCase):
 		self.assertTrue(message.startswith("task.ps1 failed in Windows with exit code 1:\nRegister-ScheduledTask failed"))
 		self.assertTrue(message.endswith("\nAlso could not ask Windows to remove the share: utmctl file push failed. wn kept the share in the config. Run wn unshare Projects to finish"))
 		self.assertEqual([share.name for share in load_config().shares], [SHARE_NAME])
+		self.assertTrue(os.path.exists(self.paths.host_key(SHARE_NAME)))
 
 	def test_failed_config_rollback_does_not_hide_the_error(self):
 		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
@@ -629,6 +657,7 @@ class RollbackTests(ShareCommandTestCase):
 		self.assertTrue(message.startswith("task.ps1 failed in Windows with exit code 1"))
 		self.assertIn("Also could not remove share 'Projects' from the config: disk full", message)
 		self.assertIn(FOLDER + "\\remove", self.runner.files)
+		self.assertTrue(os.path.exists(self.paths.host_key(SHARE_NAME)))
 
 	def first_then_fail(self, real_update):
 		calls = []
@@ -649,6 +678,7 @@ class RollbackTests(ShareCommandTestCase):
 		self.assertEqual(self.config_text(), before)
 		self.assertIn(FOLDER + "\\remove", self.runner.files)
 		self.assertNotIn(TASK_SCRIPT, self.runs())
+		self.assert_no_host_key()
 
 	def test_failure_before_the_share_file_leaves_no_remove_marker(self):
 		self.runner.push_errors[FOLDER + "\\known_hosts"] = GuestError("utmctl file push failed")
@@ -657,6 +687,15 @@ class RollbackTests(ShareCommandTestCase):
 			self.add()
 		self.assertEqual(self.config_text(), before)
 		self.assertNotIn(FOLDER + "\\remove", self.pushes())
+		self.assert_no_host_key()
+
+	def test_failure_before_the_host_key_leaves_no_host_key_of_another_share(self):
+		self.new_host_key(self.paths, "Other")
+		self.runner.results[PREPARE_SCRIPT] = prepare_result(vm_path="files")
+		with self.assertRaises(ShareError):
+			self.add()
+		self.assertTrue(os.path.exists(self.paths.host_key("Other")))
+		self.assert_no_host_key()
 
 
 class SavedShareTestCase(ShareCommandTestCase):
@@ -794,6 +833,7 @@ class RemoveTests(SavedShareTestCase):
 		os.makedirs(self.paths.logs)
 		with open(self.paths.log_file(SHARE_NAME), "w") as handle:
 			handle.write("rclone log\n")
+		self.new_host_key(self.paths, SHARE_NAME)
 
 	def remove(self, name=SHARE_NAME, **changes):
 		return self.commands(**changes).remove_share(name)
@@ -810,6 +850,7 @@ class RemoveTests(SavedShareTestCase):
 		self.assertEqual(str(caught.exception), message)
 		self.assertEqual(self.config_text(), before)
 		self.assertTrue(os.path.exists(self.paths.log_file(SHARE_NAME)))
+		self.assertTrue(os.path.exists(self.paths.host_key(SHARE_NAME)))
 		self.assertNotIn(CLEANUP_SCRIPT, self.runs())
 
 	def test_unknown_name_lists_the_names(self):
@@ -838,6 +879,7 @@ class RemoveTests(SavedShareTestCase):
 		self.assertIsNone(self.remove())
 		self.assertEqual(load_config().shares, ())
 		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
+		self.assert_no_host_key()
 		self.assertEqual(self.output.getvalue(), "VM 'Windows' no longer exists in UTM, so only the Mac side was removed\n")
 		self.assertEqual(self.runner.calls, [])
 
@@ -873,6 +915,7 @@ class RemoveTests(SavedShareTestCase):
 		self.assertEqual(configs, [(SHARE_NAME,)] * 4)
 		self.assertEqual(load_config().shares, ())
 		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
+		self.assert_no_host_key()
 		self.assertEqual(self.runs(), [TASK_SCRIPT, CLEANUP_SCRIPT])
 		self.assertEqual(self.params_of(TASK_SCRIPT), {"restart": False})
 		self.assertEqual([call[:2] for call in self.runner.calls[:3]], [("push", FOLDER + "\\remove"), ("run", TASK_SCRIPT), ("pull", GUEST_STATUS_FILE)])
