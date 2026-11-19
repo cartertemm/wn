@@ -12,7 +12,7 @@ import time
 from wn.agent import LOG_PATH, foreground_pid, launch_agent_path, launchd_state
 from wn.backend import BackendError
 from wn.backends.utm import UnknownVMError, UTMCtlError, UTMCtlMissingError
-from wn.config import load_config, update_config_file
+from wn.config import REMOVE_SETTING, load_config, update_config_file
 from wn.downloads import RCLONE_WINDOWS_BINARY, WINFSP_SOURCE, fetch_share_tools
 from wn.errors import WnError
 from wn.guest_runner import BOM_TEXT, DEFAULT_SCRIPT_TIMEOUT_SECONDS, FileOffer, GuestError, GuestRunner
@@ -211,7 +211,7 @@ class ShareCommands:
 			yield
 
 	def _write_shares(self, shares):
-		update_config_file({"shares": [share.to_dict() for share in shares]})
+		update_config_file({"shares": [share.to_dict() for share in shares] if shares else REMOVE_SETTING})
 
 	def _wait(self, read, ready, timeout):
 		"""Call ``read`` every STATUS_POLL_SECONDS until ``ready`` accepts its value or ``timeout`` passes. Return the last value."""

@@ -680,6 +680,12 @@ class RollbackTests(ShareCommandTestCase):
 		self.assertNotIn(TASK_SCRIPT, self.runs())
 		self.assert_no_host_key()
 
+	def test_rollback_of_the_only_share_removes_the_shares_setting(self):
+		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
+		with self.assertRaises(GuestScriptError):
+			self.add()
+		self.assertNotIn("shares", json.loads(self.config_text()))
+
 	def test_failure_before_the_share_file_leaves_no_remove_marker(self):
 		self.runner.push_errors[FOLDER + "\\known_hosts"] = GuestError("utmctl file push failed")
 		before = self.config_text()
@@ -1056,6 +1062,16 @@ class RemoveTests(SavedShareTestCase):
 				with self.assertRaises(UTMCtlError):
 					self.remove()
 				self.assertEqual(self.config_text(), before)
+
+	def test_the_last_unshare_removes_the_shares_setting(self):
+		other = self.make_mac_folder("Other")
+		update_config_file({"battery_sync": False})
+		self.save(self.share(), self.share("Other", mac_path=other, vm_path="C:\\Other", port=FIRST_PORT + 1))
+		self.guest_reports({})
+		self.remove()
+		self.assertEqual([item["name"] for item in json.loads(self.config_text())["shares"]], ["Other"])
+		self.remove("Other")
+		self.assertEqual(json.loads(self.config_text()), {"battery_sync": False})
 
 	def test_cleanup_runs_only_after_the_last_share(self):
 		other = self.make_mac_folder("Other")
