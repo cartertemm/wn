@@ -15,6 +15,8 @@ $ReadWriteSecurity = 'FileSecurity=D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'
 $ReadOnlySecurity = 'FileSecurity=D:P(A;;FRFX;;;SY)(A;;FRFX;;;BA)(A;;FRFX;;;AU)(A;;FRFX;;;OW)'
 $CachePattern = '^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) .*vfs cache: cleaned: .* in use (\d+), to upload (\d+), uploading (\d+)'
 $DirtyPattern = '"Dirty":\s*true'
+$FailurePattern = '^\S+ \S+ ERROR : (.+): vfs cache: failed to upload try #\d+, will retry in \S+: (?:vfs cache: failed to transfer file from cache to remote: )?(.+)$'
+$SuccessPattern = '^\S+ \S+ INFO  : (.+): vfs cache: upload succeeded try #\d+$'
 $LongPathPrefix = '\\?\'
 $RcloneTimeFormat = 'yyyy/MM/dd HH:mm:ss'
 $LinkedParentDetail = '{0} is a link or mount point. Use a share path with no link in it'
@@ -22,9 +24,12 @@ $NoShareFileDetail = 'the share folder has no share.json'
 $NotDeletedDetail = 'could not delete {0}'
 $OpenFilesDetail = '{0} files are open in Windows. Close them so the share can be removed'
 $CacheUploadDetail = 'starting rclone to upload the files in its cache'
+$FailedDetail = '{0} cannot be uploaded to the Mac: {1}: {2}'
 $Utf8 = New-Object System.Text.UTF8Encoding $false
 $Processes = @{}
 $Status = @{}
+$Failures = @{}
+$LogOffsets = @{}
 
 function Get-Timestamp {
 	(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
@@ -157,6 +162,46 @@ function Get-CacheCounts($Folder, $Since) {
 	}
 }
 
+function Update-Failures($Name, $Folder) {
+	$log = Join-Path $Folder 'mount.log'
+	if (-not (Test-Path -LiteralPath $log)) { return }
+	$stream = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite, Delete')
+	try {
+		if (-not $Failures.Contains($Name) -or $stream.Length -lt $LogOffsets[$Name]) {
+			$Failures[$Name] = [ordered]@{}
+			$LogOffsets[$Name] = 0
+		}
+		$stream.Position = $LogOffsets[$Name]
+		$bytes = New-Object byte[] ($stream.Length - $stream.Position)
+		$read = $stream.Read($bytes, 0, $bytes.Length)
+	} finally {
+		$stream.Dispose()
+	}
+	if ($read -eq 0) { return }
+	$end = [Array]::LastIndexOf($bytes, [byte]10, $read - 1) + 1
+	$LogOffsets[$Name] += $end
+	foreach ($line in $Utf8.GetString($bytes, 0, $end).Split("`n")) {
+		$line = $line.TrimEnd("`r")
+		if ($line -match $FailurePattern) {
+			$Failures[$Name].Remove($Matches[1])
+			$Failures[$Name][$Matches[1]] = $Matches[2]
+		} elseif ($line -match $SuccessPattern) {
+			$Failures[$Name].Remove($Matches[1])
+		} elseif ($line -match $CachePattern -and [int]$Matches[3] + [int]$Matches[4] -eq 0) {
+			$Failures[$Name].Clear()
+		}
+	}
+}
+
+function Get-FailureDetail($Name) {
+	$failures = $Failures[$Name]
+	if (-not $failures -or $failures.Count -eq 0) { return '' }
+	$files = '{0} files' -f $failures.Count
+	if ($failures.Count -eq 1) { $files = '1 file' }
+	$newest = @($failures.Keys)[-1]
+	return ($FailedDetail -f $files, $newest, $failures[$newest])
+}
+
 function Find-Adopted {
 	$running = @(Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'")
 	foreach ($folder in @(Get-ChildItem -LiteralPath $SharesFolder -Directory -ErrorAction SilentlyContinue)) {
@@ -213,13 +258,22 @@ function Remove-Share($Name, $Folder) {
 		$since = (Get-Item -LiteralPath (Join-Path $Folder 'remove')).LastWriteTime
 		if ($process.StartTime -gt $since) { $since = $process.StartTime }
 		$since = $since.AddTicks(-($since.Ticks % [TimeSpan]::TicksPerSecond))
+		Update-Failures $Name $Folder
 		$counts = Get-CacheCounts $Folder $since
 		if ($counts -and $counts.open -gt 0) {
 			Set-State $Name 'removing' ($OpenFilesDetail -f $counts.open) $process.Id $null
 			return
 		}
 		if ($counts -and $counts.pending -gt 0) {
-			Set-State $Name 'removing' ('{0} files to upload to the Mac' -f $counts.pending) $process.Id $counts.pending
+			$detail = '{0} files to upload to the Mac' -f $counts.pending
+			$failed = Get-FailureDetail $Name
+			if ($failed) {
+				Set-State $Name 'removing' ('{0}. {1}' -f $detail, $failed) $process.Id $null
+				$Status[$Name].failed = $Failures[$Name].Count
+				$Status[$Name].to_upload = $counts.pending
+			} else {
+				Set-State $Name 'removing' $detail $process.Id $counts.pending
+			}
 			return
 		}
 		if ((-not $counts -and (Test-CacheFiles $Folder)) -or (Test-DirtyCache $Folder)) {
@@ -247,6 +301,7 @@ function Remove-Share($Name, $Folder) {
 		return
 	}
 	$Status.Remove($Name)
+	$Failures.Remove($Name)
 	Write-Log ('{0}: removed' -f $Name)
 }
 
@@ -255,7 +310,9 @@ function Update-Share($Name, $Folder) {
 	$process = $Processes[$Name]
 	if ($process -and -not $process.HasExited) {
 		if (Test-Junction $share.mount_path) {
-			Set-State $Name 'mounted' '' $process.Id $null
+			Update-Failures $Name $Folder
+			Set-State $Name 'mounted' (Get-FailureDetail $Name) $process.Id $null
+			if ($Failures[$Name].Count) { $Status[$Name].failed = $Failures[$Name].Count }
 		} elseif ($Status[$Name].state -ne 'waiting') {
 			Set-State $Name 'starting' '' $process.Id $null
 		}

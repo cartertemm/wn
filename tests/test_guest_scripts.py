@@ -168,6 +168,37 @@ class RemovalTests(unittest.TestCase):
 		self.assertNotIn("\nFind-Adopted\n", self.text)
 
 
+class UploadFailureTests(unittest.TestCase):
+	def setUp(self):
+		self.text = read_script(SUPERVISOR_SCRIPT)
+		self.failures = function_body(self.text, "Update-Failures")
+
+	def test_failure_lines_match_what_rclone_writes(self):
+		self.assertIn("$FailurePattern = '^\\S+ \\S+ ERROR : (.+): vfs cache: failed to upload try #\\d+, will retry in \\S+: (?:vfs cache: failed to transfer file from cache to remote: )?(.+)$'", self.text)
+		self.assertIn("$SuccessPattern = '^\\S+ \\S+ INFO  : (.+): vfs cache: upload succeeded try #\\d+$'", self.text)
+
+	def test_only_new_log_bytes_are_read_each_pass(self):
+		self.assertIn("$stream.Position = $LogOffsets[$Name]", self.failures)
+		self.assertIn("$stream.Length -lt $LogOffsets[$Name]", self.failures)
+		self.assertIn("$end = [Array]::LastIndexOf($bytes, [byte]10, $read - 1) + 1", self.failures)
+		self.assertIn("$LogOffsets[$Name] += $end", self.failures)
+
+	def test_a_failure_clears_on_success_or_when_nothing_waits_for_upload(self):
+		self.assertIn("} elseif ($line -match $SuccessPattern) {\n\t\t\t$Failures[$Name].Remove($Matches[1])\n", self.failures)
+		self.assertIn("} elseif ($line -match $CachePattern -and [int]$Matches[3] + [int]$Matches[4] -eq 0) {\n\t\t\t$Failures[$Name].Clear()\n", self.failures)
+
+	def test_a_mounted_share_reports_its_failures(self):
+		update = function_body(self.text, "Update-Share")
+		self.assertIn("\t\t\tUpdate-Failures $Name $Folder\n\t\t\tSet-State $Name 'mounted' (Get-FailureDetail $Name) $process.Id $null\n\t\t\tif ($Failures[$Name].Count) { $Status[$Name].failed = $Failures[$Name].Count }\n", update)
+		self.assertIn("$FailedDetail = '{0} cannot be uploaded to the Mac: {1}: {2}'", self.text)
+
+	def test_a_removal_shows_its_failures_in_the_detail(self):
+		remove = function_body(self.text, "Remove-Share")
+		self.assertLess(remove.index("Update-Failures $Name $Folder"), remove.index("Get-CacheCounts"))
+		self.assertIn("Set-State $Name 'removing' ('{0}. {1}' -f $detail, $failed) $process.Id $null\n\t\t\t\t$Status[$Name].failed = $Failures[$Name].Count\n\t\t\t\t$Status[$Name].to_upload = $counts.pending\n", remove)
+		self.assertLess(remove.index("Get-FailureDetail $Name"), remove.index("Stop-Process"))
+
+
 class StatusListingTests(unittest.TestCase):
 	def setUp(self):
 		self.text = read_script(SUPERVISOR_SCRIPT)
