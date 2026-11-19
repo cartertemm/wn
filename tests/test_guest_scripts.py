@@ -128,13 +128,31 @@ class RemovalTests(unittest.TestCase):
 	def test_removal_never_stops_rclone_while_pending_is_unknown(self):
 		self.assertNotIn("CacheLineWaitSeconds", self.text)
 		self.assertNotIn("$Status[$Name].pending", self.remove)
-		self.assertLess(self.remove.index("if ($null -eq $pending -and (Test-CacheFiles $Folder)) {"), self.remove.index("Stop-Process"))
+		self.assertLess(self.remove.index("if ((-not $counts -and (Test-CacheFiles $Folder)) -or (Test-DirtyCache $Folder)) {"), self.remove.index("Stop-Process"))
+
+	def test_removal_waits_while_files_are_open_in_windows(self):
+		self.assertIn(" in use (\\d+), to upload (\\d+), uploading (\\d+)'", self.text)
+		counts = function_body(self.text, "Get-CacheCounts")
+		self.assertIn("$pending = [int]$Matches[3] + [int]$Matches[4]", counts)
+		self.assertIn("return @{ open = [Math]::Max(0, [int]$Matches[2] - $pending); pending = $pending }", counts)
+		self.assertIn("if ($counts -and $counts.open -gt 0) {\n\t\t\tSet-State $Name 'removing' ($OpenFilesDetail -f $counts.open) $process.Id $null\n\t\t\treturn\n", self.remove)
+		self.assertLess(self.remove.index("$counts.open -gt 0"), self.remove.index("Stop-Process"))
+
+	def test_removal_starts_rclone_again_when_the_cache_is_dirty_after_the_stop(self):
+		dirty = function_body(self.text, "Test-DirtyCache")
+		self.assertIn("$DirtyPattern = '\"Dirty\":\\s*true'", self.text)
+		self.assertIn("$LongPathPrefix + (Join-Path $Folder 'cache\\vfsMeta')", dirty)
+		self.assertIn("} catch {\n\t\treturn $true", dirty)
+		stop = self.remove.index("Stop-Process")
+		recheck = self.remove.index("if (Test-DirtyCache $Folder) {\n\t\t\t$Processes.Remove($Name)\n\t\t\tSet-State $Name 'removing' $CacheUploadDetail $null $null\n\t\t\treturn\n")
+		self.assertLess(stop, recheck)
+		self.assertLess(recheck, self.remove.index("rd /s /q"))
 
 	def test_removal_measures_from_the_later_of_marker_and_rclone_start(self):
 		self.assertIn("if ($process.StartTime -gt $since) { $since = $process.StartTime }", self.remove)
 
 	def test_pending_count_reads_past_the_log_tail(self):
-		pending = function_body(self.text, "Get-PendingUploads")
+		pending = function_body(self.text, "Get-CacheCounts")
 		self.assertIn("$count *= $TailGrowthFactor", pending)
 		self.assertIn("if ($lines.Count -lt $count) { return $null }", pending)
 

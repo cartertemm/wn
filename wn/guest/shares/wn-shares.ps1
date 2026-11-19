@@ -13,11 +13,15 @@ $TailGrowthFactor = 4
 $JsonDepth = 4
 $ReadWriteSecurity = 'FileSecurity=D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'
 $ReadOnlySecurity = 'FileSecurity=D:P(A;;FRFX;;;SY)(A;;FRFX;;;BA)(A;;FRFX;;;AU)(A;;FRFX;;;OW)'
-$CachePattern = '^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) .*vfs cache: cleaned: .* to upload (\d+), uploading (\d+)'
+$CachePattern = '^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) .*vfs cache: cleaned: .* in use (\d+), to upload (\d+), uploading (\d+)'
+$DirtyPattern = '"Dirty":\s*true'
+$LongPathPrefix = '\\?\'
 $RcloneTimeFormat = 'yyyy/MM/dd HH:mm:ss'
 $LinkedParentDetail = '{0} is a link or mount point. Use a share path with no link in it'
 $NoShareFileDetail = 'the share folder has no share.json'
 $NotDeletedDetail = 'could not delete {0}'
+$OpenFilesDetail = '{0} files are open in Windows. Close them so the share can be removed'
+$CacheUploadDetail = 'starting rclone to upload the files in its cache'
 $Utf8 = New-Object System.Text.UTF8Encoding $false
 $Processes = @{}
 $Status = @{}
@@ -78,6 +82,19 @@ function Test-CacheFiles($Folder) {
 	}
 }
 
+function Test-DirtyCache($Folder) {
+	$meta = $LongPathPrefix + (Join-Path $Folder 'cache\vfsMeta')
+	if (-not [IO.Directory]::Exists($meta)) { return $false }
+	try {
+		foreach ($file in [IO.Directory]::EnumerateFiles($meta, '*', 'AllDirectories')) {
+			if ([IO.File]::ReadAllText($file) -match $DirtyPattern) { return $true }
+		}
+		return $false
+	} catch {
+		return $true
+	}
+}
+
 function Read-Share($Folder) {
 	Get-Content -Raw -LiteralPath (Join-Path $Folder 'share.json') | ConvertFrom-Json
 }
@@ -123,7 +140,7 @@ function Get-ExitDetail($Process, $Folder) {
 	return ('rclone exited with code {0}; last log line: {1}' -f (Get-ExitText $Process), $lastLine)
 }
 
-function Get-PendingUploads($Folder, $Since) {
+function Get-CacheCounts($Folder, $Since) {
 	$log = Join-Path $Folder 'mount.log'
 	if (-not (Test-Path -LiteralPath $log)) { return $null }
 	for ($count = $LogTailLines; ; $count *= $TailGrowthFactor) {
@@ -131,7 +148,8 @@ function Get-PendingUploads($Folder, $Since) {
 		for ($index = $lines.Count - 1; $index -ge 0; $index--) {
 			if ($lines[$index] -match $CachePattern) {
 				$time = [DateTime]::ParseExact($Matches[1], $RcloneTimeFormat, [Globalization.CultureInfo]::InvariantCulture)
-				if ($time -gt $Since) { return [int]$Matches[2] + [int]$Matches[3] }
+				$pending = [int]$Matches[3] + [int]$Matches[4]
+				if ($time -gt $Since) { return @{ open = [Math]::Max(0, [int]$Matches[2] - $pending); pending = $pending } }
 				return $null
 			}
 		}
@@ -185,7 +203,7 @@ function Remove-Share($Name, $Folder) {
 	if (-not $process -and (Test-Path -LiteralPath $shareFile) -and (Test-CacheFiles $Folder)) {
 		$process = Start-Mount $Name (Read-Share $Folder) $Folder
 		if ($process) {
-			Set-State $Name 'removing' 'starting rclone to upload the files in its cache' $process.Id $null
+			Set-State $Name 'removing' $CacheUploadDetail $process.Id $null
 		} else {
 			$Status[$Name].remove_requested = $true
 		}
@@ -195,17 +213,26 @@ function Remove-Share($Name, $Folder) {
 		$since = (Get-Item -LiteralPath (Join-Path $Folder 'remove')).LastWriteTime
 		if ($process.StartTime -gt $since) { $since = $process.StartTime }
 		$since = $since.AddTicks(-($since.Ticks % [TimeSpan]::TicksPerSecond))
-		$pending = Get-PendingUploads $Folder $since
-		if ($pending -gt 0) {
-			Set-State $Name 'removing' ('{0} files to upload to the Mac' -f $pending) $process.Id $pending
+		$counts = Get-CacheCounts $Folder $since
+		if ($counts -and $counts.open -gt 0) {
+			Set-State $Name 'removing' ($OpenFilesDetail -f $counts.open) $process.Id $null
 			return
 		}
-		if ($null -eq $pending -and (Test-CacheFiles $Folder)) {
+		if ($counts -and $counts.pending -gt 0) {
+			Set-State $Name 'removing' ('{0} files to upload to the Mac' -f $counts.pending) $process.Id $counts.pending
+			return
+		}
+		if ((-not $counts -and (Test-CacheFiles $Folder)) -or (Test-DirtyCache $Folder)) {
 			Set-State $Name 'removing' 'waiting for rclone to report its uploads' $process.Id $null
 			return
 		}
 		Stop-Process -Id $process.Id -Force
 		Wait-Process -Id $process.Id -Timeout $StopWaitSeconds -ErrorAction SilentlyContinue
+		if (Test-DirtyCache $Folder) {
+			$Processes.Remove($Name)
+			Set-State $Name 'removing' $CacheUploadDetail $null $null
+			return
+		}
 	}
 	if (Test-Path -LiteralPath $shareFile) {
 		$share = Read-Share $Folder
