@@ -19,6 +19,7 @@ from wn.guest_runner import BOM_TEXT, DEFAULT_SCRIPT_TIMEOUT_SECONDS, FileOffer,
 from wn.setup import install_agent
 from wn.share_sftp import (
 	CLEANUP_SCRIPT,
+	ERROR_STATE,
 	FETCH_SCRIPT,
 	GUEST_CLIENT_KEY,
 	GUEST_STATUS_FILE,
@@ -326,7 +327,7 @@ class ShareCommands:
 		return script_changed
 
 	def _wait_for_agent(self, name):
-		shares = self._wait(lambda: read_mac_state(self.paths)["shares"], lambda shares: _state_of(shares.get(name)) == SERVING_STATE, AGENT_PICKUP_TIMEOUT_SECONDS)
+		shares = self._wait(lambda: read_mac_state(self.paths)["shares"], lambda shares: _state_of(shares.get(name)) in (SERVING_STATE, ERROR_STATE), AGENT_PICKUP_TIMEOUT_SECONDS)
 		entry = shares.get(name)
 		if _state_of(entry) == SERVING_STATE:
 			return

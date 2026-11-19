@@ -695,6 +695,20 @@ class RollbackTests(ShareCommandTestCase):
 		self.assertNotIn(TASK_SCRIPT, self.runs())
 		self.assert_rolled_back()
 
+	def test_agent_error_fails_at_once_with_its_detail(self):
+		self.serve(SHARE_NAME, "error", "rclone exited with code 1: CRITICAL: bind: address already in use")
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		self.assertEqual(str(caught.exception), "the wn agent did not start serving the share. It reports: error, rclone exited with code 1: CRITICAL: bind: address already in use")
+		self.assertLess(self.clock.now, 5)
+		self.assert_rolled_back()
+
+	def test_agent_starting_at_the_timeout_is_reported(self):
+		self.serve(SHARE_NAME, "starting", "192.168.64.1:47321")
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		self.assertEqual(str(caught.exception), "the wn agent did not start serving the share. It reports: starting, 192.168.64.1:47321")
+
 	def test_agent_reports_a_problem(self):
 		self.serve(SHARE_NAME, "waiting", "the VM network is not up")
 		with self.assertRaises(ShareError) as caught:

@@ -21,8 +21,10 @@ from wn.share_sftp import (
 	ensure_keys,
 	guest_script_bytes,
 	host_address_present,
+	can_connect,
 	install_binaries,
 	kill_orphan_servers,
+	last_log_line,
 	new_host_key,
 	load_guest_script,
 	public_host_key,
@@ -316,6 +318,53 @@ class AddressTest(unittest.TestCase):
 		self.assertFalse(host_address_present(DOCUMENTATION_ADDRESS))
 
 
+class ConnectTest(unittest.TestCase):
+	def test_can_connect_to_a_listening_port(self):
+		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+			server.bind((LOOPBACK, 0))
+			server.listen()
+			self.assertTrue(can_connect(server.getsockname()[1], LOOPBACK))
+
+	def test_cannot_connect_to_a_closed_port(self):
+		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unused:
+			unused.bind((LOOPBACK, 0))
+			port = unused.getsockname()[1]
+		self.assertFalse(can_connect(port, LOOPBACK))
+
+
+class LastLogLineTest(SharePathsTestCase):
+	def write_log(self, data):
+		path = os.path.join(self.home.name, "share.log")
+		with open(path, "wb") as handle:
+			handle.write(data)
+		return path
+
+	def test_last_line_that_is_not_blank_without_its_time(self):
+		path = self.write_log(b"2026/11/17 10:00:00 NOTICE: starting\n2026/11/17 10:00:01 CRITICAL: listen tcp 192.168.64.1:47321: bind: address already in use\n\n  \n")
+		self.assertEqual(last_log_line(path), "CRITICAL: listen tcp 192.168.64.1:47321: bind: address already in use")
+
+	def test_bad_bytes_are_replaced(self):
+		path = self.write_log(b"bad \xff\xfe bytes\n")
+		self.assertEqual(last_log_line(path), "bad \ufffd\ufffd bytes")
+
+	def test_reads_only_the_end_of_a_large_log(self):
+		path = self.write_log(b"x" * (share_sftp.LOG_TAIL_BYTES * 4) + b"\nlast\n")
+		self.assertEqual(last_log_line(path), "last")
+		path = self.write_log(b"far back\n" + b"\n" * SHORT_LOG_LIMIT)
+		with mock.patch.object(share_sftp, "LOG_TAIL_BYTES", SHORT_LOG_LIMIT):
+			self.assertIsNone(last_log_line(path))
+
+	def test_lines_before_the_offset_are_ignored(self):
+		path = self.write_log(b"old run\n")
+		self.assertIsNone(last_log_line(path, os.path.getsize(path)))
+		with open(path, "ab") as handle:
+			handle.write(b"new run\n")
+		self.assertEqual(last_log_line(path, len(b"old run\n")), "new run")
+
+	def test_missing_log(self):
+		self.assertIsNone(last_log_line(os.path.join(self.home.name, "missing.log")))
+
+
 class GuestScriptTest(unittest.TestCase):
 	def test_load_guest_script_reads_the_file(self):
 		self.assertIn("wn-result: ", load_guest_script(PREPARE_SCRIPT))
@@ -441,6 +490,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		self.log = io.StringIO()
 		self.popen = FakePopen()
 		self.present = True
+		self.accepting = True
 		self.clock = FakeClock(START_TIME)
 		self.wall = FakeClock(WALL_START)
 		self.projects = self.make_folder("Projects")
@@ -471,7 +521,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		os.utime(self.config_file, ns=(self.mtime, self.mtime))
 
 	def supervisor(self, **options):
-		values = {"paths": self.paths, "config_file": self.config_file, "popen": self.popen, "address_present": lambda: self.present, "monotonic": self.clock, "wall_clock": self.wall}
+		values = {"paths": self.paths, "config_file": self.config_file, "popen": self.popen, "address_present": lambda: self.present, "connect": lambda port: self.accepting, "monotonic": self.clock, "wall_clock": self.wall}
 		values.update(options)
 		return SftpServerSupervisor(self.log, **values)
 
@@ -486,12 +536,60 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 	def test_starts_a_server_when_the_address_is_present(self):
 		item = self.share_item()
 		self.write_shares(item)
-		self.supervisor().tick()
+		supervisor = self.supervisor()
+		supervisor.tick()
 		self.assertEqual(self.popen.commands, [server_command(Share(**item), self.paths)])
-		self.assertEqual(self.state(), {"Projects": {"state": "serving", "detail": "192.168.64.1:47321", "pid": FIRST_PID}})
+		self.assertEqual(self.state(), {"Projects": {"state": "starting", "detail": "192.168.64.1:47321", "pid": FIRST_PID}})
 		with open(self.paths.pid_file("Projects")) as handle:
 			self.assertEqual(handle.read().strip(), str(FIRST_PID))
+		supervisor.tick()
+		self.assertEqual(self.state(), {"Projects": {"state": "serving", "detail": "192.168.64.1:47321", "pid": FIRST_PID}})
 		self.assertIn("share Projects: serving, 192.168.64.1:47321\n", self.log.getvalue())
+
+	def test_serving_only_after_the_port_accepts_a_connection(self):
+		self.write_shares(self.share_item())
+		self.accepting = False
+		ports = []
+		supervisor = self.supervisor(connect=lambda port: ports.append(port) or self.accepting)
+		for _ in range(3):
+			supervisor.tick()
+			self.assertEqual(self.state()["Projects"]["state"], "starting")
+		self.assertEqual(ports, [PORT, PORT])
+		self.accepting = True
+		supervisor.tick()
+		self.assertEqual(self.state()["Projects"]["state"], "serving")
+		supervisor.tick()
+		self.assertEqual(len(ports), 3)
+
+	def test_a_server_that_exits_before_it_serves_reports_its_last_log_line(self):
+		self.write_shares(self.share_item())
+		with open(self.paths.log_file("Projects"), "w") as handle:
+			handle.write("2026/11/17 09:00:00 NOTICE: an older run\n")
+		supervisor = self.supervisor()
+		states = []
+		for _ in range(4):
+			supervisor.tick()
+			states.append(self.state()["Projects"]["state"])
+			with open(self.paths.log_file("Projects"), "a") as handle:
+				handle.write("2026/11/17 10:00:00 CRITICAL: listen tcp 192.168.64.1:47321: bind: address already in use\n")
+			self.popen.processes[-1].returncode = 1
+			supervisor.tick()
+			states.append(self.state()["Projects"]["state"])
+			self.advance(5)
+		detail = "rclone exited with code 1: CRITICAL: listen tcp 192.168.64.1:47321: bind: address already in use"
+		self.assertEqual(self.state()["Projects"], {"state": "error", "detail": detail, "pid": None})
+		self.assertEqual(states, ["starting"] + ["error"] * 7)
+		self.assertEqual(len(self.popen.commands), 4)
+
+	def test_an_exit_without_a_new_log_line_reports_only_the_code(self):
+		self.write_shares(self.share_item())
+		with open(self.paths.log_file("Projects"), "w") as handle:
+			handle.write("an older run\n")
+		supervisor = self.supervisor()
+		supervisor.tick()
+		self.popen.processes[0].returncode = 2
+		supervisor.tick()
+		self.assertEqual(self.state()["Projects"]["detail"], "rclone exited with code 2")
 
 	def test_started_commands_have_no_forbidden_flag(self):
 		self.write_shares(self.share_item(), self.share_item("Photos", SECOND_PORT, read_only=True))
@@ -526,6 +624,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		self.write_shares(self.share_item())
 		supervisor = self.supervisor()
 		supervisor.tick()
+		supervisor.tick()
 		self.popen.processes[0].returncode = 1
 		supervisor.tick()
 		self.assertIn("share Projects: rclone exited with code 1. Starting it again in 5 s\n", self.log.getvalue())
@@ -549,7 +648,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 			self.advance(5)
 		self.assertEqual(len(self.popen.commands), 4)
 		self.assertEqual(self.log.getvalue().count("rclone exited with code 1. Starting"), 1)
-		self.assertEqual(self.log.getvalue().count("serving"), 1)
+		self.assertEqual(self.log.getvalue().count("serving"), 0)
 
 	def test_an_exit_after_a_server_ran_is_logged_again(self):
 		self.write_shares(self.share_item())
@@ -680,6 +779,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 	def test_state_file_is_written_only_on_change(self):
 		self.write_shares(self.share_item())
 		supervisor = self.supervisor()
+		supervisor.tick()
 		supervisor.tick()
 		os.utime(self.paths.state_file, ns=(FIRST_MTIME_NS, FIRST_MTIME_NS))
 		supervisor.tick()

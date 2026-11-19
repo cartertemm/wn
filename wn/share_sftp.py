@@ -5,6 +5,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -66,11 +67,15 @@ SERVER_STOP_SECONDS = 3
 ORPHAN_POLL_SECONDS = 0.1
 WAKE_GAP_SECONDS = 5
 MAX_LOG_BYTES = 10 * 1024 * 1024
+LOG_TAIL_BYTES = 4096
+LOG_TIME_PREFIX = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ")
+CONNECT_TIMEOUT_SECONDS = 0.5
 PS_PATH = "/bin/ps"
 SERVE_SFTP_TEXT = "serve sftp"
 SHARE_LOG_PREFIX = "share {}: "
 SUPERVISOR_LOG_PREFIX = "shares: "
 SERVING_STATE = "serving"
+STARTING_STATE = "starting"
 WAITING_STATE = "waiting"
 RESTARTING_STATE = "restarting"
 ERROR_STATE = "error"
@@ -230,6 +235,27 @@ def host_address_present(host=HOST_ADDRESS):
 	return can_bind(0, host)
 
 
+def can_connect(port, host=HOST_ADDRESS, timeout=CONNECT_TIMEOUT_SECONDS):
+	try:
+		with socket.create_connection((host, port), timeout):
+			return True
+	except OSError:
+		return False
+
+
+def last_log_line(path, offset=0):
+	"""Return the last line of ``path`` after byte ``offset`` that is not blank, without rclone's time, reading at most LOG_TAIL_BYTES. Return None when there is none."""
+	try:
+		with open(path, "rb") as handle:
+			size = handle.seek(0, os.SEEK_END)
+			handle.seek(max(offset, size - LOG_TAIL_BYTES))
+			data = handle.read(LOG_TAIL_BYTES)
+	except OSError:
+		return None
+	lines = [line.strip() for line in data.decode("utf-8", "replace").splitlines() if line.strip()]
+	return LOG_TIME_PREFIX.sub("", lines[-1]) if lines else None
+
+
 def load_guest_script(name):
 	with open(os.path.join(GUEST_SCRIPTS_DIRECTORY, name), encoding="utf-8") as handle:
 		return handle.read()
@@ -313,19 +339,22 @@ class ShareServer:
 	restart_at: float = 0.0
 	state: Optional[str] = None
 	detail: Optional[str] = None
+	start_error: Optional[str] = None
+	log_offset: int = 0
 	logged: set = dataclasses.field(default_factory=set)
 
 
 class SftpServerSupervisor:
 	"""Runs one rclone SFTP server per Mac to Windows share of the configured VM and keeps that set in line with the config."""
 
-	def __init__(self, log, paths=None, config_file=None, popen=subprocess.Popen, address_present=host_address_present,
+	def __init__(self, log, paths=None, config_file=None, popen=subprocess.Popen, address_present=host_address_present, connect=can_connect,
 			monotonic=time.monotonic, wall_clock=time.time, run=subprocess.run, kill=os.kill, load=load_config):
 		self.log = log
 		self.paths = paths or share_paths()
 		self.config_file = config_file or config_path()
 		self.popen = popen
 		self.address_present = address_present
+		self.connect = connect
 		self.monotonic = monotonic
 		self.wall_clock = wall_clock
 		self.run_command = run
@@ -433,12 +462,17 @@ class SftpServerSupervisor:
 				continue
 			code = server.process.poll()
 			if code is None:
-				server.logged.clear()
 				continue
 			server.process = None
 			remove_file(self.paths.pid_file(server.share.name))
+			line = last_log_line(self.paths.log_file(server.share.name), server.log_offset)
+			detail = "rclone exited with code {}".format(code) + (": " + line if line else "")
 			self._log_share(server, "rclone exited with code {}. Starting it again in {} s".format(code, SERVER_RESTART_SECONDS))
-			self._set(server, RESTARTING_STATE, "rclone exited with code {}".format(code))
+			if server.state == SERVING_STATE:
+				self._set(server, RESTARTING_STATE, detail)
+			else:
+				server.start_error = detail
+				self._set(server, ERROR_STATE, detail)
 			server.restart_at = now + SERVER_RESTART_SECONDS
 
 	def _start(self, server, now):
@@ -448,13 +482,26 @@ class SftpServerSupervisor:
 			if os.path.exists(log_file) and os.path.getsize(log_file) > MAX_LOG_BYTES:
 				os.truncate(log_file, 0)
 			os.close(os.open(log_file, os.O_WRONLY | os.O_CREAT, PRIVATE_MODE))
+			server.log_offset = os.path.getsize(log_file)
 			server.process = self.popen(server_command(share, self.paths))
 		except OSError as error:
-			self._set(server, ERROR_STATE, "cannot start rclone: {}".format(error))
+			server.start_error = "cannot start rclone: {}".format(error)
+			self._set(server, ERROR_STATE, server.start_error)
 			server.restart_at = now + SERVER_RESTART_SECONDS
 			return
 		write_private_file(self.paths.pid_file(share.name), "{}\n".format(server.process.pid))
-		self._set(server, SERVING_STATE, "{}:{}".format(HOST_ADDRESS, share.port))
+		if server.start_error is None:
+			self._set(server, STARTING_STATE, "{}:{}".format(HOST_ADDRESS, share.port))
+		else:
+			self._set(server, ERROR_STATE, server.start_error)
+
+	def _check_serving(self, server):
+		"""Report the server as serving once its port accepts a connection."""
+		if server.state == SERVING_STATE or not self.connect(server.share.port):
+			return
+		server.start_error = None
+		server.logged.clear()
+		self._set(server, SERVING_STATE, "{}:{}".format(HOST_ADDRESS, server.share.port))
 
 	def _write_state(self):
 		shares = {name: {"state": server.state, "detail": server.detail, "pid": server.process.pid if server.process else None} for name, server in self.servers.items()}
@@ -480,7 +527,7 @@ class SftpServerSupervisor:
 			for server in self.servers.values():
 				share = server.share
 				if server.process is not None:
-					self._set(server, SERVING_STATE, "{}:{}".format(HOST_ADDRESS, share.port))
+					self._check_serving(server)
 				elif not os.path.isdir(share.mac_path):
 					self._set(server, WAITING_STATE, "{} is missing".format(share.mac_path))
 				elif not os.path.exists(self.paths.host_key(share.name)):
