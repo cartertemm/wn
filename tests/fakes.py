@@ -9,6 +9,7 @@ import tempfile
 from wn.appbundle import CLANG_PATH
 from wn.backend import Backend, VMStatus
 from wn.backends.utm import UTMCtlError
+from wn.shares import FIRST_PORT, MAC_TO_VM
 
 
 def write_config(home, values):
@@ -32,6 +33,33 @@ def clang_works():
 		return subprocess.run([CLANG_PATH, "--version"], capture_output=True).returncode == 0
 	except OSError:
 		return False
+
+
+def share_item(**changes):
+	item = {
+		"name": "Projects",
+		"vm": "Windows",
+		"direction": MAC_TO_VM,
+		"mac_path": "/Users/c/Projects",
+		"vm_path": "C:\\Users\\c\\Projects",
+		"read_only": False,
+		"port": FIRST_PORT,
+	}
+	item.update(changes)
+	return item
+
+
+class FakeClock:
+	def __init__(self, now=0.0):
+		self.now = now
+
+	def __call__(self):
+		return self.now
+
+	def advance(self, seconds):
+		self.now += seconds
+
+	sleep = advance
 
 
 def unused_port():

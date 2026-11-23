@@ -11,7 +11,7 @@ from unittest import mock
 import urllib.error
 import urllib.request
 
-from fakes import FakeBackend
+from fakes import FakeBackend, FakeClock
 from wn.backends.utm import UTMCtlError, UTMCtlTimeoutError, UnknownVMError
 from wn.guest_runner import (
 	EXEC_DIRECTORY,
@@ -40,17 +40,6 @@ ERROR_LINE_COUNT = 30
 LARGE_FILE_BYTES = 64 * 1024 * 1024
 SMALL_RECEIVE_BUFFER = 4096
 ERROR_WAIT_SECONDS = 10
-
-
-class FakeClock:
-	def __init__(self):
-		self.now = 0.0
-
-	def __call__(self):
-		return self.now
-
-	def sleep(self, seconds):
-		self.now += seconds
 
 
 class FakeGuest(FakeBackend):

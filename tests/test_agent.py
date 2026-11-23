@@ -12,6 +12,7 @@ import time
 import unittest
 from unittest import mock
 
+import fakes
 from fake_qmp_server import TCPFakeQMPServer, reply
 from fakes import unused_port, write_config
 from wn import agent
@@ -115,8 +116,8 @@ def stub_share_supervisor(test):
 	return supervisor_class
 
 
-def share_item(name="Projects", vm="Windows", port=47321):
-	return {"name": name, "vm": vm, "direction": "mac_to_vm", "mac_path": "/Users/c/" + name, "vm_path": "C:\\Users\\c\\" + name, "read_only": False, "port": port}
+def share_item(name="Projects", **changes):
+	return fakes.share_item(name=name, mac_path="/Users/c/" + name, vm_path="C:\\Users\\c\\" + name, **changes)
 
 
 class FakeLaunchctl:

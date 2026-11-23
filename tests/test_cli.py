@@ -10,7 +10,7 @@ from unittest import mock
 
 from fake_keygrab_helper import read_log, write_fake_helper
 from fake_qmp_server import FakeQMPServer, error_reply, reply
-from fakes import FakeBackend, RecordingQMPClient, short_temporary_directory, write_config
+from fakes import FakeBackend, RecordingQMPClient, share_item, short_temporary_directory, write_config
 from wn.cli import main
 from wn.errors import WnError
 from wn.keys import combo_to_input_events
@@ -241,7 +241,7 @@ class ShareCommandTests(CLITestCase):
 		self.assertEqual(self.run_cli("unshare", "Projects")[0], 1)
 
 	def test_ctrl_c_during_unshare_while_the_share_is_in_the_config(self):
-		write_config(self.home.name, {"shares": [{"name": "Projects", "vm": "Windows", "direction": "mac_to_vm", "mac_path": "/a", "vm_path": "C:\\x", "read_only": False, "port": 47321}]})
+		write_config(self.home.name, {"shares": [share_item()]})
 		self.share_commands().remove_share.side_effect = KeyboardInterrupt
 		exit_code, _, stderr = self.run_cli("unshare", "projects")
 		self.assertEqual(exit_code, 1)
@@ -286,7 +286,7 @@ class ShareCommandTests(CLITestCase):
 		self.assertIn("wn: error: boom", stderr)
 
 	def test_agent_start_without_a_launchd_job_skips_a_bad_share(self):
-		good = {"name": "Projects", "vm": "Windows", "direction": "mac_to_vm", "mac_path": "/a", "vm_path": "C:\\x", "read_only": False, "port": 47321}
+		good = share_item()
 		write_config(self.home.name, {"shares": [good, dict(good, name="Bad", mac_path="/b", vm_path="C:\\y", port=1)]})
 		with mock.patch("wn.agent.serve") as serve:
 			exit_code, _, stderr = self.run_cli("agent", "start")
@@ -837,7 +837,7 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertNotIn("--install", stdout)
 
 	def test_no_camera_with_battery_sync_off_and_shares_keeps_the_agent(self):
-		share = {"name": "Projects", "vm": "Windows", "direction": "mac_to_vm", "mac_path": "/Users/you/Projects", "vm_path": "C:\\Users\\you\\Projects", "read_only": False, "port": 47321}
+		share = share_item()
 		write_config(self.home.name, {"battery_sync": False, "camera": True, "shares": [share]})
 		exit_code, stdout, stderr = self.run_cli("update-vm-args", "--bundle", self.bundle, "--no-camera")
 		self.assertEqual(exit_code, 0, stderr)

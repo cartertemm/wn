@@ -11,7 +11,7 @@ import threading
 import unittest
 from unittest import mock
 
-from fakes import write_config
+from fakes import FakeClock, share_item, write_config
 from wn import share_sftp
 from wn.downloads import RCLONE_MAC_BINARY, RCLONE_WINDOWS_BINARY, ShareTools
 from wn.share_sftp import (
@@ -436,17 +436,6 @@ SUPERVISOR_TICK = 2
 SHORT_LOG_LIMIT = 10
 
 
-class FakeClock:
-	def __init__(self, value):
-		self.value = value
-
-	def __call__(self):
-		return self.value
-
-	def advance(self, seconds):
-		self.value += seconds
-
-
 class FakeServerProcess:
 	def __init__(self, pid, ignores_sigterm=False):
 		self.pid = pid
@@ -514,9 +503,9 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		os.makedirs(path)
 		return path
 
-	def share_item(self, name="Projects", port=PORT, mac_path=None, read_only=False, vm=VM_NAME):
+	def share_item(self, name="Projects", port=PORT, mac_path=None, **changes):
 		mac_path = mac_path or (self.projects if name == "Projects" else self.photos)
-		return {"name": name, "vm": vm, "direction": "mac_to_vm", "mac_path": mac_path, "vm_path": "C:\\Users\\c\\" + name, "read_only": read_only, "port": port}
+		return share_item(name=name, port=port, mac_path=mac_path, vm_path="C:\\Users\\c\\" + name, **changes)
 
 	def write_shares(self, *items):
 		write_config(self.home.name, {"vm_name": VM_NAME, "shares": list(items)})

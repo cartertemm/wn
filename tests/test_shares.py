@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from fakes import share_item
 from wn import shares
 from wn.shares import (
 	FIRST_PORT,
@@ -27,65 +28,30 @@ def make_share(name="Projects", vm="Windows", mac_path="/Users/c/Projects", vm_p
 	return Share(name, vm, MAC_TO_VM, mac_path, vm_path, False, port)
 
 
-def share_item(**changes):
-	item = {
-		"name": "Projects",
-		"vm": "Windows",
-		"direction": MAC_TO_VM,
-		"mac_path": "/Users/c/Projects",
-		"vm_path": "C:\\Users\\c\\Projects",
-		"read_only": False,
-		"port": FIRST_PORT,
-	}
-	item.update(changes)
-	return item
-
-
 class DefaultNameTests(unittest.TestCase):
-	def test_spaces_become_one_dash(self):
-		self.assertEqual(default_share_name("/Users/c/My Projects"), "My-Projects")
-
-	def test_leading_dot_is_removed(self):
-		self.assertEqual(default_share_name("/x/.hidden"), "hidden")
-
-	def test_leading_dash_is_removed(self):
-		self.assertEqual(default_share_name("/x/-a"), "a")
-
-	def test_non_ascii_run_becomes_dash(self):
-		self.assertEqual(default_share_name("/x/Fotos ü 1"), "Fotos-1")
-
-	def test_trailing_dashes_are_removed(self):
-		self.assertEqual(default_share_name("/Users/c/My Projects (2024)"), "My-Projects-2024")
-		self.assertEqual(default_share_name("/x/Fotos ü"), "Fotos")
-
-	def test_dash_after_cut_is_removed(self):
-		self.assertEqual(default_share_name("/x/" + "a" * 31 + " b"), "a" * 31)
-
-	def test_nothing_left_gives_share(self):
-		self.assertEqual(default_share_name("/x/日本"), "share")
-
-	def test_root_gives_share(self):
-		self.assertEqual(default_share_name("/"), "share")
-
-	def test_trailing_slash_is_ignored(self):
-		self.assertEqual(default_share_name("/x/Docs/"), "Docs")
-
-	def test_long_name_is_cut(self):
-		self.assertEqual(default_share_name("/x/" + "a" * 40), "a" * 32)
-
-	def test_trailing_dots_are_removed(self):
-		self.assertEqual(default_share_name("/x/a.."), "a")
-
-	def test_dot_after_cut_is_removed(self):
-		self.assertEqual(default_share_name("/x/" + "a" * 31 + ".b"), "a" * 31)
-
-	def test_reserved_name_gives_share(self):
-		for path in ("/x/CON", "/x/nul.txt", "/x/Com1", "/x/LPT9."):
+	def test_names_from_paths(self):
+		for path, name in (
+			("/Users/c/My Projects", "My-Projects"),
+			("/x/.hidden", "hidden"),
+			("/x/-a", "a"),
+			("/x/Fotos ü 1", "Fotos-1"),
+			("/Users/c/My Projects (2024)", "My-Projects-2024"),
+			("/x/Fotos ü", "Fotos"),
+			("/x/" + "a" * 31 + " b", "a" * 31),
+			("/x/日本", "share"),
+			("/", "share"),
+			("/x/Docs/", "Docs"),
+			("/x/" + "a" * 40, "a" * 32),
+			("/x/a..", "a"),
+			("/x/" + "a" * 31 + ".b", "a" * 31),
+			("/x/CON", "share"),
+			("/x/nul.txt", "share"),
+			("/x/Com1", "share"),
+			("/x/LPT9.", "share"),
+			("/x/...", "share"),
+		):
 			with self.subTest(path=path):
-				self.assertEqual(default_share_name(path), "share")
-
-	def test_only_dots_gives_share(self):
-		self.assertEqual(default_share_name("/x/..."), "share")
+				self.assertEqual(default_share_name(path), name)
 
 
 class ShareNameTests(unittest.TestCase):
@@ -449,74 +415,45 @@ class ValidateSharesTests(unittest.TestCase):
 		del item["port"]
 		self.assert_refused([item], "missing keys: vm, port")
 
-	def test_unknown_keys(self):
-		self.assert_refused([share_item(extra=1)], "unknown keys: extra")
-
-	def test_name_not_string(self):
-		self.assert_refused([share_item(name=3)], "name must be 1 to 32 characters")
-
-	def test_name_bad_pattern(self):
-		self.assert_refused([share_item(name=".x")], "name must be 1 to 32 characters")
+	def test_one_bad_field_is_refused(self):
+		for changes, problem in (
+			({"extra": 1}, "unknown keys: extra"),
+			({"name": 3}, "name must be 1 to 32 characters"),
+			({"name": ".x"}, "name must be 1 to 32 characters"),
+			({"vm": None}, "vm must be a string"),
+			({"direction": "sideways"}, "direction must be mac_to_vm"),
+			({"direction": "vm_to_mac"}, "direction must be mac_to_vm"),
+			({"mac_path": 1}, "mac_path"),
+			({"mac_path": "Projects"}, "mac_path"),
+			({"vm_path": 1}, "vm_path"),
+			({"vm_path": "Users\\c"}, "vm_path"),
+			({"name": "CON"}, "name 'CON'"),
+			({"name": "nul.txt"}, "name 'nul.txt'"),
+			({"name": "a."}, "name 'a.'"),
+			({"mac_path": "/"}, "mac_path"),
+			({"mac_path": "//"}, "mac_path"),
+			({"mac_path": "/."}, "mac_path"),
+			({"mac_path": "/.."}, "mac_path"),
+			({"vm_path": "C:\\Windows"}, "vm_path"),
+			({"vm_path": "C:\\Data\\"}, "vm_path"),
+			({"vm_path": "C:/Data"}, "vm_path"),
+			({"vm_path": "C:\\Windows.\\x"}, "vm_path"),
+			({"vm_path": "C:\\a\\\\b"}, "vm_path"),
+			({"read_only": "yes"}, "read_only"),
+			({"port": "47321"}, "port"),
+			({"port": True}, "port"),
+			({"port": FIRST_PORT - 1}, "port"),
+			({"port": LAST_PORT + 1}, "port"),
+		):
+			with self.subTest(changes=changes):
+				self.assert_refused([share_item(**changes)], problem)
 
 	def test_duplicate_name_ignoring_case(self):
 		items = [share_item(), share_item(name="projects", port=FIRST_PORT + 1)]
 		self.assert_refused(items, "share name 'projects' is used twice (names ignore case)", index=1)
 
-	def test_vm_not_string(self):
-		self.assert_refused([share_item(vm=None)], "vm must be a string")
-
-	def test_direction_not_supported(self):
-		self.assert_refused([share_item(direction="sideways")], "direction must be mac_to_vm")
-
-	def test_vm_to_mac_is_refused(self):
-		self.assert_refused([share_item(direction="vm_to_mac")], "direction must be mac_to_vm")
-
-	def test_mac_path_not_string(self):
-		self.assert_refused([share_item(mac_path=1)], "mac_path")
-
-	def test_mac_path_not_absolute(self):
-		self.assert_refused([share_item(mac_path="Projects")], "mac_path")
-
-	def test_vm_path_not_string(self):
-		self.assert_refused([share_item(vm_path=1)], "vm_path")
-
-	def test_vm_path_not_absolute(self):
-		self.assert_refused([share_item(vm_path="Users\\c")], "vm_path")
-
-	def test_name_reserved_or_ends_in_a_dot(self):
-		for name in ("CON", "nul.txt", "a."):
-			with self.subTest(name=name):
-				self.assert_refused([share_item(name=name)], "name '{}'".format(name))
-
-	def test_mac_path_root(self):
-		for mac_path in ("/", "//", "/.", "/.."):
-			with self.subTest(mac_path=mac_path):
-				self.assert_refused([share_item(mac_path=mac_path)], "mac_path")
-
-	def test_vm_path_system_folder(self):
-		self.assert_refused([share_item(vm_path="C:\\Windows")], "vm_path")
-
-	def test_vm_path_not_normalized(self):
-		for vm_path in ("C:\\Data\\", "C:/Data", "C:\\Windows.\\x", "C:\\a\\\\b"):
-			with self.subTest(vm_path=vm_path):
-				self.assert_refused([share_item(vm_path=vm_path)], "vm_path")
-
 	def test_missing_mac_folder_passes(self):
 		self.assertEqual(split_shares(CONFIG_FILE, [share_item(mac_path="/Volumes/Unplugged/Projects")])[1], [])
-
-	def test_read_only_not_bool(self):
-		self.assert_refused([share_item(read_only="yes")], "read_only")
-
-	def test_port_not_int(self):
-		self.assert_refused([share_item(port="47321")], "port")
-
-	def test_port_bool(self):
-		self.assert_refused([share_item(port=True)], "port")
-
-	def test_port_out_of_range(self):
-		for port in (FIRST_PORT - 1, LAST_PORT + 1):
-			with self.subTest(port=port):
-				self.assert_refused([share_item(port=port)], "port")
 
 	def test_duplicate_port(self):
 		items = [share_item(), share_item(name="Other")]
