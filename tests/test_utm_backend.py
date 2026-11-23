@@ -253,6 +253,10 @@ class UTMBackendGuestTests(FakeUTMCtlTestCase):
 		self.update_vm(files={"C:\\wn-setup-done": "done\r\n"})
 		self.assertEqual(self.backend().pull_file("C:\\wn-setup-done").strip(), "done")
 
+	def test_pull_file_replaces_bytes_that_are_not_utf_8(self):
+		backend = self.backend(utmctl_path=[sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'bad \\xff byte')"])
+		self.assertEqual(backend.pull_file("C:\\out.txt"), "bad \ufffd byte")
+
 	def test_pull_missing_file_raises(self):
 		with self.assertRaises(UTMCtlError):
 			self.backend().pull_file("C:\\missing")
@@ -264,3 +268,28 @@ class UTMBackendGuestTests(FakeUTMCtlTestCase):
 	def test_exists(self):
 		self.assertTrue(self.backend().exists())
 		self.assertFalse(self.backend(vm_name="Other").exists())
+
+
+class UTMBackendPushAndExecTests(FakeUTMCtlTestCase):
+	def test_push_file_sends_the_bytes_on_stdin(self):
+		backend = self.backend()
+		backend.push_file("C:\\x.ps1", b"\xef\xbb\xbfhello\r\n")
+		state = self.read_state()
+		self.assertEqual(state["vms"][0]["files"]["C:\\x.ps1"], "\ufeffhello\r\n")
+		self.assertEqual(state["calls"][-1], ["file", "push", "Windows 11", "C:\\x.ps1"])
+		self.assertEqual(backend.pull_file("C:\\x.ps1"), "\ufeffhello\n")
+
+	def test_exec_command_passes_the_argv_after_cmd(self):
+		self.backend().exec_command("cmd.exe", "/c", "C:\\a.cmd")
+		self.assertEqual(self.read_state()["calls"][-1], ["exec", "Windows 11", "--cmd", "cmd.exe", "/c", "C:\\a.cmd"])
+
+	def test_push_file_to_an_unknown_vm_raises_unknown_vm_error(self):
+		with self.assertRaises(UnknownVMError):
+			self.backend(vm_name="Other").push_file("C:\\x.ps1", b"hello")
+
+	def test_exec_command_failure_raises_utmctl_error(self):
+		self.fail_command("exec", "Error: guest agent not running")
+		with self.assertRaises(UTMCtlError) as context:
+			self.backend().exec_command("cmd.exe")
+		self.assertNotIsInstance(context.exception, UnknownVMError)
+		self.assertIn("Error: guest agent not running", str(context.exception))

@@ -17,8 +17,11 @@ from wn.appbundle import build_app, camera_executable_path, executable_path, rem
 from wn.backend import create_backend
 from wn.battery_file import BatteryFile, battery_file_path, battery_writer
 from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, POLL_SECONDS, WRITE_INTERVAL_SECONDS, battery_reading, run_sync_loop, sync_message
+from wn.config import load_config_skipping_bad_shares
 from wn.errors import WnError
 from wn.qmp import qmp_client_for
+from wn.share_sftp import SERVING_STATE, SftpServerSupervisor, read_mac_state, share_paths, utc_now
+from wn.shares import HOST_ADDRESS, REMOVE_COMMAND, shares_for_vm
 from wn.utm_config import camera_socket_file
 
 PMSET_COMMAND = ["/usr/bin/pmset", "-g", "batt"]
@@ -50,14 +53,13 @@ CAMERA_ACCESS_PREFIX = "wn-camera: access: "
 CAMERA_ACCESS_ALLOWED = "allowed"
 LOG_TAIL_BYTES = 64 * 1024
 IDLE_WAIT_SECONDS = 3600
+BOOTOUT_POLL_SECONDS = 0.1
+BOOTOUT_WAIT_SECONDS = 10
+INVALID_SHARE_LOG_PREFIX = "shares: ignoring an invalid share until it is fixed: "
 
 
 class AgentError(WnError):
 	"""Raised when the agent cannot read the battery or manage its launch agent."""
-
-
-def utc_now():
-	return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_pmset(text, updated):
@@ -178,16 +180,21 @@ def render_launch_agent(python, working_directory):
 	return text
 
 
-def install_launch_agent(python, working_directory, run=None, uid=None):
+def install_launch_agent(python, working_directory, run=None, uid=None, sleep=time.sleep):
 	"""Build the agent app, write the launch agent plist that runs it, and load it. Return the plist path.
 
 	The plist starts Python through the app's stub, so macOS asks once whether wn-agent may use UTM's data.
+	``launchctl bootout`` returns before the old job is gone, and a bootstrap before then fails with error 5, so wait for it.
 	"""
 	run = run or subprocess.run
 	uid = os.getuid() if uid is None else uid
 	path = launch_agent_path()
 	if os.path.exists(path):
 		_launchctl(run, "bootout", "gui/{}/{}".format(uid, LAUNCHD_LABEL))
+		for _ in range(round(BOOTOUT_WAIT_SECONDS / BOOTOUT_POLL_SECONDS)):
+			if not launchd_state(run, uid)[0]:
+				break
+			sleep(BOOTOUT_POLL_SECONDS)
 	build_app(run)
 	os.makedirs(os.path.dirname(path), exist_ok=True)
 	os.makedirs(os.path.dirname(os.path.expanduser(LOG_PATH)), exist_ok=True)
@@ -317,10 +324,20 @@ class CameraSupervisor:
 			self.thread.join()
 
 
+def load_serving_config(log, path=None):
+	"""Return the config without its invalid shares, and log one line for each share left out."""
+	config, problems = load_config_skipping_bad_shares(path)
+	for problem in problems:
+		log.write(INVALID_SHARE_LOG_PREFIX + problem + "\n")
+	log.flush()
+	return config
+
+
 def serve(config, output, wait=None, popen=subprocess.Popen):
-	"""Run the battery sync loop and the camera helper until Ctrl+C or SIGTERM, with the PID in the pid file while it runs."""
-	if not config.battery_sync and not config.camera:
-		raise AgentError("battery_sync and camera are off in the config, so the agent has nothing to do")
+	"""Run the battery sync loop, the camera helper and the share servers until Ctrl+C or SIGTERM, with the PID in the pid file while it runs."""
+	shares = shares_for_vm(config.shares, config.vm_name)
+	if not config.battery_sync and not config.camera and not shares:
+		raise AgentError("battery_sync and camera are off and the config has no shares for VM '{}', so the agent has nothing to do".format(config.vm_name))
 	running = foreground_pid()
 	if running is not None:
 		raise AgentError("the agent is already running with PID {}. Run wn agent stop first".format(running))
@@ -328,11 +345,13 @@ def serve(config, output, wait=None, popen=subprocess.Popen):
 	_write_pid_file(path, os.getpid())
 	previous_handler = signal.signal(signal.SIGTERM, _stop_on_sigterm)
 	camera = CameraSupervisor(camera_command(config), output, popen) if config.camera else None
+	share_supervisor = SftpServerSupervisor(output, popen=popen, load=lambda path: load_serving_config(output, path))
 	try:
 		output.write("Running the agent in the foreground with PID {}. Press Ctrl+C to stop\n".format(os.getpid()))
 		output.flush()
 		if camera is not None:
 			camera.start()
+		share_supervisor.start()
 		if config.battery_sync:
 			poll_seconds = POLL_SECONDS
 			if wait is None:
@@ -345,6 +364,7 @@ def serve(config, output, wait=None, popen=subprocess.Popen):
 	except KeyboardInterrupt:
 		pass
 	finally:
+		share_supervisor.stop()
 		if camera is not None:
 			camera.stop()
 		signal.signal(signal.SIGTERM, previous_handler)
@@ -436,6 +456,31 @@ def _camera_lines(config):
 	return lines
 
 
+def _share_lines(config, running):
+	shares = shares_for_vm(config.shares, config.vm_name)
+	if not shares:
+		return ["Shares: none in the config"]
+	lines = ["Shares: {0} ({0} Mac to Windows)".format(len(shares))]
+	states = read_mac_state(share_paths())["shares"] if running else {}
+	for share in shares:
+		state = states.get(share.name)
+		if not running:
+			lines.append("Share {}: not served, the agent is not running".format(share.name))
+		elif state is None:
+			lines.append("Share {}: no state yet".format(share.name))
+		elif state.get("state") == SERVING_STATE:
+			lines.append("Share {}: serving {} on {}:{}, PID {}".format(share.name, share.mac_path, HOST_ADDRESS, share.port, state.get("pid")))
+		else:
+			lines.append("Share {}: {}, {}".format(share.name, state.get("state"), state.get("detail")))
+	return lines
+
+
+def _uninstall_share_warning(count):
+	if count == 1:
+		return "1 share is still in the config. It stops working until you install the agent again. To remove it for good, run wn {} NAME before you uninstall.\n".format(REMOVE_COMMAND)
+	return "{} shares are still in the config. They stop working until you install the agent again. To remove them for good, run wn {} NAME for each before you uninstall.\n".format(count, REMOVE_COMMAND)
+
+
 def agent_status(config, output, run=None, uid=None):
 	"""Print whether the agent is installed and running, and what it talks to. Return 0 when it runs, else 1."""
 	run = run or subprocess.run
@@ -450,7 +495,7 @@ def agent_status(config, output, run=None, uid=None):
 		"Running: yes, PID {}".format(pid) if pid is not None else "Running: no",
 		_qmp_line(qmp_address(config)),
 		_battery_file_line(battery_file_path(config)),
-	] + _camera_lines(config)
+	] + _camera_lines(config) + _share_lines(config, pid is not None)
 	output.write("".join(line + "\n" for line in lines))
 	return EXIT_RUNNING if pid is not None else EXIT_NOT_RUNNING
 
@@ -467,6 +512,9 @@ def run_agent_command(arguments, config, output, messages=None, wait=None):
 		path = install_launch_agent(sys.executable, REPOSITORY_DIRECTORY)
 		output.write("Installed {}. The agent now starts when you log in. Log: {}\n".format(path, os.path.expanduser(LOG_PATH)))
 	elif arguments.uninstall:
+		shares = shares_for_vm(config.shares, config.vm_name)
+		if shares and os.path.exists(launch_agent_path()):
+			output.write(_uninstall_share_warning(len(shares)))
 		if uninstall_launch_agent():
 			output.write("Removed {}\n".format(launch_agent_path()))
 		else:

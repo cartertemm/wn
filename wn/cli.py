@@ -14,13 +14,15 @@ from wn.backend import create_backend
 from wn.backends.utm import DEFAULT_VM_NAME
 from wn.battery_file import battery_writer, prepare_battery_file
 from wn.battery_sync import run_battery_command
-from wn.config import config_path, load_config, update_config_file
+from wn.config import config_path, load_config, load_config_skipping_bad_shares, update_config_file
 from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.keys import DEFAULT_HOLD_MS, INPUT_SEND_EVENT, combos_to_input_steps, send_input_steps
 from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import save_screenshot
 from wn.setup import DEFAULT_DISK_GIB, SOFTWARE_CHOICES, STOPPED_STATE, Installer, SetupOptions
+from wn.share_commands import ShareCommands
+from wn.shares import LIST_COMMAND, REMOVE_COMMAND, SHARE_COMMAND, shares_for_vm
 from wn.text_input import text_to_combos
 from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
 from wn.utm_config import (
@@ -51,6 +53,22 @@ WAKE_DISPLAY_SECONDS = 2
 NO_SOFTWARE_ANSWERS = ("0", "none")
 YES_ANSWERS = ("y", "yes")
 NO_ANSWERS = ("n", "no")
+SHARE_DESCRIPTION = """Show a folder on the Mac as a live folder in Windows. dir-on-mac is the Mac folder. dir-on-vm is the Windows folder where it appears. Put a Windows path in single quotes so the Mac shell keeps the backslashes, for example:
+
+  wn {share} ~/Projects 'C:\\Users\\you\\Projects'
+
+Forward slashes also work, such as C:/Users/you/Projects. The folder that holds it must exist in Windows.
+
+Run wn {list} to see the shares and their state, and wn {remove} NAME to stop sharing a folder.""".format(share=SHARE_COMMAND, list=LIST_COMMAND, remove=REMOVE_COMMAND)
+SHARE_EPILOG = """Limits:
+  Windows writes reach the Mac about 5 s after a file is closed. Mac changes reach Windows in under a second.
+  Windows apps that watch folders do not see Mac changes, so some apps need a manual refresh.
+  ReadOnly and Hidden attributes, creation times, and alternate data streams are not kept.
+  A rename that changes only the letter case fails.
+  Mac names that end in a dot or a space, or names such as nul, cannot be opened in Windows.
+  Mac symlinks do not appear in Windows.
+  Paths longer than 260 characters need an app with long path support.
+  While the Mac side cannot be reached (wn agent stopped, Mac asleep), file operations in the shared folder wait until it is back. Nothing is lost."""
 
 
 def build_parser():
@@ -91,6 +109,7 @@ def build_parser():
 	_add_setup_parser(subcommands)
 	_add_agent_parser(subcommands)
 	_add_battery_parser(subcommands)
+	_add_share_parsers(subcommands)
 	return parser
 
 
@@ -138,6 +157,20 @@ def _add_battery_parser(subcommands):
 	power.add_argument("--charging", action="store_true", help="on AC power and charging")
 	power.add_argument("--discharging", action="store_true", help="on battery power (the default)")
 	power.add_argument("--ac", action="store_true", help="on AC power, not charging")
+
+
+def _add_share_parsers(subcommands):
+	share = subcommands.add_parser(SHARE_COMMAND, help="show a Mac folder in Windows as a live folder",
+		description=SHARE_DESCRIPTION, epilog=SHARE_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+	share.add_argument("mac_dir", metavar="dir-on-mac", help="the Mac folder to share. It must exist")
+	share.add_argument("vm_dir", metavar="dir-on-vm", help="the Windows folder where the share appears, such as 'C:\\Users\\you\\Mac'. It must be missing or empty. A drive alone, such as 'C:\\', is not allowed")
+	share.add_argument("--read-only", action="store_true", help="Windows can read the files but not change them")
+	share.add_argument("--name", help="name of the share (default: the Mac folder's name)")
+	subcommands.add_parser(LIST_COMMAND, help="list the shared folders and their state", description="List the shared folders and their state on the Mac and in Windows.")
+	remove = subcommands.add_parser(REMOVE_COMMAND, help="stop sharing a folder and remove it from Windows",
+		description="Stop sharing a folder and remove it from Windows. The files stay on the Mac.")
+	remove.add_argument("share", help="name of the share, as wn {} shows it".format(LIST_COMMAND))
+	remove.add_argument("--discard", action="store_true", help="only for a share that exists only in Windows: remove it even when its Windows cache holds files that never reached the Mac, and delete those files")
 
 
 def _add_mouse_parser(subcommands):
@@ -426,7 +459,7 @@ def _update_camera_setting(context, bundle):
 		update_config_file({"camera": camera})
 		if camera:
 			context.print("Set camera to true in {}. Run python3 -m wn agent --install so the agent starts wn-camera".format(config_path()))
-		elif config.battery_sync:
+		elif config.battery_sync or shares_for_vm(config.shares, config.vm_name):
 			context.print("Set camera to false in {}. Run python3 -m wn agent --install so the agent stops wn-camera".format(config_path()))
 		else:
 			context.print("Set camera to false in {}. battery_sync is also false, so the agent has nothing to do. Run python3 -m wn agent --uninstall to remove it".format(config_path()))
@@ -568,6 +601,42 @@ def run_setup(context):
 	Installer(options, context.stdout).run()
 
 
+def _share_commands(context):
+	return ShareCommands(context.config, context.backend, context.stdout)
+
+
+def _run_share_action(context, action, stopped_message):
+	"""Run ``action`` with the share commands. On Ctrl+C print ``stopped_message()`` and fail, and report an OSError as a wn error."""
+	try:
+		return action(_share_commands(context))
+	except OSError as error:
+		raise WnError(str(error)) from None
+	except KeyboardInterrupt:
+		context.stderr.write(stopped_message())
+		return EXIT_FAILURE
+
+
+def run_share(context):
+	arguments = context.arguments
+	return _run_share_action(context, lambda commands: commands.add_share(arguments.mac_dir, arguments.vm_dir, arguments.read_only, arguments.name),
+		lambda: "\nwn: stopped. Run wn {} to see whether the share exists\n".format(LIST_COMMAND))
+
+
+def run_list_shares(context):
+	return _run_share_action(context, lambda commands: commands.list_shares(), lambda: "\nwn: stopped\n")
+
+
+def _remove_stopped_message(name):
+	if any(share.name.casefold() == name.casefold() for share in load_config().shares):
+		return "\nwn: stopped. {name} is still shared on the Mac, and Windows may still remove it after its uploads. Run wn {remove} {name} again to finish\n".format(name=name, remove=REMOVE_COMMAND)
+	return "\nwn: stopped. {} is removed from the Mac, but wn may not have finished removing its files from Windows\n".format(name)
+
+
+def run_remove_share(context):
+	name = context.arguments.share
+	return _run_share_action(context, lambda commands: commands.remove_share(name, context.arguments.discard), lambda: _remove_stopped_message(name))
+
+
 COMMANDS = {
 	"start": run_start,
 	"stop": run_stop,
@@ -582,7 +651,17 @@ COMMANDS = {
 	"setup": run_setup,
 	"agent": run_agent,
 	"battery": run_battery,
+	SHARE_COMMAND: run_share,
+	LIST_COMMAND: run_list_shares,
+	REMOVE_COMMAND: run_remove_share,
 }
+
+
+def _load_command_config(arguments):
+	"""Load the config. wn agent start leaves out invalid shares, so one bad share does not stop battery sync and the camera in the agent it starts or serves. Its share supervisor logs them."""
+	if arguments.command == "agent" and arguments.agent_command == "start":
+		return load_config_skipping_bad_shares()[0]
+	return load_config()
 
 
 def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_client_for, stdout=None, stderr=None, stdin=None):
@@ -590,7 +669,7 @@ def main(argv=None, backend_factory=create_backend, qmp_client_factory=qmp_clien
 	stderr = stderr or sys.stderr
 	arguments = build_parser().parse_args(argv)
 	try:
-		context = CommandContext(arguments, load_config(), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin, stderr)
+		context = CommandContext(arguments, _load_command_config(arguments), backend_factory, qmp_client_factory, stdout, stdin or sys.stdin, stderr)
 		exit_code = COMMANDS[arguments.command](context)
 	except WnError as error:
 		stderr.write("wn: error: {}\n".format(error))

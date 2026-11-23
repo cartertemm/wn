@@ -5,7 +5,7 @@ import plistlib
 import unittest
 from unittest import mock
 
-from fakes import short_temporary_directory
+from fakes import FakeClock, share_item, short_temporary_directory
 from test_efivars import secure_flash
 from wn.backend import VMStatus
 from wn.backends.utm import UTMCtlError
@@ -27,17 +27,6 @@ from wn.setup import (
 )
 from wn.unattend import SETUP_DONE_MARKER
 from wn.utm_config import DEFAULT_AUDIO_ARGUMENTS, UTMConfigError
-
-
-class FakeClock:
-	def __init__(self):
-		self.now = 1000.0
-
-	def __call__(self):
-		return self.now
-
-	def sleep(self, seconds):
-		self.now += seconds
 
 
 class ScriptedBackend:
@@ -133,7 +122,7 @@ class InstallerTestCase(unittest.TestCase):
 		self.windows_iso = os.path.join(root, "win.iso")
 		with open(self.windows_iso, "wb") as iso:
 			iso.write(b"windows")
-		self.clock = FakeClock()
+		self.clock = FakeClock(1000.0)
 		self.backend = ScriptedBackend(self.clock)
 		self.qmp_log = []
 		self.restarts = []
@@ -335,6 +324,18 @@ class RunTests(InstallerTestCase):
 		with open(os.path.join(self.directory.name, ".config", "wn", "config.json")) as config_file:
 			self.assertEqual(json.load(config_file), {"backend": "utm", "vm_name": "Windows"})
 
+	def test_no_battery_and_no_camera_with_shares_does_not_suggest_uninstall(self):
+		share = share_item()
+		config_file_path = os.path.join(self.directory.name, ".config", "wn", "config.json")
+		os.makedirs(os.path.dirname(config_file_path))
+		with open(config_file_path, "w") as config_file:
+			json.dump({"vm_name": "Windows", "shares": [share]}, config_file)
+		agent_path = os.path.join(self.directory.name, "Library", "LaunchAgents", "com.wn.agent.plist")
+		os.makedirs(os.path.dirname(agent_path))
+		open(agent_path, "w").close()
+		self.installer(battery=False, camera=False).run()
+		self.assertNotIn("--uninstall", self.output.getvalue())
+
 	def test_no_battery_and_no_camera_without_the_agent_says_nothing_about_it(self):
 		self.installer(battery=False, camera=False).run()
 		self.assertNotIn("--uninstall", self.output.getvalue())
@@ -528,7 +529,7 @@ class RestartUTMTests(unittest.TestCase):
 				alive["checks"] -= 1
 				result.returncode = 0 if alive["checks"] > 0 else 1
 			return result
-		clock = FakeClock()
+		clock = FakeClock(1000.0)
 		restart_utm(run=run, sleep=clock.sleep, clock=clock)
 		self.assertEqual(commands[0], ["pgrep", "-x", "UTM"])
 		self.assertEqual(commands[1], ["kill", "4242"])

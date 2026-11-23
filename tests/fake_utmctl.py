@@ -3,6 +3,8 @@
 State format: {"vms": [{"uuid", "name", "status", "ip_addresses"}], "fail": {command: stderr}, "calls": [argv]}.
 A VM with "request_stop_lists": N goes to "stopping" on ``stop --request`` and to "stopped" after N more ``list``
 calls. N = -1 means Windows never shuts down, so the VM stays "started".
+``file push <vm> <path>`` stores stdin as UTF-8 text in the VM's "files" dict, and ``file pull`` prints it.
+``exec <vm> --cmd ...`` only checks the VM; the call is recorded in "calls".
 """
 
 import json
@@ -70,11 +72,19 @@ def ip_address(state, arguments):
 
 def file_operation(state, arguments):
 	operation, name, guest_path = arguments
-	files = find_vm(state, name).get("files", {})
+	vm = find_vm(state, name)
+	if operation == "push":
+		vm.setdefault("files", {})[guest_path] = sys.stdin.buffer.read().decode("utf-8")
+		return
+	files = vm.get("files", {})
 	if operation != "pull" or guest_path not in files:
 		print("Error: cannot open file", file=sys.stderr)
 		sys.exit(1)
 	sys.stdout.write(files[guest_path])
+
+
+def exec_command(state, arguments):
+	find_vm(state, arguments[0])
 
 
 def delete(state, arguments):
@@ -89,6 +99,7 @@ COMMANDS = {
 	"stop": stop,
 	"ip-address": ip_address,
 	"file": file_operation,
+	"exec": exec_command,
 	"delete": delete,
 }
 

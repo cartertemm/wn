@@ -12,10 +12,13 @@ import time
 import unittest
 from unittest import mock
 
+import fakes
 from fake_qmp_server import TCPFakeQMPServer, reply
 from fakes import unused_port, write_config
 from wn import agent
 from wn.agent import (
+	BOOTOUT_POLL_SECONDS,
+	BOOTOUT_WAIT_SECONDS,
 	LAUNCHD_LABEL,
 	AgentError,
 	CameraSupervisor,
@@ -33,7 +36,7 @@ from wn.appbundle import AppBundleError, app_path, camera_executable_path, execu
 from wn.battery_file import BatteryFile
 from wn.battery_sync import BLOCK_SIZE, decode_block
 from wn.cli import main
-from wn.config import Config
+from wn.config import Config, config_path
 
 UPDATED = "2026-11-11T12:00:00Z"
 CHARGING_NO_ESTIMATE = (
@@ -104,6 +107,17 @@ def stub_power_change_waiter(test):
 	patcher = mock.patch("wn.agent.power_change_waiter", return_value=FAKE_WAITER)
 	patcher.start()
 	test.addCleanup(patcher.stop)
+
+
+def stub_share_supervisor(test):
+	patcher = mock.patch("wn.agent.SftpServerSupervisor")
+	supervisor_class = patcher.start()
+	test.addCleanup(patcher.stop)
+	return supervisor_class
+
+
+def share_item(name="Projects", **changes):
+	return fakes.share_item(name=name, mac_path="/Users/c/" + name, vm_path="C:\\Users\\c\\" + name, **changes)
 
 
 class FakeLaunchctl:
@@ -234,11 +248,33 @@ class LaunchAgentTests(unittest.TestCase):
 		with open(self.path, "rb") as plist_file:
 			self.assertEqual(plistlib.load(plist_file)["WorkingDirectory"], "/a&b<c>")
 
+	def launchctl_verbs(self):
+		return [call.args[0][1] for call in self.run.call_args_list if call.args[0][0] == "/bin/launchctl"]
+
+	def answer_print_with(self, results):
+		self.run.side_effect = lambda argv, **_: results.pop(0) if argv[1:2] == ["print"] else completed()
+
 	def test_install_replaces_a_loaded_agent(self):
 		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		self.answer_print_with([completed("", returncode=LAUNCHCTL_NOT_LOADED)])
 		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
-		commands = [call.args[0][1] for call in self.run.call_args_list if call.args[0][0] == "/bin/launchctl"]
-		self.assertEqual(commands, ["bootstrap", "bootout", "bootstrap"])
+		self.assertEqual(self.launchctl_verbs(), ["bootstrap", "bootout", "print", "bootstrap"])
+
+	def test_install_waits_until_the_old_agent_is_gone(self):
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		self.answer_print_with([completed(), completed(), completed("", returncode=LAUNCHCTL_NOT_LOADED)])
+		sleep = mock.Mock()
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501, sleep=sleep)
+		self.assertEqual(self.launchctl_verbs(), ["bootstrap", "bootout", "print", "print", "print", "bootstrap"])
+		sleep.assert_has_calls([mock.call(BOOTOUT_POLL_SECONDS)] * 2)
+		self.assertEqual(sleep.call_count, 2)
+
+	def test_install_stops_waiting_for_the_old_agent_after_the_limit(self):
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501)
+		sleep = mock.Mock()
+		install_launch_agent("/usr/bin/python3", "/repo", run=self.run, uid=501, sleep=sleep)
+		self.assertEqual(sleep.call_count * BOOTOUT_POLL_SECONDS, BOOTOUT_WAIT_SECONDS)
+		self.assertEqual(self.launchctl_verbs()[-1], "bootstrap")
 
 	def test_install_reports_launchctl_failure(self):
 		self.run.side_effect = [completed(), completed(), completed(), subprocess.CompletedProcess([], 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")]
@@ -267,6 +303,7 @@ class AgentCommandTests(unittest.TestCase):
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		stub_power_change_waiter(self)
+		self.share_supervisor_class = stub_share_supervisor(self)
 
 	def run_cli(self, *argv):
 		stdout = io.StringIO()
@@ -381,6 +418,7 @@ class AgentControlTests(unittest.TestCase):
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		stub_power_change_waiter(self)
+		self.share_supervisor_class = stub_share_supervisor(self)
 		self.plist = os.path.join(self.home.name, "Library", "LaunchAgents", LAUNCHD_LABEL + ".plist")
 
 	def run_cli(self, launchctl, *argv):
@@ -612,6 +650,7 @@ class AgentLoopTests(unittest.TestCase):
 		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		stub_share_supervisor(self)
 
 	def run_agent(self, config, wait):
 		output = io.StringIO()
@@ -760,6 +799,7 @@ class AgentCameraTests(unittest.TestCase):
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		stub_power_change_waiter(self)
+		self.share_supervisor_class = stub_share_supervisor(self)
 
 	def run_cli(self, *argv):
 		stdout = io.StringIO()
@@ -828,6 +868,154 @@ class AgentCameraTests(unittest.TestCase):
 		with mock.patch("wn.agent.subprocess.run", FakeLaunchctl()):
 			stdout = self.run_cli("status")[1]
 		self.assertIn("Camera: off in the config", stdout)
+
+
+class AgentShareTests(unittest.TestCase):
+	def setUp(self):
+		self.home = tempfile.TemporaryDirectory()
+		self.addCleanup(self.home.cleanup)
+		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		stub_power_change_waiter(self)
+		self.share_supervisor_class = stub_share_supervisor(self)
+
+	def run_cli(self, *argv):
+		stdout = io.StringIO()
+		stderr = io.StringIO()
+		exit_code = main(["agent"] + list(argv), stdout=stdout, stderr=stderr)
+		return exit_code, stdout.getvalue(), stderr.getvalue()
+
+	def test_shares_only_agent_runs(self):
+		write_config(self.home.name, {"battery_sync": False, "camera": False, "shares": [share_item()]})
+		with mock.patch("wn.agent.run_sync_loop") as loop, mock.patch("wn.agent.time.sleep", side_effect=KeyboardInterrupt):
+			exit_code, _, _ = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 0)
+		loop.assert_not_called()
+		self.share_supervisor_class.return_value.start.assert_called_once_with()
+		self.share_supervisor_class.return_value.stop.assert_called_once_with()
+
+	def test_fails_when_shares_belong_to_another_vm(self):
+		write_config(self.home.name, {"battery_sync": False, "camera": False, "shares": [share_item(vm="Other")]})
+		exit_code, _, stderr = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("battery_sync and camera are off", stderr)
+		self.share_supervisor_class.assert_not_called()
+
+	def test_share_supervisor_runs_with_no_shares(self):
+		with mock.patch("wn.agent.run_sync_loop"):
+			exit_code, stdout, _ = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 0)
+		self.assertEqual(self.share_supervisor_class.call_args.args, (mock.ANY,))
+		self.assertEqual(self.share_supervisor_class.call_args.kwargs, {"popen": subprocess.Popen, "load": mock.ANY})
+		self.share_supervisor_class.return_value.start.assert_called_once_with()
+
+	def test_invalid_share_does_not_stop_battery_sync_or_the_camera(self):
+		write_config(self.home.name, {"camera": True, "shares": [share_item(), share_item(name="Bad", port=1)]})
+		with mock.patch("wn.agent.run_sync_loop") as loop, mock.patch("wn.agent.CameraSupervisor") as camera:
+			exit_code, _, stderr = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 0, stderr)
+		loop.assert_called_once()
+		camera.return_value.start.assert_called_once_with()
+		self.share_supervisor_class.return_value.start.assert_called_once_with()
+
+	def test_share_supervisor_loads_only_the_valid_shares_and_logs_the_rest(self):
+		write_config(self.home.name, {"shares": [share_item(), share_item(name="Bad", port=1)]})
+		with mock.patch("wn.agent.run_sync_loop"):
+			self.run_cli("start", "--foreground")
+		log = self.share_supervisor_class.call_args.args[0]
+		config = self.share_supervisor_class.call_args.kwargs["load"](config_path())
+		self.assertEqual([share.name for share in config.shares], ["Projects"])
+		self.assertIn("shares: ignoring an invalid share until it is fixed: {}: shares[1]: port must be a whole number from 47321 to 47420\n".format(config_path()), log.getvalue())
+
+	def test_invalid_share_still_fails_other_commands(self):
+		write_config(self.home.name, {"shares": [share_item(port=1)]})
+		exit_code, _, stderr = self.run_cli("status")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("wn: error: {}: shares[0]: port must be".format(config_path()), stderr)
+
+	def test_sigterm_stops_the_share_servers_before_the_camera(self):
+		write_config(self.home.name, {"camera": True})
+		calls = mock.Mock()
+		self.share_supervisor_class.return_value.stop.side_effect = lambda: calls.share_stop()
+		def loop(*_):
+			os.kill(os.getpid(), signal.SIGTERM)
+			time.sleep(1)
+		with mock.patch("wn.agent.CameraSupervisor") as camera_class, mock.patch("wn.agent.run_sync_loop", side_effect=loop):
+			camera_class.return_value.stop.side_effect = lambda: calls.camera_stop()
+			exit_code, _, _ = self.run_cli("start", "--foreground")
+		self.assertEqual(exit_code, 0)
+		self.assertEqual(calls.mock_calls, [mock.call.share_stop(), mock.call.camera_stop()])
+
+	def status(self, shares, running=False):
+		write_config(self.home.name, {"qmp_socket": "tcp:127.0.0.1:{}".format(unused_port()), "shares": shares})
+		if running:
+			os.makedirs(os.path.dirname(pid_file_path()), exist_ok=True)
+			with open(pid_file_path(), "w") as pid_file:
+				pid_file.write("{}\n".format(os.getpid()))
+		with mock.patch("wn.agent.subprocess.run", FakeLaunchctl()):
+			return self.run_cli("status")[1]
+
+	def write_share_state(self, entry):
+		directory = os.path.join(self.home.name, "Library", "Application Support", "wn", "shares")
+		os.makedirs(directory, exist_ok=True)
+		with open(os.path.join(directory, "state.json"), "w") as state_file:
+			json.dump({"updated": UPDATED, "shares": {"Projects": entry}}, state_file)
+
+	def test_status_with_no_shares(self):
+		self.assertIn("Shares: none in the config\n", self.status([]))
+
+	def test_status_shows_a_serving_share(self):
+		self.write_share_state({"state": "serving", "detail": "192.168.64.1:47321", "pid": 4242})
+		stdout = self.status([share_item()], running=True)
+		self.assertIn("Shares: 1 (1 Mac to Windows)\n", stdout)
+		self.assertIn("Share Projects: serving /Users/c/Projects on 192.168.64.1:47321, PID 4242\n", stdout)
+
+	def test_status_shows_a_waiting_share(self):
+		self.write_share_state({"state": "waiting", "detail": "the VM network is not up", "pid": None})
+		self.assertIn("Share Projects: waiting, the VM network is not up\n", self.status([share_item()], running=True))
+
+	def test_status_of_a_share_with_no_state(self):
+		self.assertIn("Share Projects: no state yet\n", self.status([share_item()], running=True))
+
+	def test_status_when_the_agent_is_not_running(self):
+		self.write_share_state({"state": "serving", "detail": "192.168.64.1:47321", "pid": 4242})
+		self.assertIn("Share Projects: not served, the agent is not running\n", self.status([share_item()]))
+
+	def test_status_leaves_out_shares_of_another_vm(self):
+		self.assertIn("Shares: none in the config\n", self.status([share_item(vm="Other")]))
+
+	def uninstall(self, shares, installed=True):
+		write_config(self.home.name, {"shares": shares})
+		os.makedirs(os.path.dirname(launch_agent_path()))
+		if installed:
+			open(launch_agent_path(), "w").close()
+		with mock.patch("wn.agent.uninstall_launch_agent", return_value=installed) as uninstall:
+			exit_code, stdout, _ = self.run_cli("--uninstall")
+		self.assertEqual(exit_code, 0)
+		uninstall.assert_called_once_with()
+		return stdout
+
+	def test_uninstall_warns_about_one_share(self):
+		stdout = self.uninstall([share_item()])
+		self.assertTrue(stdout.startswith("1 share is still in the config. It stops working until you install the agent again. To remove it for good, run wn unshare NAME before you uninstall.\n"))
+
+	def test_uninstall_warns_about_shares(self):
+		stdout = self.uninstall([share_item(), share_item(name="Music", port=47322)])
+		self.assertTrue(stdout.startswith("2 shares are still in the config. They stop working until you install the agent again. To remove them for good, run wn unshare NAME for each before you uninstall.\n"))
+
+	def test_uninstall_without_shares_does_not_warn(self):
+		self.assertNotIn("still in the config", self.uninstall([]))
+
+	def test_uninstall_counts_only_the_shares_of_this_vm(self):
+		stdout = self.uninstall([share_item(), share_item(name="Music", vm="Other", port=47322)])
+		self.assertTrue(stdout.startswith("1 share is still in the config."))
+
+	def test_uninstall_with_only_shares_of_another_vm_does_not_warn(self):
+		self.assertNotIn("still in the config", self.uninstall([share_item(vm="Other")]))
+
+	def test_uninstall_when_not_installed_does_not_warn(self):
+		self.assertEqual(self.uninstall([share_item()], installed=False), "The launch agent is not installed\n")
 
 
 if __name__ == "__main__":

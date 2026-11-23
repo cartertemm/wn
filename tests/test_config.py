@@ -4,7 +4,16 @@ import tempfile
 import unittest
 from unittest import mock
 
-from wn.config import Config, ConfigError, config_path, load_config, update_config_file
+from wn.config import REMOVE_SETTING, Config, ConfigError, config_path, load_config, load_config_skipping_bad_shares, update_config_file
+from wn.shares import MAC_TO_VM, Share
+
+
+SHARE_PORT = 47321
+BAD_PORT = 1
+
+
+def make_share(port=SHARE_PORT):
+	return Share(name="docs", vm="Windows", direction=MAC_TO_VM, mac_path="/Users/you/Documents", vm_path="C:\\Users\\you\\Mac", read_only=False, port=port)
 
 
 class ConfigTests(unittest.TestCase):
@@ -174,6 +183,66 @@ class ConfigTests(unittest.TestCase):
 		self.write_config("[]")
 		with self.assertRaises(ConfigError):
 			update_config_file({"camera": True})
+
+	def test_shares_default_to_none(self):
+		self.assertEqual(load_config().shares, ())
+
+	def test_shares_become_share_objects(self):
+		share = make_share()
+		self.write_config(json.dumps({"shares": [share.to_dict()]}))
+		self.assertEqual(load_config().shares, (share,))
+
+	def test_bad_share_raises_config_error_naming_the_file(self):
+		self.write_config(json.dumps({"shares": [make_share(BAD_PORT).to_dict()]}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn(config_path(), str(context.exception))
+		self.assertIn("shares[0]", str(context.exception))
+
+	def test_shares_must_be_a_list(self):
+		self.write_config(json.dumps({"shares": {}}))
+		with self.assertRaises(ConfigError) as context:
+			load_config()
+		self.assertIn("has the wrong type", str(context.exception))
+
+	def test_written_shares_load_again(self):
+		share = make_share()
+		update_config_file({"shares": [share.to_dict()]})
+		self.assertEqual(load_config().shares, (share,))
+
+	def test_skipping_load_leaves_out_bad_shares_and_names_them(self):
+		good = make_share()
+		other = Share(name="other", vm="Windows", direction=MAC_TO_VM, mac_path="/Users/you/Other", vm_path="C:\\Users\\you\\Other", read_only=False, port=SHARE_PORT + 1)
+		self.write_config(json.dumps({"vm_name": "Win", "shares": [good.to_dict(), dict(make_share(BAD_PORT).to_dict(), name="other"), other.to_dict()]}))
+		config, problems = load_config_skipping_bad_shares()
+		self.assertEqual(config.vm_name, "Win")
+		self.assertEqual(config.shares, (good, other))
+		self.assertEqual(problems, ["{}: shares[1]: port must be a whole number from 47321 to 47420".format(config_path())])
+
+	def test_skipping_load_leaves_out_shares_that_are_not_a_list(self):
+		self.write_config(json.dumps({"camera": True, "shares": {}}))
+		config, problems = load_config_skipping_bad_shares()
+		self.assertEqual((config.camera, config.shares), (True, ()))
+		self.assertEqual(problems, ["{}: setting 'shares' has the wrong type".format(config_path())])
+
+	def test_skipping_load_still_checks_the_other_settings(self):
+		self.write_config(json.dumps({"camera": "yes", "shares": [make_share(BAD_PORT).to_dict()]}))
+		with self.assertRaisesRegex(ConfigError, "'camera' has the wrong type"):
+			load_config_skipping_bad_shares()
+
+	def test_skipping_load_of_a_missing_file_gives_defaults(self):
+		self.assertEqual(load_config_skipping_bad_shares(), (Config(), []))
+
+	def test_update_removes_a_setting(self):
+		self.write_config(json.dumps({"camera": True, "shares": []}))
+		update_config_file({"shares": REMOVE_SETTING, "battery_sync": REMOVE_SETTING})
+		with open(config_path()) as config_file:
+			self.assertEqual(json.load(config_file), {"camera": True})
+
+	def test_update_keeps_none_as_a_value(self):
+		update_config_file({"battery_file": None})
+		with open(config_path()) as config_file:
+			self.assertEqual(json.load(config_file), {"battery_file": None})
 
 	def test_top_level_must_be_object(self):
 		self.write_config("[]")

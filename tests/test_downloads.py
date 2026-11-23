@@ -3,18 +3,25 @@ import http.client
 import io
 import json
 import os
+import stat
 import tempfile
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.response
+import zipfile
+from unittest import mock
 
 from wn import downloads
 from wn.downloads import (
 	CACHE_FILE_NAME,
 	DownloadError,
 	Downloads,
+	ShareTools,
+	ZipMember,
+	extract_verified_member,
 	fetch_all,
+	fetch_share_tools,
 	parse_github_digest,
 	parse_nvda_version,
 	parse_product_edition_id,
@@ -456,6 +463,174 @@ class ProgressTests(unittest.TestCase):
 		now[0] = downloads.PROGRESS_INTERVAL_SECONDS
 		progress.update(42 * downloads.BYTES_PER_MB)
 		self.assertEqual(lines, ["NVDA installer: 42.0 MB"])
+
+
+RCLONE_MAC_URL = "https://downloads.example.invalid/rclone-mac.zip"
+RCLONE_WINDOWS_URL = "https://downloads.example.invalid/rclone-windows.zip"
+WINFSP_URL = "https://github.com/example/winfsp.msi"
+RCLONE_MAC_NAME = "rclone-mac.zip"
+RCLONE_WINDOWS_NAME = "rclone-windows.zip"
+WINFSP_NAME = "winfsp.msi"
+RCLONE_MAC_DATA = b"rclone mac" * 3000
+RCLONE_WINDOWS_DATA = b"rclone windows" * 3000
+WINFSP_DATA = b"winfsp" * 3000
+MEMBER_NAME = "folder/rclone"
+MEMBER_DATA = b"the rclone binary" * 1000
+EXECUTABLE_MODE = 0o755
+WRONG_MODE = 0o600
+OLD_TIME_NS = 1000000000
+
+
+class ShareToolsTests(unittest.TestCase):
+	def setUp(self):
+		self.directory = tempfile.TemporaryDirectory()
+		self.addCleanup(self.directory.cleanup)
+		self.downloads_dir = os.path.join(self.directory.name, "downloads")
+		self.opener = FakeOpener()
+		self.opener.routes[RCLONE_MAC_URL] = RCLONE_MAC_DATA
+		self.opener.routes[RCLONE_WINDOWS_URL] = RCLONE_WINDOWS_DATA
+		self.opener.routes[WINFSP_URL] = WINFSP_DATA
+		self.lines = []
+
+	def patch_sources(self):
+		for name, source in (
+			("RCLONE_MAC_SOURCE", downloads._Source(RCLONE_MAC_URL, RCLONE_MAC_NAME, sha256_of(RCLONE_MAC_DATA))),
+			("RCLONE_WINDOWS_SOURCE", downloads._Source(RCLONE_WINDOWS_URL, RCLONE_WINDOWS_NAME, sha256_of(RCLONE_WINDOWS_DATA))),
+			("WINFSP_SOURCE", downloads._Source(WINFSP_URL, WINFSP_NAME, sha256_of(WINFSP_DATA))),
+		):
+			patcher = mock.patch.object(downloads, name, source)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+	def fetch(self):
+		return fetch_share_tools(self.downloads_dir, report=self.lines.append, opener=self.opener)
+
+	def path(self, name):
+		return os.path.join(self.downloads_dir, name)
+
+	def make_zip(self):
+		zip_path = os.path.join(self.directory.name, "tools.zip")
+		with zipfile.ZipFile(zip_path, "w") as archive:
+			archive.writestr("folder/rclone.1", b"manual page")
+			archive.writestr(MEMBER_NAME, MEMBER_DATA)
+			archive.writestr("rclone", b"top level decoy")
+		return zip_path
+
+	def destination(self):
+		return os.path.join(self.directory.name, "bin", "rclone")
+
+	def test_pinned_sources_use_the_published_hashes(self):
+		self.assertEqual(downloads.RCLONE_MAC_SOURCE, downloads._Source(
+			"https://downloads.rclone.org/v1.76.0/rclone-v1.76.0-osx-arm64.zip",
+			"rclone-v1.76.0-osx-arm64.zip",
+			"e72dc90b70f4947a7b72b61bde4a4fbba5777b2874fb448951ffdde67ebd0ab7",
+		))
+		self.assertEqual(downloads.RCLONE_WINDOWS_SOURCE, downloads._Source(
+			"https://downloads.rclone.org/v1.76.0/rclone-v1.76.0-windows-arm64.zip",
+			"rclone-v1.76.0-windows-arm64.zip",
+			"c406c8a69a5a408e50624aa990fbb0a6266b3a4e83782a94de3cb96f50f86f10",
+		))
+		self.assertEqual(downloads.WINFSP_SOURCE, downloads._Source(
+			"https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi",
+			"winfsp-2.1.25156.msi",
+			"073a70e00f77423e34bed98b86e600def93393ba5822204fac57a29324db9f7a",
+		))
+		self.assertEqual(downloads.RCLONE_MAC_BINARY, ZipMember("rclone-v1.76.0-osx-arm64/rclone", "da7c43d491e41966f4af7f5f4ac34f7dac2c8866e3675393ef0316ebc57ccd42"))
+		self.assertEqual(downloads.RCLONE_WINDOWS_BINARY, ZipMember("rclone-v1.76.0-windows-arm64/rclone.exe", "666b57912d75ecc67b38960c4e28448e94b61d7977f5f709e25c0c7a3c6d7fcd"))
+
+	def test_fetch_share_tools_downloads_and_verifies_three_files(self):
+		self.patch_sources()
+		result = self.fetch()
+		self.assertEqual(result, ShareTools(self.path(RCLONE_MAC_NAME), self.path(RCLONE_WINDOWS_NAME), self.path(WINFSP_NAME)))
+		for name, data in ((RCLONE_MAC_NAME, RCLONE_MAC_DATA), (RCLONE_WINDOWS_NAME, RCLONE_WINDOWS_DATA), (WINFSP_NAME, WINFSP_DATA)):
+			with open(self.path(name), "rb") as file:
+				self.assertEqual(file.read(), data)
+		with open(self.path(CACHE_FILE_NAME), encoding="utf-8") as file:
+			cache = json.load(file)
+		self.assertEqual(sorted(entry["role"] for entry in cache.values()), sorted([downloads.RCLONE_MAC_ROLE, downloads.RCLONE_WINDOWS_ROLE, downloads.WINFSP_ROLE]))
+
+	def test_second_run_downloads_nothing(self):
+		self.patch_sources()
+		self.fetch()
+		self.opener.requests.clear()
+		self.lines.clear()
+		self.fetch()
+		self.assertEqual(self.opener.requests, [])
+		self.assertEqual(self.lines, [
+			"rclone for macOS: already downloaded and verified",
+			"rclone for Windows: already downloaded and verified",
+			"WinFsp installer: already downloaded and verified",
+		])
+
+	def test_wrong_file_is_deleted(self):
+		self.patch_sources()
+		self.opener.routes[RCLONE_MAC_URL] = b"tampered" * 100
+		with self.assertRaises(DownloadError) as caught:
+			self.fetch()
+		self.assertIn("SHA256", str(caught.exception))
+		self.assertFalse(os.path.exists(self.path(RCLONE_MAC_NAME)))
+		self.assertFalse(os.path.exists(self.path(RCLONE_MAC_NAME) + downloads.PART_SUFFIX))
+
+	def test_extract_takes_only_the_exact_member(self):
+		destination = self.destination()
+		result = extract_verified_member(self.make_zip(), ZipMember(MEMBER_NAME, sha256_of(MEMBER_DATA)), destination, EXECUTABLE_MODE)
+		self.assertEqual(result, destination)
+		with open(destination, "rb") as file:
+			self.assertEqual(file.read(), MEMBER_DATA)
+		self.assertEqual(stat.S_IMODE(os.stat(destination).st_mode), EXECUTABLE_MODE)
+		self.assertEqual(os.listdir(os.path.dirname(destination)), ["rclone"])
+
+	def test_extract_with_a_wrong_hash_deletes_the_file(self):
+		destination = self.destination()
+		with self.assertRaises(DownloadError) as caught:
+			extract_verified_member(self.make_zip(), ZipMember(MEMBER_NAME, "0" * 64), destination, EXECUTABLE_MODE)
+		self.assertIn("SHA256", str(caught.exception))
+		self.assertEqual(os.listdir(os.path.dirname(destination)), [])
+
+	def test_extract_of_a_missing_member_raises_download_error(self):
+		destination = self.destination()
+		with self.assertRaises(DownloadError) as caught:
+			extract_verified_member(self.make_zip(), ZipMember("other/rclone", sha256_of(MEMBER_DATA)), destination, EXECUTABLE_MODE)
+		self.assertIn("other/rclone", str(caught.exception))
+		self.assertEqual(os.listdir(os.path.dirname(destination)), [])
+
+	def test_extract_keeps_a_matching_file(self):
+		zip_path = self.make_zip()
+		member = ZipMember(MEMBER_NAME, sha256_of(MEMBER_DATA))
+		destination = self.destination()
+		extract_verified_member(zip_path, member, destination, EXECUTABLE_MODE)
+		os.utime(destination, ns=(OLD_TIME_NS, OLD_TIME_NS))
+		modified = os.stat(destination).st_mtime_ns
+		extract_verified_member(zip_path, member, destination, EXECUTABLE_MODE)
+		self.assertEqual(os.stat(destination).st_mtime_ns, modified)
+
+	def write_old_destination(self):
+		destination = self.destination()
+		os.makedirs(os.path.dirname(destination), exist_ok=True)
+		with open(destination, "wb") as file:
+			file.write(b"old binary")
+		return destination
+
+	def test_extract_replaces_a_wrong_file(self):
+		destination = self.write_old_destination()
+		extract_verified_member(self.make_zip(), ZipMember(MEMBER_NAME, sha256_of(MEMBER_DATA)), destination, EXECUTABLE_MODE)
+		with open(destination, "rb") as file:
+			self.assertEqual(file.read(), MEMBER_DATA)
+
+	def test_extract_with_a_wrong_hash_deletes_an_old_file(self):
+		destination = self.write_old_destination()
+		with self.assertRaises(DownloadError):
+			extract_verified_member(self.make_zip(), ZipMember(MEMBER_NAME, "0" * 64), destination, EXECUTABLE_MODE)
+		self.assertEqual(os.listdir(os.path.dirname(destination)), [])
+
+	def test_extract_fixes_the_mode_of_a_matching_file(self):
+		zip_path = self.make_zip()
+		member = ZipMember(MEMBER_NAME, sha256_of(MEMBER_DATA))
+		destination = self.destination()
+		extract_verified_member(zip_path, member, destination, EXECUTABLE_MODE)
+		os.chmod(destination, WRONG_MODE)
+		extract_verified_member(zip_path, member, destination, EXECUTABLE_MODE)
+		self.assertEqual(stat.S_IMODE(os.stat(destination).st_mode), EXECUTABLE_MODE)
 
 
 if __name__ == "__main__":

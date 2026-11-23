@@ -111,6 +111,14 @@ class UTMBackend(Backend):
 		"""Return the text of a file in the guest. Needs the guest agent."""
 		return self._run_for_vm("file", "pull", self.vm_name, guest_path)
 
+	def push_file(self, guest_path, data):
+		"""Write ``data`` (bytes) to a file in the guest. Needs the guest agent."""
+		self._run_for_vm("file", "push", self.vm_name, guest_path, input_bytes=data)
+
+	def exec_command(self, *argv):
+		"""Start a program in the guest as SYSTEM. utmctl returns before it finishes and does not report its exit code."""
+		self._run_for_vm("exec", self.vm_name, "--cmd", *argv)
+
 	def qmp_socket_path(self, session=False):
 		return qmp_socket_file(self.vm_name, session)
 
@@ -129,10 +137,10 @@ class UTMBackend(Backend):
 		names = ", ".join(name for _, _, name in machines) or "none"
 		return UnknownVMError("UTM has no VM named '{}'. Known VMs: {}".format(self.vm_name, names))
 
-	def _run_for_vm(self, *arguments):
+	def _run_for_vm(self, *arguments, input_bytes=None):
 		"""Run a utmctl command about the VM. On failure, report an unknown VM name before the raw error."""
 		try:
-			return self._run(*arguments)
+			return self._run(*arguments, input_bytes=input_bytes)
 		except (UTMCtlMissingError, UTMCtlTimeoutError):
 			raise
 		except UTMCtlError as error:
@@ -144,14 +152,20 @@ class UTMBackend(Backend):
 				raise self._unknown_vm_error(machines) from None
 			raise
 
-	def _run(self, *arguments):
+	def _run(self, *arguments, input_bytes=None):
 		command = self.utmctl_command + list(arguments)
 		try:
-			result = subprocess.run(command, capture_output=True, text=True, timeout=UTMCTL_TIMEOUT_SECONDS)
+			if input_bytes is None:
+				result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=UTMCTL_TIMEOUT_SECONDS)
+			else:
+				result = subprocess.run(command, input=input_bytes, capture_output=True, timeout=UTMCTL_TIMEOUT_SECONDS)
 		except subprocess.TimeoutExpired:
 			raise UTMCtlTimeoutError("utmctl {} did not finish within {} s. UTM may be showing a dialog or waiting for an Automation permission prompt. Check UTM and System Settings > Privacy & Security > Automation, then try again".format(arguments[0], UTMCTL_TIMEOUT_SECONDS)) from None
 		except OSError as error:
 			raise UTMCtlMissingError("cannot run utmctl at {}: {}. Install UTM or set utmctl_path".format(self.utmctl_command[0], error)) from None
+		if input_bytes is not None:
+			result.stdout = result.stdout.decode("utf-8", "replace")
+			result.stderr = result.stderr.decode("utf-8", "replace")
 		if result.returncode != 0:
 			detail = result.stderr.strip() or result.stdout.strip() or "no output"
 			if detail == VM_NOT_FOUND_MESSAGE:
