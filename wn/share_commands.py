@@ -60,7 +60,6 @@ from wn.shares import (
 	check_mac_path,
 	check_new_share,
 	check_share_name,
-	check_vm_path,
 	default_share_name,
 	normalize_vm_path,
 	pick_port,
@@ -87,7 +86,6 @@ BLOCKED_STATE = "blocked"
 GUEST_ERROR_STATE = "error"
 INCOMPLETE_STATE = "incomplete"
 UNKNOWN_STATE = "unknown"
-EXIT_SUCCESS = 0
 WINFSP_OK = "ok"
 FILES_PATH_STATE = "files"
 JUNCTION_PATH_STATE = "junction"
@@ -155,13 +153,6 @@ def _status_key(shares, name):
 	return next((key for key in shares if key.casefold() == name.casefold()), None)
 
 
-def _log_line(line):
-	"""Return one line of a guest log as text. Windows PowerShell 5.1 can send a line as an object that holds it in ``value``."""
-	if isinstance(line, dict) and "value" in line:
-		return str(line["value"])
-	return str(line)
-
-
 def _status_entry(shares, name):
 	return shares.get(_status_key(shares, name))
 
@@ -207,7 +198,7 @@ class ShareCommands:
 	def __init__(self, config, backend, output, runner=None, paths=None, fetch_tools=fetch_share_tools,
 			install_binaries=install_binaries, ensure_keys=ensure_keys, new_host_key=new_host_key, agent_installed=agent_is_installed,
 			agent_running=agent_is_running, install_agent=install_agent, offer_factory=FileOffer,
-			can_bind=can_bind, address_present=host_address_present, clock=time.monotonic, wall_clock=time.time, sleep=time.sleep):
+			can_bind=can_bind, address_present=host_address_present, clock=time.monotonic, sleep=time.sleep):
 		self.config = config
 		self.backend = backend
 		self.output = output
@@ -224,7 +215,6 @@ class ShareCommands:
 		self.can_bind = can_bind
 		self.address_present = address_present
 		self.clock = clock
-		self.wall_clock = wall_clock
 		self.sleep = sleep
 
 	def _print(self, line):
@@ -305,7 +295,7 @@ class ShareCommands:
 
 	def _agent_serves_shares(self, state):
 		"""Return True when the agent's state file comes from a share supervisor of this wn that wrote it lately."""
-		age = seconds_since(state.get("updated"), self.wall_clock())
+		age = seconds_since(state.get("updated"), time.time())
 		return state.get("protocol") == SHARE_PROTOCOL_VERSION and age is not None and age < AGENT_STATE_MAX_AGE_SECONDS
 
 	def _ensure_agent(self):
@@ -373,7 +363,7 @@ class ShareCommands:
 			raise ShareError("the file Windows received does not match its SHA-256 ({}). Windows deleted it. Run wn {} again".format(result["mismatch"], SHARE_COMMAND))
 		winfsp_exit = result["winfsp_exit"]
 		if winfsp_exit and winfsp_exit != RESTART_NEEDED_EXIT_CODE:
-			raise ShareError("WinFsp setup failed in Windows with exit code {}:\n".format(winfsp_exit) + "\n".join(_log_line(line) for line in result["winfsp_log"]))
+			raise ShareError("WinFsp setup failed in Windows with exit code {}:\n".format(winfsp_exit) + "\n".join(result["winfsp_log"]))
 		if need_winfsp:
 			self._print(WINFSP_NOTICE)
 		if winfsp_exit == RESTART_NEEDED_EXIT_CODE:
@@ -437,8 +427,9 @@ class ShareCommands:
 			except (WnError, OSError) as error:
 				problems.append("Also could not remove share '{}' from the config: {}".format(name, error))
 				return problems
-			remove_file(self.paths.log_file(name))
-		remove_host_key(self.paths, name)
+			self._remove_share_files(name)
+		else:
+			remove_host_key(self.paths, name)
 		if task_started and not shares_for_vm(load_config().shares, self.config.vm_name):
 			problems.extend(self._clean_up_after_a_rollback(name))
 		return problems
@@ -460,7 +451,6 @@ class ShareCommands:
 	def _add_share(self, mac_dir, vm_dir, read_only, name):
 		mac_path = check_mac_path(mac_dir, read_only)
 		vm_path = normalize_vm_path(vm_dir)
-		check_vm_path(vm_path)
 		name = name or default_share_name(mac_path)
 		check_share_name(name)
 		current = load_config().shares
@@ -530,7 +520,7 @@ class ShareCommands:
 		windows_only = _windows_only_shares(guest or {}, own)
 		if not shares and not windows_only:
 			self._print("No shares. Add one with wn {} <dir-on-mac> <dir-on-vm>".format(SHARE_COMMAND))
-			return EXIT_SUCCESS
+			return
 		if own:
 			mac_state = read_mac_state(self.paths)["shares"]
 			agent_installed = self.agent_installed()
@@ -562,7 +552,6 @@ class ShareCommands:
 			path = guest[key].get("path")
 			self._print("{}: exists only in Windows{}. The Mac has no share by this name, so this folder does not work in Windows. Run wn {} {} to remove it from Windows.".format(
 				key, ", at {}".format(path) if path else "", REMOVE_COMMAND, key))
-		return EXIT_SUCCESS
 
 	def _find_share(self, name):
 		"""Return the config entry of share ``name``, or None and the guest's status when only Windows has it."""
@@ -579,10 +568,13 @@ class ShareCommands:
 			raise ShareError("no share named '{}'. There are no shares".format(name))
 		raise ShareError("no share named '{}'. Shares: {}".format(name, ", ".join(share.name for share in shares)))
 
-	def _remove_mac_side(self, name):
-		self._write_shares(tuple(share for share in load_config().shares if share.name != name))
+	def _remove_share_files(self, name):
 		remove_file(self.paths.log_file(name))
 		remove_host_key(self.paths, name)
+
+	def _remove_mac_side(self, name):
+		self._write_shares(tuple(share for share in load_config().shares if share.name != name))
+		self._remove_share_files(name)
 
 	def _ask_windows_to_remove(self, name):
 		"""Push the remove marker. A failed push is fine when Windows has already dropped the share."""
@@ -665,8 +657,7 @@ class ShareCommands:
 		self._run_script(TASK_SCRIPT, {"restart": False}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 		path = guest[key].get("path")
 		guest = self._wait_for_removal(key, windows_only=True, discard=discard)
-		remove_file(self.paths.log_file(key))
-		remove_host_key(self.paths, key)
+		self._remove_share_files(key)
 		self._print("Removed {} from Windows.{}".format(key, " {} is gone from Windows.".format(path) if path else ""))
 		self._clean_up_after_the_last_share(guest)
 

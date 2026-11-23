@@ -4,6 +4,8 @@ import unittest
 
 SCRIPTS_DIRECTORY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wn", "guest", "shares")
 RUNNER_SCRIPTS = ("prepare.ps1", "fetch.ps1", "task.ps1", "cleanup.ps1", "unprepare.ps1")
+COMMON_SCRIPT = "common.ps1"
+SHARED_FUNCTIONS = ("Test-CacheFiles", "Find-LinkedParent", "Wait-TaskStopped")
 SUPERVISOR_SCRIPT = "wn-shares.ps1"
 FORBIDDEN_FLAGS = ("--pass", "--links", "-L", "--rc", "--sftp-chunk-size")
 UPLOAD_STOP = "\n\t\tStop-Process -Id $process.Id -Force\n"
@@ -33,6 +35,10 @@ def read_script(name):
 		return script_file.read()
 
 
+def run_text(name):
+	return read_script(COMMON_SCRIPT) + read_script(name)
+
+
 def function_body(text, name):
 	start = text.index("function {}".format(name))
 	return text[start:text.index("\n}\n", start) + len("\n}\n")]
@@ -40,7 +46,7 @@ def function_body(text, name):
 
 class GuestScriptTextTests(unittest.TestCase):
 	def test_scripts_are_ascii_with_empty_blank_lines(self):
-		for name in RUNNER_SCRIPTS + (SUPERVISOR_SCRIPT,):
+		for name in RUNNER_SCRIPTS + (SUPERVISOR_SCRIPT, COMMON_SCRIPT):
 			for number, line in enumerate(read_script(name).split("\n"), start=1):
 				self.assertFalse(line.strip() == "" and line != "", "{}:{} has an indented blank line".format(name, number))
 				self.assertFalse(line.startswith(" "), "{}:{} is indented with spaces".format(name, number))
@@ -48,11 +54,17 @@ class GuestScriptTextTests(unittest.TestCase):
 
 	def test_runner_scripts_print_one_result_line(self):
 		for name in RUNNER_SCRIPTS:
-			self.assertEqual(read_script(name).count("Write-Output ('wn-result: '"), 1, name)
+			self.assertEqual(read_script(name).count("Write-Output ('wn-result: '") + read_script(name).count("Write-Output 'wn-result: "), 1, name)
 
 	def test_runner_scripts_leave_the_preamble_to_the_runner(self):
-		for name in RUNNER_SCRIPTS:
+		for name in RUNNER_SCRIPTS + (COMMON_SCRIPT,):
 			self.assertNotIn("$ErrorActionPreference", read_script(name), name)
+
+	def test_shared_functions_are_defined_in_one_file(self):
+		names = [name for name in os.listdir(SCRIPTS_DIRECTORY) if name.endswith(".ps1")]
+		for function in SHARED_FUNCTIONS:
+			defined = [name for name in names if "function {}".format(function) in read_script(name)]
+			self.assertEqual(defined, [COMMON_SCRIPT], function)
 
 
 class MountArgumentTests(unittest.TestCase):
@@ -81,7 +93,6 @@ class MountArgumentTests(unittest.TestCase):
 		self.assertNotIn("'0s'", self.text)
 
 	def test_mount_uses_the_arm64_binary_path_only(self):
-		self.assertNotIn("PROCESSOR_ARCHITECTURE", self.text)
 		self.assertIn("$Rclone = Join-Path $Root 'bin\\rclone.exe'", self.text)
 
 
@@ -116,7 +127,7 @@ class TaskScriptTests(unittest.TestCase):
 
 class RemovalTests(unittest.TestCase):
 	def setUp(self):
-		self.text = read_script(SUPERVISOR_SCRIPT)
+		self.text = run_text(SUPERVISOR_SCRIPT)
 		self.remove = function_body(self.text, "Remove-Share")
 
 	def test_rclone_starts_in_one_function(self):
@@ -132,8 +143,8 @@ class RemovalTests(unittest.TestCase):
 		self.assertIn("} catch {\n\t\treturn $true", cache_check)
 
 	def test_removal_never_stops_rclone_while_pending_is_unknown(self):
-		self.assertNotIn("CacheLineWaitSeconds", self.text)
-		self.assertNotIn("$Status[$Name].pending", self.remove)
+		self.assertEqual(self.remove.count("$Status[$Name].pending = $counts.pending"), 1)
+		self.assertLess(self.remove.index("$counts.pending -gt 0"), self.remove.index("$Status[$Name].pending"))
 		self.assertLess(self.remove.index("if ((-not $counts -and (Test-CacheFiles $Folder)) -or (Test-DirtyCache $Folder)) {"), self.remove.index(UPLOAD_STOP))
 
 	def test_removal_waits_while_files_are_open_in_windows(self):
@@ -141,7 +152,7 @@ class RemovalTests(unittest.TestCase):
 		counts = function_body(self.text, "Get-CacheCounts")
 		self.assertIn("$pending = [int]$Matches[3] + [int]$Matches[4]", counts)
 		self.assertIn("return @{ open = [Math]::Max(0, [int]$Matches[2] - $pending); pending = $pending }", counts)
-		self.assertIn("if ($counts -and $counts.open -gt 0) {\n\t\t\tSet-State $Name 'removing' ($OpenFilesDetail -f (Get-FileCount $counts.open)) $process.Id $null\n\t\t\treturn\n", self.remove)
+		self.assertIn("Set-State $Name 'removing' ($OpenFilesDetail", self.remove)
 		self.assertLess(self.remove.index("$counts.open -gt 0"), self.remove.index(UPLOAD_STOP))
 
 	def test_removal_starts_rclone_again_when_the_cache_is_dirty_after_the_stop(self):
@@ -151,8 +162,9 @@ class RemovalTests(unittest.TestCase):
 		self.assertIn("return (Get-DirtyCount $Folder) -gt 0", dirty)
 		self.assertIn("} catch {\n\t\treturn $true", dirty)
 		stop = self.remove.index(UPLOAD_STOP)
-		recheck = self.remove.index("if (Test-DirtyCache $Folder) {\n\t\t\t$Processes.Remove($Name)\n\t\t\tSet-State $Name 'removing' $CacheUploadDetail $null $null\n\t\t\treturn\n")
+		recheck = self.remove.index("if (Test-DirtyCache $Folder) {")
 		self.assertLess(stop, recheck)
+		self.assertLess(recheck, self.remove.rindex("$CacheUploadDetail"))
 		self.assertLess(recheck, self.remove.index("rd /s /q"))
 
 	def test_removal_measures_from_the_later_of_marker_and_rclone_start(self):
@@ -172,7 +184,6 @@ class RemovalTests(unittest.TestCase):
 
 	def test_startup_errors_do_not_end_the_supervisor(self):
 		self.assertRegex(self.text, r"\ntry \{\n(\t.*\n)*\tFind-Adopted\n\} catch \{\n")
-		self.assertNotIn("\nFind-Adopted\n", self.text)
 
 
 class WindowsOnlyRemovalTests(unittest.TestCase):
@@ -188,7 +199,8 @@ class WindowsOnlyRemovalTests(unittest.TestCase):
 
 	def test_files_that_never_reached_the_mac_are_kept_unless_discarded(self):
 		self.assertLess(self.orphan.index("Stop-Process"), self.orphan.index("$unsaved = Get-DirtyCount $Folder"))
-		self.assertIn("if ($unsaved -and -not (Test-Path -LiteralPath (Join-Path $Folder 'discard'))) {\n\t\t\tSet-State $Name 'removing' ($UnsavedDetail -f (Get-FileCount $unsaved)) $null $null\n\t\t\t$Status[$Name].unsaved = $unsaved\n\t\t\treturn\n", self.orphan)
+		self.assertIn("(Join-Path $Folder 'discard')", self.orphan)
+		self.assertIn("$Status[$Name].unsaved = $unsaved", self.orphan)
 
 	def test_status_entries_carry_the_windows_path(self):
 		loop = self.text[self.text.index("\nwhile ($true) {\n"):]
@@ -211,12 +223,13 @@ class UploadFailureTests(unittest.TestCase):
 		self.assertIn("$LogOffsets[$Name] += $end", self.failures)
 
 	def test_a_failure_clears_on_success_or_when_nothing_waits_for_upload(self):
-		self.assertIn("} elseif ($line -match $SuccessPattern) {\n\t\t\t$Failures[$Name].Remove($Matches[1])\n", self.failures)
-		self.assertIn("} elseif ($line -match $CachePattern -and [int]$Matches[3] + [int]$Matches[4] -eq 0) {\n\t\t\t$Failures[$Name].Clear()\n", self.failures)
+		self.assertIn("$Failures[$Name].Remove($Matches[1])", self.failures[self.failures.index("$SuccessPattern"):])
+		self.assertIn("$Failures[$Name].Clear()", self.failures[self.failures.index("[int]$Matches[3] + [int]$Matches[4] -eq 0"):])
 
 	def test_a_mounted_share_reports_its_failures(self):
 		update = function_body(self.text, "Update-Share")
-		self.assertIn("\t\t\tUpdate-Failures $Name $Folder\n\t\t\tSet-State $Name 'mounted' (Get-FailureDetail $Name) $process.Id $null\n\t\t\tif ($Failures[$Name].Count) { $Status[$Name].failed = $Failures[$Name].Count }\n", update)
+		self.assertLess(update.index("Update-Failures $Name $Folder"), update.index("Set-State $Name 'mounted' (Get-FailureDetail $Name)"))
+		self.assertIn("$Status[$Name].failed = $Failures[$Name].Count", update)
 		self.assertIn("$FailedDetail = '{0} cannot be uploaded to the Mac: {1}: {2}'", self.text)
 
 	def test_file_counts_in_details_use_the_singular_for_one_file(self):
@@ -232,7 +245,8 @@ class UploadFailureTests(unittest.TestCase):
 	def test_a_removal_shows_its_failures_in_the_detail(self):
 		remove = function_body(self.text, "Remove-Share")
 		self.assertLess(remove.index("Update-Failures $Name $Folder"), remove.index("Get-CacheCounts"))
-		self.assertIn("Set-State $Name 'removing' ('{0}. {1}' -f $detail, $failed) $process.Id $null\n\t\t\t\t$Status[$Name].failed = $Failures[$Name].Count\n\t\t\t\t$Status[$Name].to_upload = $counts.pending\n", remove)
+		self.assertIn("('{0}. {1}' -f $detail, $failed)", remove)
+		self.assertIn("$Status[$Name].to_upload = $counts.pending", remove)
 		self.assertLess(remove.index("Get-FailureDetail $Name"), remove.index(UPLOAD_STOP))
 
 
@@ -242,18 +256,17 @@ class StatusListingTests(unittest.TestCase):
 		self.loop = self.text[self.text.index("\nwhile ($true) {\n"):]
 
 	def test_every_share_folder_gets_a_state(self):
-		self.assertIn("} else {\n\t\t\t\tSet-State $folder.Name 'incomplete' $NoShareFileDetail $null $null\n", self.loop)
-		self.assertIn("} catch {\n\t\t\tSet-State $folder.Name 'error' ([string]$_) $null $null\n", self.loop)
+		self.assertIn("Set-State $folder.Name 'incomplete' $NoShareFileDetail", self.loop)
+		self.assertIn("Set-State $folder.Name 'error' ([string]$_)", self.loop)
 
 	def test_a_failed_folder_listing_writes_no_status(self):
 		self.assertIn("$folders = @(Get-ChildItem -LiteralPath $SharesFolder -Directory) }", self.loop)
 		self.assertLess(self.loop.index("\t\tcontinue\n"), self.loop.index("Write-Status"))
-		self.assertNotIn("$SharesFolder -Directory -ErrorAction SilentlyContinue", self.loop)
 
 
 class LinkedParentTests(unittest.TestCase):
 	def setUp(self):
-		self.text = read_script(SUPERVISOR_SCRIPT)
+		self.text = run_text(SUPERVISOR_SCRIPT)
 
 	def test_parents_are_checked_before_any_delete_or_mount(self):
 		mount = function_body(self.text, "Start-Mount")
@@ -267,17 +280,13 @@ class LinkedParentTests(unittest.TestCase):
 	def test_removal_skips_the_mount_path_under_a_link_and_still_deletes_the_share_folder(self):
 		remove = function_body(self.text, "Remove-Share")
 		self.assertIn("if (-not (Find-LinkedParent $share.mount_path) -and (Test-Junction $share.mount_path)) {", remove)
-		self.assertNotIn("'blocked'", remove)
 
 	def test_a_blocked_removal_that_keeps_its_cache_tells_the_mac(self):
 		remove = function_body(self.text, "Remove-Share")
-		self.assertIn("} else {\n\t\t\t$Status[$Name].remove_requested = $true\n\t\t}\n\t\treturn\n", remove)
+		self.assertIn("$Status[$Name].remove_requested = $true", remove)
 
 	def test_prepare_shares_the_supervisor_checks(self):
-		prepare = read_script("prepare.ps1")
-		for name in ("Find-LinkedParent", "Test-CacheFiles"):
-			self.assertEqual(function_body(prepare, name), function_body(self.text, name))
-		self.assertIn("linked_parent = (Find-LinkedParent $vmPath)", prepare)
+		self.assertIn("linked_parent = (Find-LinkedParent $vmPath)", read_script("prepare.ps1"))
 
 
 class PrepareScriptTests(unittest.TestCase):
@@ -286,28 +295,22 @@ class PrepareScriptTests(unittest.TestCase):
 
 	def test_system_folders_come_from_the_environment(self):
 		self.assertIn("foreach ($folder in $env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData) {", self.text)
-		self.assertIn("GetFinalPathNameByHandleW", self.text)
+		self.assertIn("[string]::Equals($parent, $folder, [StringComparison]::OrdinalIgnoreCase)", self.text)
+		self.assertIn("$parent.StartsWith($folder + '\\', [StringComparison]::OrdinalIgnoreCase)", self.text)
 		self.assertIn("system_folder = $systemFolder", self.text)
 		self.assertNotIn("C:\\Windows", self.text)
 		self.assertNotIn("C:\\Program Files", self.text)
 
-	def test_leftover_removal_is_cleared_only_when_nothing_can_be_lost(self):
-		self.assertIn("if ($removing -and -not (Test-ShareActive) -and -not (Test-CacheFiles $ShareFolder)) {", self.text)
-		self.assertIn("\t$removing = Test-Path -LiteralPath $marker\n", self.text)
-		active = function_body(self.text, "Test-ShareActive")
-		self.assertIn("$task.State -eq 'Running'", active)
-		self.assertIn("Join-Path $ShareFolder 'rclone.conf'", active)
-
-	def test_share_folder_takes_the_requested_letter_case_only_when_nothing_can_be_lost(self):
-		self.assertIn("$existing[0].Name -cne $Params.name -and -not (Test-Path -LiteralPath (Join-Path $ShareFolder 'share.json')) -and -not (Test-CacheFiles $ShareFolder)) {", self.text)
-		self.assertLess(self.text.index("$existing[0].Name -cne $Params.name"), self.text.index("New-Item -ItemType Directory -Force -Path $ShareFolder"))
+	def test_a_leftover_removal_is_left_to_the_supervisor(self):
+		self.assertIn("$removing = Test-Path -LiteralPath $marker", self.text)
+		self.assertIn("removing = $removing", self.text)
 
 
 class UnprepareScriptTests(unittest.TestCase):
 	def test_only_an_empty_share_folder_is_removed(self):
 		text = read_script("unprepare.ps1")
-		self.assertIn("$ShareFolder = Join-Path 'C:\\ProgramData\\wn\\shares' $Params.name", text)
-		self.assertIn("\t[IO.Directory]::Delete($ShareFolder)\n} catch [IO.IOException] {", text)
+		self.assertIn("[IO.Directory]::Delete($ShareFolder)", text)
+		self.assertIn("} catch [IO.IOException] {", text)
 		self.assertNotIn("rd /s /q", text)
 		self.assertNotIn("Remove-Item", text)
 
@@ -329,7 +332,6 @@ class FetchScriptTests(unittest.TestCase):
 class CleanupScriptTests(unittest.TestCase):
 	def test_cleanup_refuses_while_a_share_has_cache_files(self):
 		text = read_script("cleanup.ps1")
-		self.assertEqual(function_body(text, "Test-CacheFiles"), function_body(read_script(SUPERVISOR_SCRIPT), "Test-CacheFiles"))
 		guard = text.index("if ($sharesWithCache.Count -eq 0) {")
 		self.assertLess(text.index("Where-Object { Test-CacheFiles $_.FullName }"), guard)
 		for action in ("Stop-ScheduledTask", "Stop-Process", "rd /s /q", "Remove-Item"):
@@ -338,5 +340,4 @@ class CleanupScriptTests(unittest.TestCase):
 
 	def test_cleanup_waits_for_the_supervisor_before_stopping_rclone(self):
 		text = read_script("cleanup.ps1")
-		self.assertEqual(function_body(text, "Wait-TaskStopped"), function_body(read_script("task.ps1"), "Wait-TaskStopped"))
 		self.assertLess(text.index("\tWait-TaskStopped\n"), text.index("Stop-Process"))

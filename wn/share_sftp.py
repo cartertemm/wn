@@ -2,11 +2,9 @@
 
 import dataclasses
 import datetime
-import glob
 import json
 import os
 import re
-import signal
 import socket
 import subprocess
 import threading
@@ -21,11 +19,9 @@ from wn.shares import GUEST_ROOT, HOST_ADDRESS, REMOVE_COMMAND, SHARE_COMMAND, S
 SHARES_DIRECTORY_NAME = "shares"
 LOGS_DIRECTORY = os.path.join("~", "Library", "Logs")
 LOG_NAME = "wn-share-{}.log"
-PID_SUFFIX = ".pid"
 HOST_KEY_NAME = "host_ed25519-{}"
 CLIENT_KEY_NAME = "client_ed25519"
 PUBLIC_KEY_SUFFIX = ".pub"
-EMPTY_CONFIG_NAME = "empty-rclone.conf"
 BIN_DIRECTORY_NAME = "bin"
 MAC_RCLONE_NAME = "rclone"
 WINDOWS_RCLONE_NAME = "rclone.exe"
@@ -50,6 +46,7 @@ TASK_SCRIPT = "task.ps1"
 CLEANUP_SCRIPT = "cleanup.ps1"
 UNPREPARE_SCRIPT = "unprepare.ps1"
 SUPERVISOR_SCRIPT = "wn-shares.ps1"
+COMMON_SCRIPT = "common.ps1"
 RCLONE_CONF_TEMPLATE = (
 	"[share]\n"
 	"type = sftp\n"
@@ -67,14 +64,11 @@ SHARE_PROTOCOL_VERSION = 1
 STATE_REFRESH_SECONDS = 10
 SERVER_RESTART_SECONDS = 5
 SERVER_STOP_SECONDS = 3
-ORPHAN_POLL_SECONDS = 0.1
 WAKE_GAP_SECONDS = 5
 MAX_LOG_BYTES = 10 * 1024 * 1024
 LOG_TAIL_BYTES = 4096
 LOG_TIME_PREFIX = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ")
 CONNECT_TIMEOUT_SECONDS = 0.5
-PS_PATH = "/bin/ps"
-SERVE_SFTP_TEXT = "serve sftp"
 SHARE_LOG_PREFIX = "share {}: "
 SUPERVISOR_LOG_PREFIX = "shares: "
 SERVING_STATE = "serving"
@@ -112,10 +106,6 @@ class SharePaths:
 		return self.client_key + PUBLIC_KEY_SUFFIX
 
 	@property
-	def empty_config(self):
-		return os.path.join(self.root, EMPTY_CONFIG_NAME)
-
-	@property
 	def mac_rclone(self):
 		return os.path.join(self.root, BIN_DIRECTORY_NAME, MAC_RCLONE_NAME)
 
@@ -133,9 +123,6 @@ class SharePaths:
 	def host_public_key(self, name):
 		return self.host_key(name) + PUBLIC_KEY_SUFFIX
 
-	def pid_file(self, name):
-		return os.path.join(self.root, name + PID_SUFFIX)
-
 	def log_file(self, name):
 		return os.path.join(self.logs, LOG_NAME.format(name))
 
@@ -148,7 +135,7 @@ def server_command(share, paths):
 	"""Return the argv of the rclone SFTP server for ``share``. Never add --pass, --links, -L, --rc or --sftp-chunk-size."""
 	command = [
 		paths.mac_rclone, "serve", "sftp", share.mac_path,
-		"--config", paths.empty_config,
+		"--config", "",
 		"--addr", "{}:{}".format(HOST_ADDRESS, share.port),
 		"--key", paths.host_key(share.name),
 		"--authorized-keys", paths.client_public_key,
@@ -181,8 +168,6 @@ def render_share_json(share):
 def ensure_share_directory(paths):
 	os.makedirs(paths.root, DIRECTORY_MODE, exist_ok=True)
 	os.chmod(paths.root, DIRECTORY_MODE)
-	if not os.path.exists(paths.empty_config):
-		os.close(os.open(paths.empty_config, os.O_WRONLY | os.O_CREAT, PRIVATE_MODE))
 
 
 def _ssh_keygen(run, *arguments):
@@ -269,14 +254,20 @@ def last_log_line(path, offset=0):
 	return LOG_TIME_PREFIX.sub("", lines[-1]) if lines else None
 
 
-def load_guest_script(name):
-	with open(os.path.join(GUEST_SCRIPTS_DIRECTORY, name), encoding="utf-8") as handle:
+def _read_guest_file(name):
+	with open(os.path.join(GUEST_SCRIPTS_DIRECTORY, name), "rb") as handle:
 		return handle.read()
 
 
 def guest_script_bytes(name):
-	with open(os.path.join(GUEST_SCRIPTS_DIRECTORY, name), "rb") as handle:
-		return handle.read()
+	script = _read_guest_file(name)
+	if name == COMMON_SCRIPT:
+		return script
+	return _read_guest_file(COMMON_SCRIPT) + script
+
+
+def load_guest_script(name):
+	return guest_script_bytes(name).decode("utf-8")
 
 
 def read_mac_state(paths):
@@ -317,41 +308,6 @@ def remove_file(path):
 		os.remove(path)
 	except FileNotFoundError:
 		pass
-
-
-def _is_wn_server(pid, paths, run):
-	command = run([PS_PATH, "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
-	return command.startswith("{} {} ".format(paths.mac_rclone, SERVE_SFTP_TEXT))
-
-
-def _is_alive(pid, kill):
-	try:
-		kill(pid, 0)
-	except (ProcessLookupError, PermissionError):
-		return False
-	return True
-
-
-def _read_pid(path):
-	try:
-		with open(path) as handle:
-			return int(handle.read().strip())
-	except (OSError, ValueError):
-		return None
-
-
-def kill_orphan_servers(paths, run=subprocess.run, kill=os.kill, sleep=time.sleep, clock=time.monotonic):
-	"""Stop the rclone servers that a previous agent left running, by the PIDs in their PID files."""
-	for pid_path in glob.glob(os.path.join(glob.escape(paths.root), "*" + PID_SUFFIX)):
-		pid = _read_pid(pid_path)
-		if pid is not None and _is_alive(pid, kill) and _is_wn_server(pid, paths, run):
-			kill(pid, signal.SIGTERM)
-			deadline = clock() + SERVER_STOP_SECONDS
-			while _is_alive(pid, kill) and clock() < deadline:
-				sleep(ORPHAN_POLL_SECONDS)
-			if _is_alive(pid, kill) and _is_wn_server(pid, paths, run):
-				kill(pid, signal.SIGKILL)
-		remove_file(pid_path)
 
 
 def check_folder(path):
@@ -409,7 +365,7 @@ class SftpServerSupervisor:
 	"""Runs one rclone SFTP server per Mac to Windows share of the configured VM and keeps that set in line with the config."""
 
 	def __init__(self, log, paths=None, config_file=None, popen=subprocess.Popen, address_present=host_address_present, connect=can_connect,
-			check_folder=check_folder, start_thread=start_daemon_thread, monotonic=time.monotonic, wall_clock=time.time, run=subprocess.run, kill=os.kill, load=load_config):
+			check_folder=check_folder, start_thread=start_daemon_thread, monotonic=time.monotonic, wall_clock=time.time, load=load_config):
 		self.log = log
 		self.paths = paths or share_paths()
 		self.config_file = config_file or config_path()
@@ -420,8 +376,6 @@ class SftpServerSupervisor:
 		self.start_thread = start_thread
 		self.monotonic = monotonic
 		self.wall_clock = wall_clock
-		self.run_command = run
-		self.kill = kill
 		self.load = load
 		self.stopping = threading.Event()
 		self.wait = self.stopping.wait
@@ -433,7 +387,6 @@ class SftpServerSupervisor:
 		self.last_clocks = None
 		self.last_state = None
 		self.state_written_at = None
-		self.unreaped = []
 		self.last_error = None
 
 	def _write(self, message):
@@ -484,18 +437,10 @@ class SftpServerSupervisor:
 		for server in running:
 			server.process.terminate()
 		for server in running:
-			process = server.process
-			pid_file = self.paths.pid_file(server.share.name)
 			try:
-				process.wait(timeout=SERVER_STOP_SECONDS)
-				remove_file(pid_file)
+				server.process.wait(timeout=SERVER_STOP_SECONDS)
 			except subprocess.TimeoutExpired:
-				process.kill()
-				try:
-					process.wait(timeout=SERVER_STOP_SECONDS)
-					remove_file(pid_file)
-				except subprocess.TimeoutExpired:
-					self.unreaped.append((process, pid_file))
+				server.process.kill()
 			server.process = None
 			server.restart_at = now
 
@@ -516,13 +461,6 @@ class SftpServerSupervisor:
 				self.servers[name] = ShareServer(share)
 
 	def _poll(self, now):
-		unreaped = []
-		for process, pid_file in self.unreaped:
-			if process.poll() is None:
-				unreaped.append((process, pid_file))
-			elif _read_pid(pid_file) == process.pid:
-				remove_file(pid_file)
-		self.unreaped = unreaped
 		for server in self.servers.values():
 			if server.process is None:
 				continue
@@ -530,7 +468,6 @@ class SftpServerSupervisor:
 			if code is None:
 				continue
 			server.process = None
-			remove_file(self.paths.pid_file(server.share.name))
 			line = last_log_line(self.paths.log_file(server.share.name), server.log_offset)
 			detail = "rclone exited with code {}".format(code) + (": " + line if line else "")
 			self._log_share(server, "rclone exited with code {}. Starting it again in {} s".format(code, SERVER_RESTART_SECONDS))
@@ -555,7 +492,6 @@ class SftpServerSupervisor:
 			self._set(server, ERROR_STATE, server.start_error)
 			server.restart_at = now + SERVER_RESTART_SECONDS
 			return
-		write_private_file(self.paths.pid_file(share.name), "{}\n".format(server.process.pid))
 		if server.start_error is None:
 			self._set(server, STARTING_STATE, "{}:{}".format(HOST_ADDRESS, share.port))
 		else:
@@ -638,7 +574,6 @@ class SftpServerSupervisor:
 				self._write(message)
 
 	def run(self):
-		self._log_errors(lambda: kill_orphan_servers(self.paths, self.run_command, self.kill), "cannot stop the share servers of a previous agent")
 		while not self.stopping.is_set():
 			self._log_errors(self.tick, "unexpected error, trying again in {} s".format(SUPERVISOR_TICK_SECONDS))
 			self.wait(SUPERVISOR_TICK_SECONDS)

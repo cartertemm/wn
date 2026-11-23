@@ -1,13 +1,11 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$Root = 'C:\ProgramData\wn'
 $SharesFolder = Join-Path $Root 'shares'
 $Rclone = Join-Path $Root 'bin\rclone.exe'
 $StatusFile = Join-Path $Root 'status.json'
 $LogFile = Join-Path $Root 'logs\wn-shares.log'
 $LoopSeconds = 5
 $MaxLogBytes = 10MB
-$StopWaitSeconds = 10
 $LogTailLines = 200
 $TailGrowthFactor = 4
 $JsonDepth = 4
@@ -17,7 +15,6 @@ $CachePattern = '^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) .*vfs cache: cleaned: .* in u
 $DirtyPattern = '"Dirty":\s*true'
 $FailurePattern = '^\S+ \S+ ERROR : (.+): vfs cache: failed to upload try #\d+, will retry in \S+: (?:vfs cache: failed to transfer file from cache to remote: )?(.+)$'
 $SuccessPattern = '^\S+ \S+ INFO  : (.+): vfs cache: upload succeeded try #\d+$'
-$LongPathPrefix = '\\?\'
 $RcloneTimeFormat = 'yyyy/MM/dd HH:mm:ss'
 $LinkedParentDetail = '{0} is a link or mount point. Use a share path with no link in it'
 $NoShareFileDetail = 'the share folder has no share.json'
@@ -46,14 +43,12 @@ function Limit-Log($Path) {
 	}
 }
 
-function Set-State($Name, $State, $Detail, $ProcessId, $Pending) {
+function Set-State($Name, $State, $Detail, $ProcessId) {
 	$previous = $Status[$Name]
 	if (-not $previous -or $previous.state -ne $State -or $previous.detail -ne $Detail) {
 		Write-Log ('{0}: {1} {2}' -f $Name, $State, $Detail)
 	}
-	$entry = [ordered]@{ state = $State; detail = $Detail; pid = $ProcessId }
-	if ($null -ne $Pending) { $entry.pending = $Pending }
-	$Status[$Name] = $entry
+	$Status[$Name] = [ordered]@{ state = $State; detail = $Detail; pid = $ProcessId }
 }
 
 function Write-Status {
@@ -66,26 +61,6 @@ function Write-Status {
 function Test-Junction($Path) {
 	$item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
 	return [bool]($item -and $item.LinkType -eq 'Junction')
-}
-
-function Find-LinkedParent($Path) {
-	$parent = Split-Path -Parent $Path
-	while ($parent) {
-		$item = Get-Item -LiteralPath $parent -Force -ErrorAction SilentlyContinue
-		if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $parent }
-		$parent = Split-Path -Parent $parent
-	}
-	return $null
-}
-
-function Test-CacheFiles($Folder) {
-	$vfs = Join-Path $Folder 'cache\vfs'
-	if (-not (Test-Path -LiteralPath $vfs)) { return $false }
-	try {
-		return [bool](Get-ChildItem -LiteralPath $vfs -Recurse -File -Force | Select-Object -First 1)
-	} catch {
-		return $true
-	}
 }
 
 function Get-DirtyCount($Folder) {
@@ -228,14 +203,14 @@ function Find-Adopted {
 function Start-Mount($Name, $Share, $Folder) {
 	$linked = Find-LinkedParent $Share.mount_path
 	if ($linked) {
-		Set-State $Name 'blocked' ($LinkedParentDetail -f $linked) $null $null
+		Set-State $Name 'blocked' ($LinkedParentDetail -f $linked) $null
 		return $null
 	}
 	$item = Get-Item -LiteralPath $Share.mount_path -Force -ErrorAction SilentlyContinue
 	if ($item -and $item.LinkType -eq 'Junction') {
 		[IO.Directory]::Delete($Share.mount_path)
 	} elseif ($item -and ((-not $item.PSIsContainer) -or (Get-ChildItem -LiteralPath $Share.mount_path -Force | Select-Object -First 1))) {
-		Set-State $Name 'blocked' ('{0} exists as a local folder with files. Move them out and delete the folder' -f $Share.mount_path) $null $null
+		Set-State $Name 'blocked' ('{0} exists as a local folder with files. Move them out and delete the folder' -f $Share.mount_path) $null
 		return $null
 	} elseif ($item) {
 		Remove-Item -LiteralPath $Share.mount_path -Force
@@ -259,18 +234,18 @@ function Remove-Share($Name, $Folder) {
 		}
 		$unsaved = Get-DirtyCount $Folder
 		if ($unsaved -and -not (Test-Path -LiteralPath (Join-Path $Folder 'discard'))) {
-			Set-State $Name 'removing' ($UnsavedDetail -f (Get-FileCount $unsaved)) $null $null
+			Set-State $Name 'removing' ($UnsavedDetail -f (Get-FileCount $unsaved)) $null
 			$Status[$Name].unsaved = $unsaved
 			return
 		}
 	} elseif ($process -and $process.HasExited) {
 		$Processes.Remove($Name)
-		Set-State $Name 'removing' (Get-ExitDetail $process $Folder) $null $null
+		Set-State $Name 'removing' (Get-ExitDetail $process $Folder) $null
 		return
 	} elseif (-not $process -and (Test-Path -LiteralPath $shareFile) -and (Test-CacheFiles $Folder)) {
 		$process = Start-Mount $Name (Read-Share $Folder) $Folder
 		if ($process) {
-			Set-State $Name 'removing' $CacheUploadDetail $process.Id $null
+			Set-State $Name 'removing' $CacheUploadDetail $process.Id
 		} else {
 			$Status[$Name].remove_requested = $true
 		}
@@ -282,30 +257,31 @@ function Remove-Share($Name, $Folder) {
 		Update-Failures $Name $Folder
 		$counts = Get-CacheCounts $Folder $since
 		if ($counts -and $counts.open -gt 0) {
-			Set-State $Name 'removing' ($OpenFilesDetail -f (Get-FileCount $counts.open)) $process.Id $null
+			Set-State $Name 'removing' ($OpenFilesDetail -f (Get-FileCount $counts.open)) $process.Id
 			return
 		}
 		if ($counts -and $counts.pending -gt 0) {
 			$detail = '{0} to upload to the Mac' -f (Get-FileCount $counts.pending)
 			$failed = Get-FailureDetail $Name
 			if ($failed) {
-				Set-State $Name 'removing' ('{0}. {1}' -f $detail, $failed) $process.Id $null
+				Set-State $Name 'removing' ('{0}. {1}' -f $detail, $failed) $process.Id
 				$Status[$Name].failed = $Failures[$Name].Count
 				$Status[$Name].to_upload = $counts.pending
 			} else {
-				Set-State $Name 'removing' $detail $process.Id $counts.pending
+				Set-State $Name 'removing' $detail $process.Id
+				$Status[$Name].pending = $counts.pending
 			}
 			return
 		}
 		if ((-not $counts -and (Test-CacheFiles $Folder)) -or (Test-DirtyCache $Folder)) {
-			Set-State $Name 'removing' 'waiting for rclone to report its uploads' $process.Id $null
+			Set-State $Name 'removing' 'waiting for rclone to report its uploads' $process.Id
 			return
 		}
 		Stop-Process -Id $process.Id -Force
 		Wait-Process -Id $process.Id -Timeout $StopWaitSeconds -ErrorAction SilentlyContinue
 		if (Test-DirtyCache $Folder) {
 			$Processes.Remove($Name)
-			Set-State $Name 'removing' $CacheUploadDetail $null $null
+			Set-State $Name 'removing' $CacheUploadDetail $null
 			return
 		}
 	}
@@ -315,10 +291,10 @@ function Remove-Share($Name, $Folder) {
 			try { [IO.Directory]::Delete($share.mount_path) } catch { if (Test-Path -LiteralPath $share.mount_path) { throw } }
 		}
 	}
-	& cmd.exe /c rd /s /q ('\\?\' + $Folder)
+	& cmd.exe /c rd /s /q ($LongPathPrefix + $Folder)
 	$Processes.Remove($Name)
 	if (Test-Path -LiteralPath $Folder) {
-		Set-State $Name 'error' ($NotDeletedDetail -f $Folder) $null $null
+		Set-State $Name 'error' ($NotDeletedDetail -f $Folder) $null
 		return
 	}
 	$Status.Remove($Name)
@@ -332,16 +308,16 @@ function Update-Share($Name, $Folder) {
 	if ($process -and -not $process.HasExited) {
 		if (Test-Junction $share.mount_path) {
 			Update-Failures $Name $Folder
-			Set-State $Name 'mounted' (Get-FailureDetail $Name) $process.Id $null
+			Set-State $Name 'mounted' (Get-FailureDetail $Name) $process.Id
 			if ($Failures[$Name].Count) { $Status[$Name].failed = $Failures[$Name].Count }
 		} elseif ($Status[$Name].state -ne 'waiting') {
-			Set-State $Name 'starting' '' $process.Id $null
+			Set-State $Name 'starting' '' $process.Id
 		}
 		return
 	}
 	if ($process) {
 		$Processes.Remove($Name)
-		Set-State $Name 'waiting' (Get-ExitDetail $process $Folder) $null $null
+		Set-State $Name 'waiting' (Get-ExitDetail $process $Folder) $null
 		return
 	}
 	$process = Start-Mount $Name $share $Folder
@@ -349,7 +325,7 @@ function Update-Share($Name, $Folder) {
 	if ($Status[$Name].state -eq 'waiting') {
 		$Status[$Name].pid = $process.Id
 	} else {
-		Set-State $Name 'starting' '' $process.Id $null
+		Set-State $Name 'starting' '' $process.Id
 	}
 }
 
@@ -377,13 +353,13 @@ while ($true) {
 			} elseif (Test-Path -LiteralPath (Join-Path $folder.FullName 'share.json')) {
 				Update-Share $folder.Name $folder.FullName
 			} else {
-				Set-State $folder.Name 'incomplete' $NoShareFileDetail $null $null
+				Set-State $folder.Name 'incomplete' $NoShareFileDetail $null
 			}
 			if ($Status[$folder.Name] -and (Test-Path -LiteralPath (Join-Path $folder.FullName 'share.json'))) {
 				$Status[$folder.Name].path = (Read-Share $folder.FullName).mount_path
 			}
 		} catch {
-			Set-State $folder.Name 'error' ([string]$_) $null $null
+			Set-State $folder.Name 'error' ([string]$_) $null
 		}
 	}
 	try {

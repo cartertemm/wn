@@ -20,7 +20,7 @@ from wn.battery_sync import LOG_PREFIX, MINUTES_PER_HOUR, POLL_SECONDS, WRITE_IN
 from wn.config import load_config_skipping_bad_shares
 from wn.errors import WnError
 from wn.qmp import qmp_client_for
-from wn.share_sftp import SERVING_STATE, SftpServerSupervisor, read_mac_state, share_paths
+from wn.share_sftp import SERVING_STATE, SftpServerSupervisor, read_mac_state, share_paths, utc_now
 from wn.shares import HOST_ADDRESS, REMOVE_COMMAND, shares_for_vm
 from wn.utm_config import camera_socket_file
 
@@ -60,10 +60,6 @@ INVALID_SHARE_LOG_PREFIX = "shares: ignoring an invalid share until it is fixed:
 
 class AgentError(WnError):
 	"""Raised when the agent cannot read the battery or manage its launch agent."""
-
-
-def utc_now():
-	return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_pmset(text, updated):

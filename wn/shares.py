@@ -24,8 +24,6 @@ DOT = "."
 SPACE = " "
 RESERVED_WINDOWS_NAMES = frozenset(("con", "prn", "aux", "nul") + tuple(prefix + digit for prefix in ("com", "lpt") for digit in string.digits))
 MAC_TO_VM = "mac_to_vm"
-VM_TO_MAC = "vm_to_mac"
-SUPPORTED_DIRECTIONS = (MAC_TO_VM,)
 SHARE_KEYS = ("name", "vm", "direction", "mac_path", "vm_path", "read_only", "port")
 WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:\\")
 SHELL_STRIPPED_PATH = re.compile(r"^([A-Za-z]):[^\\/]")
@@ -57,7 +55,7 @@ class Share:
 	port: Optional[int] = None
 
 	def to_dict(self):
-		return {key: getattr(self, key) for key in SHARE_KEYS if not (key == "port" and self.port is None)}
+		return dataclasses.asdict(self)
 
 
 def _is_inside(path, folder, separator):
@@ -115,7 +113,7 @@ def _name_problem(name):
 
 
 def shares_for_vm(shares, vm_name):
-	return tuple(share for share in shares if share.vm == vm_name and share.direction == MAC_TO_VM)
+	return tuple(share for share in shares if share.vm == vm_name)
 
 
 def _is_port(value):
@@ -129,7 +127,6 @@ def _vm_path_problem(vm_path):
 		normalized = normalize_vm_path(vm_path)
 		if normalized != vm_path:
 			return "vm_path '{}' must be written as '{}'".format(vm_path, normalized)
-		check_vm_path(vm_path)
 	except ShareError as error:
 		return "vm_path {}".format(error)
 	return None
@@ -150,11 +147,10 @@ def _item_problem(item, names, ports):
 		return problem
 	if name.casefold() in names:
 		return "share name '{}' is used twice (names ignore case)".format(name)
-	names.add(name.casefold())
 	if not isinstance(item["vm"], str):
 		return "vm must be a string"
-	if item["direction"] not in SUPPORTED_DIRECTIONS:
-		return "direction must be {}".format(" or ".join(SUPPORTED_DIRECTIONS))
+	if item["direction"] != MAC_TO_VM:
+		return "direction must be {}".format(MAC_TO_VM)
 	if not isinstance(item["mac_path"], str) or not os.path.isabs(item["mac_path"]):
 		return "mac_path must be an absolute Mac path"
 	if _is_mac_root(item["mac_path"]):
@@ -169,7 +165,6 @@ def _item_problem(item, names, ports):
 		return "port must be a whole number from {} to {}".format(FIRST_PORT, LAST_PORT)
 	if port in ports:
 		return "port {} is used twice".format(port)
-	ports.add(port)
 	return None
 
 
@@ -180,26 +175,14 @@ def split_shares(path, items):
 	valid = []
 	problems = []
 	for index, item in enumerate(items):
-		item_names = set(names)
-		item_ports = set(ports)
-		problem = _item_problem(item, item_names, item_ports)
+		problem = _item_problem(item, names, ports)
 		if problem:
 			problems.append("{}: shares[{}]: {}".format(path, index, problem))
 		else:
 			valid.append(item)
-			names = item_names
-			ports = item_ports
+			names.add(item["name"].casefold())
+			ports.add(item["port"])
 	return valid, problems
-
-
-def validate_shares(path, items):
-	problems = split_shares(path, items)[1]
-	if problems:
-		raise ShareError(problems[0])
-
-
-def shares_from_values(items):
-	return tuple(Share(**item) for item in items)
 
 
 def default_share_name(mac_path):
@@ -243,15 +226,12 @@ def normalize_vm_path(text):
 		problem = _vm_part_problem(part)
 		if problem:
 			raise ShareError("'{}' {}. Give a Windows folder such as '{}'".format(text, problem, VM_PATH_EXAMPLE))
-	return path
-
-
-def check_vm_path(vm_path):
-	parts = normalize_vm_path(vm_path).casefold().split(WINDOWS_SEPARATOR)
+	folded = path.casefold().split(WINDOWS_SEPARATOR)
 	for folder in REFUSED_VM_FOLDERS:
 		folder_parts = folder.casefold().split(WINDOWS_SEPARATOR)
-		if parts[:len(folder_parts)] == folder_parts:
+		if folded[:len(folder_parts)] == folder_parts:
 			raise ShareError("wn does not share into {} or folders inside it. Pick another Windows folder".format(folder))
+	return path
 
 
 def check_mac_path(path, read_only):

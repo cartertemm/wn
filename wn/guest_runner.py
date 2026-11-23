@@ -87,32 +87,15 @@ WRAPPER_LINES = (
 	"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{script}\" > \"{output}\" 2>&1",
 	"echo %ERRORLEVEL% {token} > \"{done}\"",
 )
-OFFER_TIMEOUT_SECONDS = 300
 OFFER_TOKEN_BYTES = 32
 OFFER_CHUNK_BYTES = 1024 * 1024
+OFFER_POLL_SECONDS = 0.05
 
 ExecPaths = collections.namedtuple("ExecPaths", "script wrapper output done pattern")
 
 
 class GuestError(WnError):
 	"""Raised when a guest command cannot run or gives no usable result."""
-
-
-class GuestScriptError(GuestError):
-	"""Raised when a guest script exits with a code other than 0."""
-
-	def __init__(self, label, exit_code, output):
-		self.exit_code = exit_code
-		self.output = output
-		super().__init__("{} failed in Windows with exit code {}:\n{}".format(label, exit_code, output_tail(output)))
-
-
-class GuestTimeoutError(GuestError):
-	"""Raised when a guest script does not finish in time. ``output`` holds what it printed so far."""
-
-	def __init__(self, label, timeout, output):
-		self.output = output
-		super().__init__("{} did not finish in Windows within {} s. Output so far:\n{}".format(label, timeout, output_tail(output)))
 
 
 def output_tail(output):
@@ -186,7 +169,7 @@ class GuestRunner:
 					self._delete(paths.pattern)
 				except BackendError:
 					pass
-				raise GuestTimeoutError(label, timeout, output)
+				raise GuestError("{} did not finish in Windows within {} s. Output so far:\n{}".format(label, timeout, output_tail(output)))
 			self.sleep(POLL_SECONDS)
 			exit_code = self._exit_code(paths.done, token)
 		output, read_error = self._read_output(paths.output)
@@ -194,7 +177,7 @@ class GuestRunner:
 		if read_error is not None:
 			raise GuestError("{} finished in Windows with exit code {}, but wn could not read its output: {}".format(label, exit_code, read_error))
 		if exit_code != 0:
-			raise GuestScriptError(label, exit_code, output)
+			raise GuestError("{} failed in Windows with exit code {}:\n{}".format(label, exit_code, output_tail(output)))
 		return output
 
 	def run_json(self, script, params=None, timeout=DEFAULT_SCRIPT_TIMEOUT_SECONDS, label=DEFAULT_LABEL):
@@ -271,18 +254,14 @@ class OfferServer(http.server.ThreadingHTTPServer):
 
 
 class FileOffer:
-	"""Serves a fixed set of files over HTTP under a random token until the block ends or the timeout passes."""
+	"""Serves a fixed set of files over HTTP under a random token until the block ends."""
 
-	def __init__(self, files, host=HOST_ADDRESS, timeout=OFFER_TIMEOUT_SECONDS, new_token=secrets.token_urlsafe):
+	def __init__(self, files, host=HOST_ADDRESS, new_token=secrets.token_urlsafe):
 		self.files = dict(files)
 		self.host = host
-		self.timeout = timeout
 		self.token = new_token(OFFER_TOKEN_BYTES)
 		self.server = None
 		self.thread = None
-		self.timer = None
-		self.lock = threading.Lock()
-		self.stopped = False
 
 	def __enter__(self):
 		offer = self
@@ -295,29 +274,17 @@ class FileOffer:
 				pass
 
 		self.server = OfferServer((self.host, 0), Handler)
-		self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+		self.thread = threading.Thread(target=self.server.serve_forever, args=(OFFER_POLL_SECONDS,), daemon=True)
 		self.thread.start()
-		self.timer = threading.Timer(self.timeout, self._stop)
-		self.timer.daemon = True
-		self.timer.start()
 		return self
 
 	def __exit__(self, *exc_info):
-		self.timer.cancel()
-		self.timer.join()
-		self._stop()
+		self.server.shutdown()
+		self.server.server_close()
 		self.thread.join()
 
 	def url(self, name):
 		return "http://{}:{}/{}/{}".format(self.host, self.server.server_address[1], self.token, name)
-
-	def _stop(self):
-		with self.lock:
-			if self.stopped:
-				return
-			self.stopped = True
-		self.server.shutdown()
-		self.server.server_close()
 
 	def _serve(self, request):
 		token, _, name = request.path[1:].partition("/")

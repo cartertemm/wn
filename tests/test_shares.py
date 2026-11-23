@@ -8,19 +8,16 @@ from wn.shares import (
 	FIRST_PORT,
 	LAST_PORT,
 	MAC_TO_VM,
-	VM_TO_MAC,
 	Share,
 	ShareError,
 	check_mac_path,
 	check_new_share,
 	check_share_name,
-	check_vm_path,
 	default_share_name,
 	normalize_vm_path,
 	pick_port,
 	shares_for_vm,
-	shares_from_values,
-	validate_shares,
+	split_shares,
 )
 
 CONFIG_FILE = "/home/config.json"
@@ -182,7 +179,6 @@ class NormalizeVmPathTests(unittest.TestCase):
 	def test_accepts_and_keeps_names_with_punctuation(self):
 		path = "C:\\Users\\O'Brien\\R&D $x `y` %z% (1) a~b"
 		self.assertEqual(normalize_vm_path(path), path)
-		check_vm_path(path)
 
 
 class VmPathTests(unittest.TestCase):
@@ -190,18 +186,18 @@ class VmPathTests(unittest.TestCase):
 		for path in ("C:\\Windows", "c:\\windows\\Temp", "C:\\Program Files\\x", "C:\\Program Files (x86)\\x", "C:\\ProgramData\\wn"):
 			with self.subTest(path=path):
 				with self.assertRaises(ShareError):
-					check_vm_path(path)
+					normalize_vm_path(path)
 
 	def test_refuses_system_folders_written_in_other_forms(self):
 		for path in ("C:/Windows/System32", "C:\\WINDOWS\\", "C:\\Windows.\\System32", "C://Windows", "C:\\PROGRA~1\\x"):
 			with self.subTest(path=path):
 				with self.assertRaises(ShareError):
-					check_vm_path(path)
+					normalize_vm_path(path)
 
 	def test_accepts_other_folders(self):
 		for path in ("C:\\Programs", "C:\\Users\\c\\Mac", "D:\\Data", "C:\\Windowsx", "D:\\Windows"):
 			with self.subTest(path=path):
-				check_vm_path(path)
+				self.assertEqual(normalize_vm_path(path), path)
 
 
 class MacPathTests(unittest.TestCase):
@@ -435,14 +431,14 @@ class PickPortTests(unittest.TestCase):
 
 class ValidateSharesTests(unittest.TestCase):
 	def assert_refused(self, items, problem, index=0):
-		with self.assertRaises(ShareError) as caught:
-			validate_shares(CONFIG_FILE, items)
-		text = str(caught.exception)
+		problems = split_shares(CONFIG_FILE, items)[1]
+		self.assertTrue(problems)
+		text = problems[0]
 		self.assertTrue(text.startswith("{}: shares[{}]: ".format(CONFIG_FILE, index)), text)
 		self.assertIn(problem, text)
 
 	def test_valid_list_passes(self):
-		validate_shares(CONFIG_FILE, [share_item(), share_item(name="Other", port=FIRST_PORT + 1, read_only=True)])
+		self.assertEqual(split_shares(CONFIG_FILE, [share_item(), share_item(name="Other", port=FIRST_PORT + 1, read_only=True)])[1], [])
 
 	def test_item_not_object(self):
 		self.assert_refused(["x"], "object")
@@ -473,7 +469,7 @@ class ValidateSharesTests(unittest.TestCase):
 		self.assert_refused([share_item(direction="sideways")], "direction must be mac_to_vm")
 
 	def test_vm_to_mac_is_refused(self):
-		self.assert_refused([share_item(direction=VM_TO_MAC)], "direction must be mac_to_vm")
+		self.assert_refused([share_item(direction="vm_to_mac")], "direction must be mac_to_vm")
 
 	def test_mac_path_not_string(self):
 		self.assert_refused([share_item(mac_path=1)], "mac_path")
@@ -506,7 +502,7 @@ class ValidateSharesTests(unittest.TestCase):
 				self.assert_refused([share_item(vm_path=vm_path)], "vm_path")
 
 	def test_missing_mac_folder_passes(self):
-		validate_shares(CONFIG_FILE, [share_item(mac_path="/Volumes/Unplugged/Projects")])
+		self.assertEqual(split_shares(CONFIG_FILE, [share_item(mac_path="/Volumes/Unplugged/Projects")])[1], [])
 
 	def test_read_only_not_bool(self):
 		self.assert_refused([share_item(read_only="yes")], "read_only")
@@ -531,21 +527,14 @@ class ShareValueTests(unittest.TestCase):
 	def test_to_dict_keeps_key_order(self):
 		self.assertEqual(list(make_share(port=FIRST_PORT).to_dict()), ["name", "vm", "direction", "mac_path", "vm_path", "read_only", "port"])
 
-	def test_to_dict_drops_port_when_none(self):
-		self.assertNotIn("port", make_share().to_dict())
-
-	def test_shares_from_values_matches_input(self):
+	def test_to_dict_matches_the_config_items(self):
 		items = [share_item(), share_item(name="Other", port=FIRST_PORT + 1)]
-		validate_shares(CONFIG_FILE, items)
-		shares = shares_from_values(items)
-		self.assertTrue(all(isinstance(share, Share) for share in shares))
-		self.assertEqual([share.to_dict() for share in shares], items)
+		self.assertEqual([Share(**item).to_dict() for item in items], items)
 
 	def test_shares_for_vm_keeps_only_that_vm(self):
 		windows = make_share(name="A")
 		linux = make_share(name="B", vm="Linux")
-		back = Share("C", "Windows", VM_TO_MAC, "/x", "C:\\x", False)
-		self.assertEqual(shares_for_vm((windows, linux, back), "Windows"), (windows,))
+		self.assertEqual(shares_for_vm((windows, linux), "Windows"), (windows,))
 
 
 if __name__ == "__main__":

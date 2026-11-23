@@ -15,6 +15,7 @@ from fakes import write_config
 from wn import share_sftp
 from wn.downloads import RCLONE_MAC_BINARY, RCLONE_WINDOWS_BINARY, ShareTools
 from wn.share_sftp import (
+	COMMON_SCRIPT,
 	PREPARE_SCRIPT,
 	SftpServerSupervisor,
 	SharePaths,
@@ -25,7 +26,6 @@ from wn.share_sftp import (
 	can_connect,
 	check_folder,
 	install_binaries,
-	kill_orphan_servers,
 	last_log_line,
 	new_host_key,
 	load_guest_script,
@@ -100,7 +100,7 @@ class ServerCommandTest(SharePathsTestCase):
 	def test_server_command(self):
 		self.assertEqual(server_command(make_share(), self.paths), [
 			os.path.join(self.root, "bin", "rclone"), "serve", "sftp", "/Users/c/Projects",
-			"--config", os.path.join(self.root, "empty-rclone.conf"),
+			"--config", "",
 			"--addr", "192.168.64.1:47321",
 			"--key", os.path.join(self.root, "host_ed25519-Projects"),
 			"--authorized-keys", os.path.join(self.root, "client_ed25519.pub"),
@@ -118,16 +118,15 @@ class ServerCommandTest(SharePathsTestCase):
 		for read_only in (False, True):
 			assert_safe_rclone_arguments(self, server_command(make_share(read_only=read_only), self.paths))
 
-	def test_server_command_reads_only_wns_empty_config(self):
+	def test_server_command_reads_no_rclone_config(self):
 		command = server_command(make_share(), self.paths)
 		self.assertEqual(command.count("--config"), 1)
-		self.assertEqual(command[command.index("--config") + 1], self.paths.empty_config)
+		self.assertEqual(command[command.index("--config") + 1], "")
 
 	def test_share_paths_live_in_the_support_folder(self):
 		paths = share_paths()
 		self.assertEqual(paths.root, os.path.join(self.home.name, "Library", "Application Support", "wn", "shares"))
 		self.assertEqual(paths.logs, os.path.join(self.home.name, "Library", "Logs"))
-		self.assertEqual(paths.pid_file("Projects"), os.path.join(paths.root, "Projects.pid"))
 		self.assertEqual(paths.state_file, os.path.join(paths.root, "state.json"))
 		self.assertEqual(paths.windows_rclone, os.path.join(paths.root, "bin", "rclone.exe"))
 
@@ -196,9 +195,6 @@ class KeysTest(SharePathsTestCase):
 		self.assertEqual(file_mode(self.root), 0o700)
 		self.assertEqual(file_mode(self.paths.client_key), 0o600)
 		self.assertEqual(file_mode(self.paths.client_public_key), 0o644)
-		self.assertTrue(os.path.isfile(self.paths.empty_config))
-		self.assertEqual(os.path.getsize(self.paths.empty_config), 0)
-		self.assertEqual(file_mode(self.paths.empty_config), 0o600)
 		second = FakeKeygen()
 		ensure_keys(self.paths, run=second)
 		self.assertEqual(second.calls, [])
@@ -243,7 +239,6 @@ class KeysTest(SharePathsTestCase):
 		self.assertEqual(file_mode(self.root), 0o700)
 		self.assertEqual(file_mode(key_path), 0o600)
 		self.assertEqual(file_mode(key_path + ".pub"), 0o644)
-		self.assertTrue(os.path.isfile(self.paths.empty_config))
 
 	def test_new_host_key_replaces_a_leftover_key(self):
 		os.makedirs(self.root)
@@ -400,6 +395,17 @@ class GuestScriptTest(unittest.TestCase):
 	def test_guest_script_bytes_matches_the_text(self):
 		self.assertEqual(guest_script_bytes(PREPARE_SCRIPT).decode("utf-8"), load_guest_script(PREPARE_SCRIPT))
 
+	def test_guest_scripts_start_with_the_common_script(self):
+		directory = tempfile.TemporaryDirectory()
+		self.addCleanup(directory.cleanup)
+		for name, text in ((COMMON_SCRIPT, b"common\n"), (PREPARE_SCRIPT, b"prepare\n")):
+			with open(os.path.join(directory.name, name), "wb") as handle:
+				handle.write(text)
+		with mock.patch.object(share_sftp, "GUEST_SCRIPTS_DIRECTORY", directory.name):
+			self.assertEqual(guest_script_bytes(PREPARE_SCRIPT), b"common\nprepare\n")
+			self.assertEqual(load_guest_script(PREPARE_SCRIPT), "common\nprepare\n")
+			self.assertEqual(guest_script_bytes(COMMON_SCRIPT), b"common\n")
+
 
 class MacStateTest(SharePathsTestCase):
 	def write_state(self, text):
@@ -428,7 +434,6 @@ FIRST_MTIME_NS = 10 ** 18
 SLEEP_SECONDS = 600
 SUPERVISOR_TICK = 2
 SHORT_LOG_LIMIT = 10
-ORPHAN_PID = 4242
 
 
 class FakeClock:
@@ -443,11 +448,10 @@ class FakeClock:
 
 
 class FakeServerProcess:
-	def __init__(self, pid, ignores_sigterm=False, ignores_sigkill=False):
+	def __init__(self, pid, ignores_sigterm=False):
 		self.pid = pid
 		self.returncode = None
 		self.ignores_sigterm = ignores_sigterm
-		self.ignores_sigkill = ignores_sigkill
 		self.terminated = False
 		self.killed = False
 		self.wait_timeouts = []
@@ -468,8 +472,7 @@ class FakeServerProcess:
 
 	def kill(self):
 		self.killed = True
-		if not self.ignores_sigkill:
-			self.returncode = -signal.SIGKILL
+		self.returncode = -signal.SIGKILL
 
 
 class FakePopen:
@@ -486,26 +489,6 @@ class FakePopen:
 		process = FakeServerProcess(FIRST_PID + len(self.processes), **self.options)
 		self.processes.append(process)
 		return process
-
-
-class FakeKill:
-	def __init__(self, alive=True):
-		self.calls = []
-		self.alive = alive
-
-	def __call__(self, pid, sig):
-		self.calls.append((pid, sig))
-		if not self.alive:
-			raise ProcessLookupError(pid)
-
-
-def fake_ps(*outputs):
-	remaining = list(outputs)
-
-	def run(argv, capture_output, text):
-		output = remaining.pop(0) if len(remaining) > 1 else remaining[0]
-		return subprocess.CompletedProcess(argv, 0, output, "")
-	return run
 
 
 class SftpServerSupervisorTests(SharePathsTestCase):
@@ -569,8 +552,6 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.tick()
 		self.assertEqual(self.popen.commands, [server_command(Share(**item), self.paths)])
 		self.assertEqual(self.state(), {"Projects": {"state": "starting", "detail": "192.168.64.1:47321", "pid": FIRST_PID}})
-		with open(self.paths.pid_file("Projects")) as handle:
-			self.assertEqual(handle.read().strip(), str(FIRST_PID))
 		supervisor.tick()
 		self.assertEqual(self.state(), {"Projects": {"state": "serving", "detail": "192.168.64.1:47321", "pid": FIRST_PID}})
 		self.assertIn("share Projects: serving, 192.168.64.1:47321\n", self.log.getvalue())
@@ -642,7 +623,6 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		self.advance(SUPERVISOR_TICK)
 		supervisor.tick()
 		self.assertTrue(self.popen.processes[0].terminated)
-		self.assertFalse(os.path.exists(self.paths.pid_file("Projects")))
 		self.assertEqual(self.state()["Projects"]["state"], "waiting")
 		self.present = True
 		self.advance(SUPERVISOR_TICK)
@@ -658,7 +638,6 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.tick()
 		self.assertIn("share Projects: rclone exited with code 1. Starting it again in 5 s\n", self.log.getvalue())
 		self.assertEqual(self.state()["Projects"], {"state": "restarting", "detail": "rclone exited with code 1", "pid": None})
-		self.assertFalse(os.path.exists(self.paths.pid_file("Projects")))
 		self.advance(4)
 		supervisor.tick()
 		self.assertEqual(len(self.popen.commands), 1)
@@ -735,7 +714,6 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.tick()
 		self.assertTrue(self.popen.processes[0].terminated)
 		self.assertFalse(self.popen.processes[1].terminated)
-		self.assertFalse(os.path.exists(self.paths.pid_file("Projects")))
 		self.assertEqual(set(self.state()), {"Photos"})
 
 	def test_removing_the_last_share_updates_the_state_file(self):
@@ -864,7 +842,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		self.assertEqual(len(self.popen.commands), 1)
 
 	def test_stop_does_not_wait_for_a_tick_that_hangs(self):
-		supervisor = self.supervisor(run=fake_ps(""))
+		supervisor = self.supervisor()
 		entered = threading.Event()
 		release = threading.Event()
 		self.addCleanup(release.set)
@@ -901,7 +879,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.tick()
 		self.assertEqual(os.stat(self.paths.state_file).st_mtime_ns, FIRST_MTIME_NS)
 
-	def test_state_and_pid_files_are_private_and_replaced_atomically(self):
+	def test_state_file_is_private_and_replaced_atomically(self):
 		previous = os.umask(OPEN_UMASK)
 		self.addCleanup(os.umask, previous)
 		with open(self.paths.state_file + ".part", "w") as handle:
@@ -911,9 +889,7 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		with mock.patch.object(share_sftp.os, "replace", wraps=os.replace) as replace:
 			self.supervisor().tick()
 		self.assertIn(mock.call(self.paths.state_file + ".part", self.paths.state_file), replace.call_args_list)
-		self.assertIn(mock.call(self.paths.pid_file("Projects") + ".part", self.paths.pid_file("Projects")), replace.call_args_list)
 		self.assertEqual(file_mode(self.paths.state_file), 0o600)
-		self.assertEqual(file_mode(self.paths.pid_file("Projects")), 0o600)
 		self.assertEqual(file_mode(self.paths.log_file("Projects")), 0o600)
 		self.assertFalse(os.path.exists(self.paths.state_file + ".part"))
 
@@ -998,74 +974,20 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 		supervisor.tick()
 		process = self.popen.processes[0]
 		self.assertTrue(process.killed)
-		self.assertEqual(process.wait_timeouts, [3, 3])
-
-	def test_a_server_stuck_after_sigkill_does_not_block_and_is_reaped_later(self):
-		self.write_shares(self.share_item())
-		self.popen.options = {"ignores_sigterm": True, "ignores_sigkill": True}
-		supervisor = self.supervisor()
-		supervisor.tick()
-		self.present = False
-		supervisor.tick()
-		process = self.popen.processes[0]
-		self.assertNotIn(None, process.wait_timeouts)
-		self.assertEqual(supervisor.unreaped, [(process, self.paths.pid_file("Projects"))])
-		process.returncode = -signal.SIGKILL
-		supervisor.tick()
-		self.assertEqual(supervisor.unreaped, [])
-
-	def test_a_stuck_server_keeps_its_pid_file_until_it_is_reaped(self):
-		self.write_shares(self.share_item())
-		self.popen.options = {"ignores_sigterm": True, "ignores_sigkill": True}
-		supervisor = self.supervisor()
-		supervisor.tick()
-		self.present = False
-		supervisor.tick()
-		supervisor.tick()
-		with open(self.paths.pid_file("Projects")) as handle:
-			self.assertEqual(handle.read(), "{}\n".format(FIRST_PID))
-		self.popen.processes[0].returncode = -signal.SIGKILL
-		supervisor.tick()
-		self.assertFalse(os.path.exists(self.paths.pid_file("Projects")))
-
-	def test_reaping_a_stuck_server_keeps_the_pid_file_of_its_successor(self):
-		self.write_shares(self.share_item())
-		self.popen.options = {"ignores_sigterm": True, "ignores_sigkill": True}
-		supervisor = self.supervisor()
-		supervisor.tick()
-		self.present = False
-		supervisor.tick()
-		self.present = True
-		self.popen.options = {}
-		supervisor.tick()
-		self.popen.processes[0].returncode = -signal.SIGKILL
-		supervisor.tick()
-		with open(self.paths.pid_file("Projects")) as handle:
-			self.assertEqual(handle.read(), "{}\n".format(FIRST_PID + 1))
+		self.assertEqual(process.wait_timeouts, [3])
 
 	def test_stop_terminates_and_removes_the_state_file(self):
 		self.write_shares(self.share_item())
-		supervisor = self.supervisor(run=fake_ps(""))
+		supervisor = self.supervisor()
 		supervisor.tick()
 		supervisor.start()
 		supervisor.stop()
 		self.assertFalse(supervisor.thread.is_alive())
 		self.assertTrue(self.popen.processes[0].terminated)
 		self.assertFalse(os.path.exists(self.paths.state_file))
-		self.assertFalse(os.path.exists(self.paths.pid_file("Projects")))
-
-	def test_run_kills_orphans_before_the_first_tick(self):
-		with open(self.paths.pid_file("Old"), "w") as handle:
-			handle.write("{}\n".format(ORPHAN_PID))
-		kill = FakeKill(alive=False)
-		supervisor = self.supervisor(run=fake_ps(""), kill=kill)
-		supervisor.stopping.set()
-		supervisor.run()
-		self.assertEqual(kill.calls, [(ORPHAN_PID, 0)])
-		self.assertFalse(os.path.exists(self.paths.pid_file("Old")))
 
 	def test_run_logs_each_new_tick_error_once_and_keeps_ticking(self):
-		supervisor = self.supervisor(run=fake_ps(""))
+		supervisor = self.supervisor()
 		errors = [OSError(28, "No space left on device")] * 3 + [ValueError("bad state")]
 		waits = []
 		def tick():
@@ -1083,106 +1005,11 @@ class SftpServerSupervisorTests(SharePathsTestCase):
 			"shares: unexpected error, trying again in 2 s: bad state\n"
 		))
 
-	def test_run_logs_an_orphan_cleanup_error_and_keeps_going(self):
-		with open(self.paths.pid_file("Old"), "w") as handle:
-			handle.write("{}\n".format(ORPHAN_PID))
-		ticks = []
-		def run(argv, capture_output, text):
-			raise OSError(35, "Resource temporarily unavailable")
-		supervisor = self.supervisor(run=run, kill=FakeKill())
-		def tick():
-			ticks.append(True)
-			supervisor.stopping.set()
-		supervisor.tick = tick
-		supervisor.run()
-		self.assertEqual(ticks, [True])
-		self.assertEqual(self.log.getvalue(), "shares: cannot stop the share servers of a previous agent: [Errno 35] Resource temporarily unavailable\n")
-
 	def test_run_ends_on_keyboard_interrupt(self):
-		supervisor = self.supervisor(run=fake_ps(""))
+		supervisor = self.supervisor()
 		supervisor.tick = mock.Mock(side_effect=KeyboardInterrupt)
 		with self.assertRaises(KeyboardInterrupt):
 			supervisor.run()
-
-
-class KillOrphanServersTests(SharePathsTestCase):
-	def setUp(self):
-		super().setUp()
-		os.makedirs(self.root)
-		self.clock = FakeClock(START_TIME)
-		self.wn_command = "{} serve sftp /x --addr 192.168.64.1:47321".format(self.paths.mac_rclone)
-
-	def write_pid(self, name, text):
-		with open(self.paths.pid_file(name), "w") as handle:
-			handle.write(text)
-
-	def kill_orphans(self, run, kill):
-		kill_orphan_servers(self.paths, run=run, kill=kill, sleep=self.clock.advance, clock=self.clock)
-
-	def spawn_sleeper(self):
-		process = subprocess.Popen(["/bin/sleep", "30"])
-		self.addCleanup(process.wait)
-		self.addCleanup(process.kill)
-		return process
-
-	def test_kill_orphan_servers_kills_only_wn_rclone(self):
-		for output, killed in ((self.wn_command, True), ("/bin/sleep 30", False)):
-			with self.subTest(output=output):
-				process = self.spawn_sleeper()
-				self.write_pid("Projects", "{}\n".format(process.pid))
-				calls = []
-
-				def kill(pid, sig):
-					calls.append((pid, sig))
-					os.kill(pid, sig)
-					if sig == signal.SIGTERM:
-						process.wait()
-				self.kill_orphans(fake_ps(output), kill)
-				self.assertEqual((process.pid, signal.SIGTERM) in calls, killed)
-				self.assertNotIn((process.pid, signal.SIGKILL), calls)
-				self.assertEqual(process.poll() == -signal.SIGTERM, killed)
-				self.assertFalse(os.path.exists(self.paths.pid_file("Projects")))
-
-	def test_a_server_that_ignores_sigterm_gets_sigkill_after_3_s(self):
-		self.write_pid("Projects", "{}\n".format(ORPHAN_PID))
-		kill = FakeKill()
-		self.kill_orphans(fake_ps(self.wn_command), kill)
-		self.assertEqual([call for call in kill.calls if call[1] != 0], [(ORPHAN_PID, signal.SIGTERM), (ORPHAN_PID, signal.SIGKILL)])
-		self.assertGreaterEqual(self.clock.value, START_TIME + 3)
-
-	def test_a_pid_reused_during_the_wait_is_not_killed(self):
-		self.write_pid("Projects", "{}\n".format(ORPHAN_PID))
-		kill = FakeKill()
-		self.kill_orphans(fake_ps(self.wn_command, "/usr/bin/other"), kill)
-		self.assertNotIn((ORPHAN_PID, signal.SIGKILL), kill.calls)
-
-	def test_a_command_that_only_mentions_the_rclone_path_is_not_killed(self):
-		self.write_pid("Projects", "{}\n".format(ORPHAN_PID))
-		kill = FakeKill()
-		self.kill_orphans(fake_ps("/usr/bin/grep serve sftp {}".format(self.paths.mac_rclone)), kill)
-		self.assertEqual(kill.calls, [(ORPHAN_PID, 0)])
-
-	def test_a_process_of_another_user_is_left_alone(self):
-		self.write_pid("Projects", "{}\n".format(ORPHAN_PID))
-		calls = []
-
-		def kill(pid, sig):
-			calls.append((pid, sig))
-			raise PermissionError(pid)
-		self.kill_orphans(fake_ps(self.wn_command), kill)
-		self.assertEqual(calls, [(ORPHAN_PID, 0)])
-
-	def test_bad_and_dead_pid_files_are_deleted(self):
-		self.write_pid("Bad", "not a pid")
-		self.write_pid("Dead", "{}\n".format(ORPHAN_PID))
-		kill = FakeKill(alive=False)
-		self.kill_orphans(fake_ps(self.wn_command), kill)
-		self.assertEqual(kill.calls, [(ORPHAN_PID, 0)])
-		self.assertEqual(os.listdir(self.root), [])
-
-	def test_a_missing_shares_folder_is_fine(self):
-		os.rmdir(self.root)
-		self.kill_orphans(fake_ps(self.wn_command), FakeKill())
 
 
 if __name__ == "__main__":

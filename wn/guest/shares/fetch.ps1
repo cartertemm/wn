@@ -1,4 +1,3 @@
-$Root = 'C:\ProgramData\wn'
 $LogTailLines = 20
 $Rclone = Join-Path $Root 'bin\rclone.exe'
 $RcloneInUseError = 'rclone.exe in Windows is in use by mounted shares, so wn cannot replace it. Run wn unshare for each share, then run wn share again'

@@ -12,7 +12,7 @@ from tests.fakes import FakeBackend, write_config
 from wn.backends.utm import UnknownVMError, UTMCtlError
 from wn.config import REMOVE_SETTING, ConfigError, load_config, update_config_file
 from wn.downloads import RCLONE_WINDOWS_BINARY, WINFSP_SOURCE, ShareTools
-from wn.guest_runner import GuestError, GuestScriptError
+from wn.guest_runner import GuestError
 from wn import share_commands
 from wn.agent import launch_agent_path, pid_file_path
 from wn.share_commands import AGENT_PICKUP_TIMEOUT_SECONDS, LOCK_FILE_NAME, REMOVE_PROGRESS_SECONDS, WINFSP_NOTICE, ShareCommands, agent_is_installed, agent_is_running
@@ -65,6 +65,10 @@ def status_text(shares, updated="2026-11-17T10:00:00Z"):
 	return json.dumps({"updated": updated, "shares": shares})
 
 
+def script_failure(label, output):
+	return GuestError("{} failed in Windows with exit code 1:\n{}".format(label, output))
+
+
 class FakeRunner:
 	"""Stands in for GuestRunner. Scripts are told apart by their label, the script file name."""
 
@@ -76,9 +80,9 @@ class FakeRunner:
 		self.results = {
 			PREPARE_SCRIPT: prepare_result(),
 			FETCH_SCRIPT: {"mismatch": None, "winfsp_exit": 0, "winfsp_log": []},
-			TASK_SCRIPT: {"task": "registered"},
+			TASK_SCRIPT: {},
 			CLEANUP_SCRIPT: {"cleaned": True, "shares_with_cache": []},
-			UNPREPARE_SCRIPT: {"removed": True},
+			UNPREPARE_SCRIPT: {},
 		}
 		self.results.update(results or {})
 
@@ -509,8 +513,8 @@ class AddShareTests(ShareCommandTestCase):
 
 	def test_winfsp_notice_prints_when_a_later_step_fails(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(winfsp="missing")
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "task failed")
-		with self.assertRaises(GuestScriptError):
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "task failed")
+		with self.assertRaises(GuestError):
 			self.add()
 		self.assertEqual(self.output.getvalue().splitlines(), [WINFSP_NOTICE])
 
@@ -533,11 +537,6 @@ class AddShareTests(ShareCommandTestCase):
 		self.assert_refused_with_config_unchanged("WinFsp setup failed in Windows with exit code 1603:\nline one\nline two")
 		self.assertEqual(self.pushes(), [])
 		self.assertNotIn(WINFSP_NOTICE, self.output.getvalue())
-
-	def test_winfsp_log_with_other_element_types_is_shown(self):
-		self.runner.results[PREPARE_SCRIPT] = prepare_result(winfsp="missing")
-		self.runner.results[FETCH_SCRIPT] = {"mismatch": None, "winfsp_exit": 1603, "winfsp_log": [{"value": "line one", "PSPath": "C:\\log"}, {"other": 1}, 7, None]}
-		self.assert_refused_with_config_unchanged("WinFsp setup failed in Windows with exit code 1603:\nline one\n{'other': 1}\n7\nNone")
 
 	def test_refused_vm_paths(self):
 		cases = (
@@ -575,8 +574,8 @@ class AddShareTests(ShareCommandTestCase):
 		self.assertEqual(self.runner.calls, [])
 
 	def test_lock_is_released_after_a_failure(self):
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "task failed")
-		with self.assertRaises(GuestScriptError):
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "task failed")
+		with self.assertRaises(GuestError):
 			self.add()
 		self.hold_lock()
 
@@ -672,8 +671,8 @@ class AddShareTests(ShareCommandTestCase):
 
 	def test_private_key_goes_only_through_push(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(winfsp="missing", rclone_sha256=None)
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "task failed")
-		with self.assertRaises(GuestScriptError) as caught:
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "task failed")
+		with self.assertRaises(GuestError) as caught:
 			self.add()
 		secret = "secretkeymaterial"
 		self.assertEqual(self.runner.files[GUEST_CLIENT_KEY], CLIENT_KEY_TEXT)
@@ -843,14 +842,14 @@ class RollbackTests(ShareCommandTestCase):
 		self.assert_rolled_back()
 
 	def test_task_script_failure_rolls_back(self):
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
-		with self.assertRaises(GuestScriptError):
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "Register-ScheduledTask failed")
+		with self.assertRaises(GuestError):
 			self.add()
 		self.assert_rolled_back()
 		self.assertEqual(self.pushes()[-1], FOLDER + "\\remove")
 
 	def test_failed_remove_push_does_not_hide_the_error(self):
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "Register-ScheduledTask failed")
 		self.runner.push_errors[FOLDER + "\\remove"] = GuestError("utmctl file push failed")
 		with self.assertRaises(ShareError) as caught:
 			self.add()
@@ -861,7 +860,7 @@ class RollbackTests(ShareCommandTestCase):
 		self.assertTrue(os.path.exists(self.paths.host_key(SHARE_NAME)))
 
 	def test_failed_config_rollback_does_not_hide_the_error(self):
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "Register-ScheduledTask failed")
 		with mock.patch("wn.share_commands.update_config_file", side_effect=self.first_then_fail(update_config_file)):
 			with self.assertRaises(ShareError) as caught:
 				self.add()
@@ -893,16 +892,16 @@ class RollbackTests(ShareCommandTestCase):
 		self.assert_no_host_key()
 
 	def test_rollback_of_the_only_share_removes_the_shares_setting(self):
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
-		with self.assertRaises(GuestScriptError):
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "Register-ScheduledTask failed")
+		with self.assertRaises(GuestError):
 			self.add()
 		self.assertNotIn("shares", json.loads(self.config_text()))
 
 	def test_rollback_removes_the_server_log_of_the_share(self):
 		os.makedirs(self.paths.logs)
-		self.runner.results[TASK_SCRIPT] = GuestScriptError(TASK_SCRIPT, 1, "Register-ScheduledTask failed")
+		self.runner.results[TASK_SCRIPT] = script_failure(TASK_SCRIPT, "Register-ScheduledTask failed")
 		self.runner.on_call = lambda call: open(self.paths.log_file(SHARE_NAME), "a").close() if call[:2] == ("run", TASK_SCRIPT) else None
-		with self.assertRaises(GuestScriptError):
+		with self.assertRaises(GuestError):
 			self.add()
 		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
 
@@ -924,7 +923,7 @@ class RollbackTests(ShareCommandTestCase):
 
 	def test_failed_cleanup_after_a_rollback_does_not_hide_the_error(self):
 		self.blocked_mount()
-		self.runner.results[CLEANUP_SCRIPT] = GuestScriptError(CLEANUP_SCRIPT, 1, "Access is denied")
+		self.runner.results[CLEANUP_SCRIPT] = script_failure(CLEANUP_SCRIPT, "Access is denied")
 		with self.assertRaises(ShareError) as caught:
 			self.add()
 		message = str(caught.exception)
@@ -982,7 +981,7 @@ class RollbackTests(ShareCommandTestCase):
 
 	def test_a_failed_folder_removal_does_not_hide_the_refusal(self):
 		self.runner.results[PREPARE_SCRIPT] = prepare_result(parent_exists=False)
-		self.runner.results[UNPREPARE_SCRIPT] = GuestScriptError(UNPREPARE_SCRIPT, 1, "Access is denied")
+		self.runner.results[UNPREPARE_SCRIPT] = script_failure(UNPREPARE_SCRIPT, "Access is denied")
 		with self.assertRaises(ShareError) as caught:
 			self.add()
 		self.assertEqual(str(caught.exception), "the folder that holds {} does not exist in Windows. Create it first\nAlso could not remove the empty share folder {} from Windows: unprepare.ps1 failed in Windows with exit code 1:\nAccess is denied".format(VM_PATH, FOLDER))
@@ -1033,7 +1032,7 @@ class SavedShareTestCase(ShareCommandTestCase):
 
 class ListTests(SavedShareTestCase):
 	def list_lines(self, **changes):
-		self.assertEqual(self.commands(**changes).list_shares(), 0)
+		self.assertIsNone(self.commands(**changes).list_shares())
 		return self.output.getvalue().splitlines()
 
 	def test_no_shares(self):

@@ -1,24 +1,4 @@
-$Root = 'C:\ProgramData\wn'
-$TaskName = 'wn-shares'
-$StopWaitSeconds = 10
 $SharesFolder = Join-Path $Root 'shares'
-
-function Wait-TaskStopped {
-	for ($second = 0; $second -lt $StopWaitSeconds; $second++) {
-		if ((Get-ScheduledTask -TaskName $TaskName).State -ne 'Running') { return }
-		Start-Sleep -Seconds 1
-	}
-}
-
-function Test-CacheFiles($Folder) {
-	$vfs = Join-Path $Folder 'cache\vfs'
-	if (-not (Test-Path -LiteralPath $vfs)) { return $false }
-	try {
-		return [bool](Get-ChildItem -LiteralPath $vfs -Recurse -File -Force | Select-Object -First 1)
-	} catch {
-		return $true
-	}
-}
 
 $sharesWithCache = @()
 if (Test-Path -LiteralPath $SharesFolder) {
@@ -39,7 +19,7 @@ if ($sharesWithCache.Count -eq 0) {
 	}
 	foreach ($name in 'bin', 'keys', 'shares') {
 		$path = Join-Path $Root $name
-		if (Test-Path -LiteralPath $path) { & cmd.exe /c rd /s /q ('\\?\' + $path) }
+		if (Test-Path -LiteralPath $path) { & cmd.exe /c rd /s /q ($LongPathPrefix + $path) }
 	}
 	foreach ($name in 'wn-shares.ps1', 'status.json') {
 		$path = Join-Path $Root $name

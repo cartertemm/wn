@@ -1,16 +1,7 @@
-$TaskName = 'wn-shares'
 $Supervisor = 'C:\ProgramData\wn\wn-shares.ps1'
-$StopWaitSeconds = 10
 $RestartCount = 999
 $RestartMinutes = 1
 $NormalPriority = 4
-
-function Wait-TaskStopped {
-	for ($second = 0; $second -lt $StopWaitSeconds; $second++) {
-		if ((Get-ScheduledTask -TaskName $TaskName).State -ne 'Running') { return }
-		Start-Sleep -Seconds 1
-	}
-}
 
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if (-not $task) {
@@ -21,16 +12,11 @@ if (-not $task) {
 	$repeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $RestartMinutes)
 	Register-ScheduledTask -TaskName $TaskName -Action $a -Principal $p -Settings $s -Trigger $t, $repeat -Force | Out-Null
 	Start-ScheduledTask -TaskName $TaskName
-	$action = 'registered'
 } elseif ($Params.restart) {
 	Stop-ScheduledTask -TaskName $TaskName
 	Wait-TaskStopped
 	Start-ScheduledTask -TaskName $TaskName
-	$action = 'restarted'
 } elseif ($task.State -ne 'Running') {
 	Start-ScheduledTask -TaskName $TaskName
-	$action = 'started'
-} else {
-	$action = 'running'
 }
-Write-Output ('wn-result: ' + (@{ task = $action } | ConvertTo-Json -Compress))
+Write-Output 'wn-result: {}'

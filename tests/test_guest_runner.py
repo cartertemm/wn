@@ -1,5 +1,4 @@
 import base64
-import http.server
 import io
 import itertools
 import os
@@ -21,8 +20,6 @@ from wn.guest_runner import (
 	FileOffer,
 	GuestError,
 	GuestRunner,
-	GuestScriptError,
-	GuestTimeoutError,
 	OfferServer,
 )
 
@@ -38,10 +35,6 @@ LOCALHOST = "127.0.0.1"
 FIRST_ID = "{:016x}".format(1)
 SCRIPT_TOKEN = "{:032x}".format(2)
 FILE_CONTENT = b"binary content"
-OFFER_WAIT_SECONDS = 0.5
-SHORT_OFFER_TIMEOUT = 0.2
-RACE_OFFER_TIMEOUT = 0.001
-SLOW_CLOSE_SECONDS = 0.2
 SCRIPT_TIMEOUT = 10
 ERROR_LINE_COUNT = 30
 LARGE_FILE_BYTES = 64 * 1024 * 1024
@@ -257,9 +250,8 @@ class GuestRunnerTests(unittest.TestCase):
 	def test_nonzero_exit_code_raises_with_the_last_20_lines(self):
 		output = "".join("line {}\r\n".format(number) for number in range(1, ERROR_LINE_COUNT + 1))
 		guest = FakeGuest(exit_code=3, output=output)
-		with self.assertRaises(GuestScriptError) as caught:
+		with self.assertRaises(GuestError) as caught:
 			self.run_script(guest, label="x")
-		self.assertEqual(caught.exception.exit_code, 3)
 		message = str(caught.exception)
 		self.assertTrue(message.startswith("x failed in Windows with exit code 3"))
 		self.assertNotIn("line 10\n", message)
@@ -268,30 +260,29 @@ class GuestRunnerTests(unittest.TestCase):
 
 	def test_wrong_token_is_ignored(self):
 		guest = FakeGuest(done_token="other")
-		with self.assertRaises(GuestTimeoutError):
+		with self.assertRaisesRegex(GuestError, "did not finish in Windows"):
 			self.run_script(guest, timeout=SCRIPT_TIMEOUT)
 
 	def test_timeout_raises_with_partial_output(self):
 		guest = FakeGuest(polls_until_done=1000)
 		guest.files["{}\\{}.out".format(EXEC_DIRECTORY, FIRST_ID)] = "half done\r\n"
 		clock = FakeClock()
-		with self.assertRaises(GuestTimeoutError) as caught:
+		with self.assertRaises(GuestError) as caught:
 			make_runner(guest, clock).run("Write-Output hi", timeout=SCRIPT_TIMEOUT)
-		self.assertEqual(caught.exception.output, "half done\n")
+		self.assertEqual(str(caught.exception), "guest script did not finish in Windows within {} s. Output so far:\nhalf done".format(SCRIPT_TIMEOUT))
 		self.assertGreaterEqual(clock.now, SCRIPT_TIMEOUT)
 		self.assertEqual(guest.calls[-1], ("exec_command", "cmd.exe", "/c", "del /q C:\\ProgramData\\wn\\exec\\{}.*".format(FIRST_ID)))
 
 	def test_timeout_is_raised_when_cleanup_fails(self):
-		with self.assertRaises(GuestTimeoutError):
+		with self.assertRaisesRegex(GuestError, "did not finish in Windows"):
 			self.run_script(FailingDeleteGuest(polls_until_done=1000), timeout=SCRIPT_TIMEOUT)
 
 	def test_finished_script_succeeds_when_cleanup_fails(self):
 		self.assertEqual(self.run_script(FailingDeleteGuest(output="done\r\n")), "done\n")
 
 	def test_failed_script_keeps_its_exit_code_when_cleanup_fails(self):
-		with self.assertRaises(GuestScriptError) as caught:
+		with self.assertRaisesRegex(GuestError, "failed in Windows with exit code 2"):
 			self.run_script(FailingDeleteGuest(exit_code=2, output="bad\r\n"))
-		self.assertEqual(caught.exception.exit_code, 2)
 
 	def test_cleanup_raises_when_the_vm_is_gone(self):
 		with self.assertRaises(UnknownVMError):
@@ -356,8 +347,8 @@ class FileOfferTests(unittest.TestCase):
 		with open(self.path, "wb") as target:
 			target.write(FILE_CONTENT)
 
-	def offer(self, timeout=SCRIPT_TIMEOUT):
-		return FileOffer({"tool.zip": self.path}, host=LOCALHOST, timeout=timeout)
+	def offer(self):
+		return FileOffer({"tool.zip": self.path}, host=LOCALHOST)
 
 	def assert_status(self, url, status):
 		with self.assertRaises(urllib.error.HTTPError) as caught:
@@ -422,28 +413,10 @@ class FileOfferTests(unittest.TestCase):
 		with self.offer() as offer:
 			self.assertEqual(offer.server.server_address[0], LOCALHOST)
 
-	def test_offer_stops_after_the_timeout(self):
-		with self.offer(timeout=SHORT_OFFER_TIMEOUT) as offer:
-			threading.Event().wait(OFFER_WAIT_SECONDS)
-			self.assert_refused(offer.url("tool.zip"))
-
 	def test_offer_stops_at_the_end_of_the_block(self):
 		with self.offer() as offer:
 			url = offer.url("tool.zip")
 		self.assert_refused(url)
-
-	def test_offer_socket_is_closed_at_the_end_of_the_block_while_the_timeout_stops_it(self):
-		original_close = http.server.ThreadingHTTPServer.server_close
-
-		def slow_close(server):
-			threading.Event().wait(SLOW_CLOSE_SECONDS)
-			original_close(server)
-
-		with mock.patch.object(http.server.ThreadingHTTPServer, "server_close", slow_close):
-			with self.offer(timeout=RACE_OFFER_TIMEOUT) as offer:
-				while not offer.stopped:
-					threading.Event().wait(RACE_OFFER_TIMEOUT)
-		self.assertEqual(offer.server.socket.fileno(), -1)
 
 
 if __name__ == "__main__":
