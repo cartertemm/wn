@@ -96,6 +96,9 @@ KNOWN_HOSTS_NAME = "known_hosts"
 SHARE_JSON_NAME = "share.json"
 MOUNT_LOG_NAME = "mount.log"
 REMOVE_MARKER_NAME = "remove"
+WINDOWS_ONLY_MARKER_NAME = "orphan"
+DISCARD_MARKER_NAME = "discard"
+GUEST_CACHE_FILES = "cache\\vfs\\share"
 LOCK_FILE_NAME = "commands.lock"
 READ_WRITE_TEXT = "read and write"
 READ_ONLY_TEXT = "read only"
@@ -171,6 +174,20 @@ def _only_refused_uploads(entry):
 	failed = entry.get("failed")
 	to_upload = entry.get("to_upload")
 	return isinstance(failed, int) and isinstance(to_upload, int) and failed >= 1 and failed >= to_upload
+
+
+def _file_count(count):
+	return "1 file" if count == 1 else "{} files".format(count)
+
+
+def _listed_shares(guest):
+	"""Return the names of the shares that Windows lists, leaving out the folders that never got a share.json."""
+	return sorted(key for key, entry in guest.items() if _state_of(entry) != INCOMPLETE_STATE)
+
+
+def _windows_only_shares(guest, own):
+	names = {share.name.casefold() for share in own}
+	return [key for key in _listed_shares(guest) if key.casefold() not in names]
 
 
 def _reported(entry):
@@ -485,15 +502,16 @@ class ShareCommands:
 
 	def list_shares(self):
 		shares = load_config().shares
-		if not shares:
+		own = shares_for_vm(shares, self.config.vm_name)
+		guest, unknown_text = self._guest_view()
+		windows_only = _windows_only_shares(guest or {}, own)
+		if not shares and not windows_only:
 			self._print("No shares. Add one with wn {} <dir-on-mac> <dir-on-vm>".format(SHARE_COMMAND))
 			return EXIT_SUCCESS
-		own = shares_for_vm(shares, self.config.vm_name)
 		if own:
 			mac_state = read_mac_state(self.paths)["shares"]
 			agent_installed = self.agent_installed()
 			agent_running = self.agent_running()
-			guest, unknown_text = self._guest_view()
 		for share in shares:
 			if share not in own:
 				self._print("{}: belongs to VM '{}'".format(share.name, share.vm))
@@ -517,15 +535,23 @@ class ShareCommands:
 				windows_text = "not set up"
 			self._print("{}: Mac folder {} in Windows at {}, {}. Mac: {}. Windows: {}.".format(
 				share.name, share.mac_path, share.vm_path, READ_ONLY_TEXT if share.read_only else READ_WRITE_TEXT, mac_text, windows_text))
+		for key in windows_only:
+			path = guest[key].get("path")
+			self._print("{}: exists only in Windows{}. The Mac has no share by this name, so this folder does not work in Windows. Run wn {} {} to remove it from Windows.".format(
+				key, ", at {}".format(path) if path else "", REMOVE_COMMAND, key))
 		return EXIT_SUCCESS
 
 	def _find_share(self, name):
+		"""Return the config entry of share ``name``, or None and the guest's status when only Windows has it."""
 		shares = load_config().shares
 		for share in shares:
 			if share.name.casefold() == name.casefold():
 				if share.vm != self.config.vm_name:
 					raise ShareError("share '{}' belongs to VM '{}'. Set vm_name to '{}' in the config to remove it".format(share.name, share.vm, share.vm))
-				return share
+				return share, None
+		guest = self._guest_view()[0]
+		if guest is not None and _status_key(guest, name) in _listed_shares(guest):
+			return None, guest
 		if not shares:
 			raise ShareError("no share named '{}'. There are no shares".format(name))
 		raise ShareError("no share named '{}'. Shares: {}".format(name, ", ".join(share.name for share in shares)))
@@ -546,7 +572,7 @@ class ShareCommands:
 			if guest is None or _status_key(guest, name) is not None:
 				raise
 
-	def _wait_for_removal(self, name):
+	def _wait_for_removal(self, name, windows_only=False, discard=False):
 		"""Wait until a good status read no longer lists the share, and return that status. While Windows reports the share as removing and its status file changes, wait without limit."""
 		deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
 		next_progress = self.clock()
@@ -558,13 +584,17 @@ class ShareCommands:
 			entry = _status_entry(guest, name) if guest is not None else None
 			if _state_of(entry) == BLOCKED_STATE and entry.get("remove_requested"):
 				raise ShareError("Windows cannot remove the share: {}. Windows must mount the share once more to upload the files in its cache to the Mac. Fix that, then run wn {} {} again".format(entry.get("detail"), REMOVE_COMMAND, name))
+			unsaved = entry.get("unsaved") if _state_of(entry) == REMOVING_STATE else None
+			if isinstance(unsaved, int) and unsaved >= 1 and not discard:
+				raise ShareError("Windows has {} in the cache of share {} that never reached the Mac. The Mac has no share named {}, so these files cannot be uploaded, and wn did not remove the share. To keep them, copy them in Windows as an administrator from {}. Then run wn {} {} --discard, which removes the share and deletes these files from Windows.".format(
+					_file_count(unsaved), name, name, guest_share_folder(name) + "\\" + GUEST_CACHE_FILES, REMOVE_COMMAND, name))
 			if _state_of(entry) == REMOVING_STATE and _only_refused_uploads(entry):
 				raise ShareError("Windows cannot upload some files to the Mac, so wn did not remove the share. Windows reports: {}. Fix the cause on the Mac (a locked file, permissions, or a full disk), then run wn {} {} again. Windows keeps the files and uploads them when it can, which can take a few minutes after the fix".format(entry.get("detail"), REMOVE_COMMAND, name))
 			if _state_of(entry) == REMOVING_STATE:
 				if updated != last_updated:
 					deadline = self.clock() + REMOVE_TIMEOUT_SECONDS
 					last_updated = updated
-				if self.clock() >= next_progress:
+				if self.clock() >= next_progress and not windows_only:
 					pending = entry.get("pending")
 					detail = entry.get("detail")
 					waiting = "Waiting for Windows to upload {} {} to the Mac".format(pending, "file" if pending == 1 else "files") if isinstance(pending, int) else "Waiting for Windows to finish its uploads to the Mac" + (" ({})".format(detail) if detail else "")
@@ -574,12 +604,17 @@ class ShareCommands:
 				raise ShareError("Windows did not remove the share within {} s. Windows reports: {}. Run wn {} {} again later".format(REMOVE_TIMEOUT_SECONDS, _reported(entry), REMOVE_COMMAND, name))
 			self.sleep(STATUS_POLL_SECONDS)
 
-	def remove_share(self, name):
+	def remove_share(self, name, discard=False):
 		with self._command_lock():
-			self._remove_share(name)
+			self._remove_share(name, discard)
 
-	def _remove_share(self, name):
-		share = self._find_share(name)
+	def _remove_share(self, name, discard):
+		share, guest = self._find_share(name)
+		if share is None:
+			self._remove_windows_only(_status_key(guest, name), guest, discard)
+			return
+		if discard:
+			raise ShareError("--discard only applies to a share that exists only in Windows. {} is shared from the Mac, so run wn {} {} without --discard".format(share.name, REMOVE_COMMAND, share.name))
 		try:
 			self._check_vm(REMOVE_COMMAND, REMOVE_STOPPED_MESSAGE)
 		except UnknownVMError:
@@ -595,9 +630,25 @@ class ShareCommands:
 		guest = self._wait_for_removal(share.name)
 		self._remove_mac_side(share.name)
 		self._print("Removed {}. {} is gone from Windows. The files stay in {} on the Mac.".format(share.name, share.vm_path, share.mac_path))
+		self._clean_up_after_the_last_share(guest)
+
+	def _remove_windows_only(self, key, guest, discard):
+		"""Remove a share that Windows has and the config does not. It has no Mac server, so Windows keeps files that never reached the Mac unless ``discard`` is set."""
+		folder = guest_share_folder(key)
+		if discard:
+			self.runner.push(folder + "\\" + DISCARD_MARKER_NAME, b"")
+		self.runner.push(folder + "\\" + WINDOWS_ONLY_MARKER_NAME, b"")
+		self._ask_windows_to_remove(key)
+		self._run_script(TASK_SCRIPT, {"restart": False}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		path = guest[key].get("path")
+		guest = self._wait_for_removal(key, windows_only=True, discard=discard)
+		self._print("Removed {} from Windows.{}".format(key, " {} is gone from Windows.".format(path) if path else ""))
+		self._clean_up_after_the_last_share(guest)
+
+	def _clean_up_after_the_last_share(self, guest):
 		if shares_for_vm(load_config().shares, self.config.vm_name):
 			return
-		others = sorted(key for key, entry in guest.items() if _state_of(entry) != INCOMPLETE_STATE)
+		others = _listed_shares(guest)
 		if others:
 			self._print("Windows still lists other wn shares ({}), so wn kept its share files and the wn-shares task in Windows.".format(", ".join(others)))
 			return

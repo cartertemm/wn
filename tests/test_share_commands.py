@@ -930,6 +930,14 @@ class SavedShareTestCase(ShareCommandTestCase):
 	def pulls(self):
 		return [call[1] for call in self.runner.calls if call[0] == "pull"]
 
+	def remove(self, name=SHARE_NAME, discard=False, **changes):
+		return self.commands(**changes).remove_share(name, discard)
+
+	def answer_in_turn(self, *answers):
+		answers = list(answers)
+		self.runner.files[GUEST_STATUS_FILE] = lambda: answers.pop(0) if len(answers) > 1 else answers[0]
+		return answers
+
 
 class ListTests(SavedShareTestCase):
 	def list_lines(self, **changes):
@@ -937,14 +945,37 @@ class ListTests(SavedShareTestCase):
 		return self.output.getvalue().splitlines()
 
 	def test_no_shares(self):
+		self.guest_reports({"Stale": {"state": "incomplete", "detail": "the share folder has no share.json", "pid": None}})
+		self.assertEqual(self.list_lines(), ["No shares. Add one with wn share <dir-on-mac> <dir-on-vm>"])
+
+	def test_no_shares_while_windows_cannot_be_asked(self):
+		self.backend.state = "stopped"
 		self.assertEqual(self.list_lines(), ["No shares. Add one with wn share <dir-on-mac> <dir-on-vm>"])
 		self.assertEqual(self.runner.calls, [])
 
 	def test_share_of_another_vm(self):
 		self.save(self.share("Archive", vm="Test"))
+		self.guest_reports({})
 		self.assertEqual(self.list_lines(), ["Archive: belongs to VM 'Test'"])
-		self.assertEqual(self.runner.calls, [])
-		self.assertNotIn(("status",), self.backend.calls)
+
+	def test_shares_that_exist_only_in_windows_are_listed_after_the_others(self):
+		self.save(self.share())
+		self.guest_reports({
+			"projects": {"state": "mounted", "detail": "", "pid": 1, "path": VM_PATH},
+			"Old": {"state": "mounted", "detail": "", "pid": 2, "path": "C:\\wn-test\\Old"},
+			"NoPath": {"state": "waiting", "detail": "", "pid": None},
+			"Stale": {"state": "incomplete", "detail": "the share folder has no share.json", "pid": None},
+		})
+		self.assertEqual(self.list_lines()[1:], [
+			"NoPath: exists only in Windows. The Mac has no share by this name, so this folder does not work in Windows. Run wn unshare NoPath to remove it from Windows.",
+			"Old: exists only in Windows, at C:\\wn-test\\Old. The Mac has no share by this name, so this folder does not work in Windows. Run wn unshare Old to remove it from Windows.",
+		])
+
+	def test_a_share_only_in_windows_is_listed_when_the_config_has_none(self):
+		self.guest_reports({"Old": {"state": "mounted", "detail": "", "pid": 2, "path": "C:\\Old"}})
+		self.assertEqual(self.list_lines(), [
+			"Old: exists only in Windows, at C:\\Old. The Mac has no share by this name, so this folder does not work in Windows. Run wn unshare Old to remove it from Windows.",
+		])
 
 	def test_agent_not_running(self):
 		self.save(self.share())
@@ -1061,14 +1092,6 @@ class RemoveTests(SavedShareTestCase):
 			handle.write("rclone log\n")
 		self.new_host_key(self.paths, SHARE_NAME)
 
-	def remove(self, name=SHARE_NAME, **changes):
-		return self.commands(**changes).remove_share(name)
-
-	def answer_in_turn(self, *answers):
-		answers = list(answers)
-		self.runner.files[GUEST_STATUS_FILE] = lambda: answers.pop(0) if len(answers) > 1 else answers[0]
-		return answers
-
 	def assert_refused_with_everything_kept(self, message, name=SHARE_NAME):
 		before = self.config_text()
 		with self.assertRaises(ShareError) as caught:
@@ -1082,8 +1105,16 @@ class RemoveTests(SavedShareTestCase):
 	def test_unknown_name_lists_the_names(self):
 		other = self.make_mac_folder("Other")
 		self.save(self.share(), self.share("Other", mac_path=other, vm_path="C:\\Other", port=FIRST_PORT + 1))
+		self.guest_reports({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 1}, "Stale": {"state": "incomplete", "detail": "", "pid": None}})
 		self.assert_refused_with_everything_kept("no share named 'Missing'. Shares: Projects, Other", "Missing")
 		self.save()
+		self.assert_refused_with_everything_kept("no share named 'Missing'. There are no shares", "Missing")
+		self.assert_refused_with_everything_kept("no share named 'Stale'. There are no shares", "Stale")
+		self.assertEqual(self.pushes(), [])
+		self.assertEqual(self.runs(), [])
+
+	def test_unknown_name_while_windows_cannot_be_asked(self):
+		self.backend.state = "stopped"
 		self.assert_refused_with_everything_kept("no share named 'Missing'. There are no shares", "Missing")
 		self.assertEqual(self.runner.calls, [])
 
@@ -1331,6 +1362,15 @@ class RemoveTests(SavedShareTestCase):
 		self.assertEqual([share.name for share in load_config().shares], ["Archive"])
 
 
+	def test_discard_is_refused_for_a_share_on_the_mac(self):
+		self.save(self.share())
+		before = self.config_text()
+		with self.assertRaises(ShareError) as caught:
+			self.remove(discard=True)
+		self.assertEqual(str(caught.exception), "--discard only applies to a share that exists only in Windows. Projects is shared from the Mac, so run wn unshare Projects without --discard")
+		self.assertEqual(self.config_text(), before)
+		self.assertEqual(self.runner.calls, [])
+
 	def test_error_entry_is_not_gone(self):
 		self.save(self.share())
 		self.guest_reports({SHARE_NAME: {"state": "error", "detail": "could not delete " + FOLDER, "pid": None}})
@@ -1360,6 +1400,63 @@ class RemoveTests(SavedShareTestCase):
 		self.assertEqual(load_config().shares, ())
 		self.assertEqual(self.runs(), [TASK_SCRIPT])
 		self.assertEqual(self.output.getvalue().splitlines()[-1], "Windows still lists other wn shares (Leftover), so wn kept its share files and the wn-shares task in Windows.")
+
+
+class WindowsOnlyRemoveTests(SavedShareTestCase):
+	OLD_FOLDER = "C:\\ProgramData\\wn\\shares\\Old"
+
+	def old_entry(self, **changes):
+		entry = {"state": "mounted", "detail": "", "pid": 1, "path": "C:\\wn-test\\Old"}
+		entry.update(changes)
+		return entry
+
+	def test_a_share_only_in_windows_is_removed_from_windows(self):
+		self.answer_in_turn(status_text({"Old": self.old_entry()}), status_text({"Old": self.old_entry(state="removing", detail="")}), status_text({}))
+		before = self.config_text()
+		self.assertIsNone(self.remove("old"))
+		self.assertEqual(self.pushes(), [self.OLD_FOLDER + "\\orphan", self.OLD_FOLDER + "\\remove"])
+		self.assertEqual(self.runs(), [TASK_SCRIPT, CLEANUP_SCRIPT])
+		self.assertEqual(self.params_of(TASK_SCRIPT), {"restart": False})
+		self.assertEqual(self.config_text(), before)
+		self.assertEqual(self.output.getvalue().splitlines(), [
+			"Removed Old from Windows. C:\\wn-test\\Old is gone from Windows.",
+			"Removed the wn share files and the wn-shares task from Windows. WinFsp stays installed. To remove it, open Settings > Apps in Windows.",
+		])
+
+	def test_a_share_only_in_windows_next_to_a_healthy_share_keeps_the_task(self):
+		self.save(self.share())
+		self.answer_in_turn(status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 2}, "Old": self.old_entry()}), status_text({SHARE_NAME: {"state": "mounted", "detail": "", "pid": 2}}))
+		before = self.config_text()
+		self.remove("Old")
+		self.assertEqual(self.pushes(), [self.OLD_FOLDER + "\\orphan", self.OLD_FOLDER + "\\remove"])
+		self.assertEqual(self.runs(), [TASK_SCRIPT])
+		self.assertEqual(self.config_text(), before)
+		self.assertEqual(self.output.getvalue().splitlines(), ["Removed Old from Windows. C:\\wn-test\\Old is gone from Windows."])
+
+	def test_files_that_never_reached_the_mac_stop_the_removal(self):
+		self.answer_in_turn(status_text({"Old": self.old_entry()}), status_text({"Old": self.old_entry(state="removing", detail="2 files in the cache never reached the Mac", unsaved=2)}))
+		with self.assertRaises(ShareError) as caught:
+			self.remove("Old")
+		self.assertEqual(str(caught.exception), "Windows has 2 files in the cache of share Old that never reached the Mac. The Mac has no share named Old, so these files cannot be uploaded, and wn did not remove the share. To keep them, copy them in Windows as an administrator from C:\\ProgramData\\wn\\shares\\Old\\cache\\vfs\\share. Then run wn unshare Old --discard, which removes the share and deletes these files from Windows.")
+		self.assertNotIn(CLEANUP_SCRIPT, self.runs())
+		self.assertLess(self.clock.now, REMOVE_PROGRESS_SECONDS)
+
+	def test_one_file_that_never_reached_the_mac_is_singular(self):
+		self.guest_reports({"Old": self.old_entry(state="removing", unsaved=1)})
+		with self.assertRaises(ShareError) as caught:
+			self.remove("Old")
+		self.assertTrue(str(caught.exception).startswith("Windows has 1 file in the cache of share Old that never reached the Mac."))
+
+	def test_discard_removes_the_share_and_ignores_an_older_count(self):
+		self.answer_in_turn(status_text({"Old": self.old_entry(state="removing", unsaved=2)}), status_text({}))
+		self.remove("Old", discard=True)
+		self.assertEqual(self.pushes(), [self.OLD_FOLDER + "\\discard", self.OLD_FOLDER + "\\orphan", self.OLD_FOLDER + "\\remove"])
+		self.assertEqual(self.runs(), [TASK_SCRIPT, CLEANUP_SCRIPT])
+
+	def test_a_share_only_in_windows_without_a_path(self):
+		self.answer_in_turn(status_text({"Old": {"state": "waiting", "detail": "", "pid": None}}), status_text({}))
+		self.remove("Old")
+		self.assertEqual(self.output.getvalue().splitlines()[0], "Removed Old from Windows.")
 
 
 if __name__ == "__main__":

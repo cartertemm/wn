@@ -170,6 +170,7 @@ def _add_share_parsers(subcommands):
 	remove = subcommands.add_parser(REMOVE_COMMAND, help="stop sharing a folder and remove it from Windows",
 		description="Stop sharing a folder and remove it from Windows. The files stay on the Mac.")
 	remove.add_argument("share", help="name of the share, as wn {} shows it".format(LIST_COMMAND))
+	remove.add_argument("--discard", action="store_true", help="only for a share that exists only in Windows: remove it even when its Windows cache holds files that never reached the Mac, and delete those files")
 
 
 def _add_mouse_parser(subcommands):
@@ -633,7 +634,7 @@ def _remove_stopped_message(name):
 
 def run_remove_share(context):
 	name = context.arguments.share
-	return _run_share_action(context, lambda commands: commands.remove_share(name), lambda: _remove_stopped_message(name))
+	return _run_share_action(context, lambda commands: commands.remove_share(name, context.arguments.discard), lambda: _remove_stopped_message(name))
 
 
 COMMANDS = {

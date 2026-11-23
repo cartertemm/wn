@@ -6,6 +6,7 @@ SCRIPTS_DIRECTORY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath
 RUNNER_SCRIPTS = ("prepare.ps1", "fetch.ps1", "task.ps1", "cleanup.ps1")
 SUPERVISOR_SCRIPT = "wn-shares.ps1"
 FORBIDDEN_FLAGS = ("--pass", "--links", "-L", "--rc", "--sftp-chunk-size")
+UPLOAD_STOP = "\n\t\tStop-Process -Id $process.Id -Force\n"
 QUOTED_FLAG = re.compile(r"'(--?[A-Za-z][\w-]*)'")
 MEASURED_ARGUMENTS = (
 	"'--vfs-cache-mode', 'writes'",
@@ -125,7 +126,7 @@ class RemovalTests(unittest.TestCase):
 
 	def test_removal_starts_rclone_when_the_cache_has_files(self):
 		self.assertIn("if (-not $process -and (Test-Path -LiteralPath $shareFile) -and (Test-CacheFiles $Folder)) {", self.remove)
-		self.assertLess(self.remove.index("Start-Mount $Name"), self.remove.index("Stop-Process"))
+		self.assertLess(self.remove.index("Start-Mount $Name"), self.remove.index(UPLOAD_STOP))
 		cache_check = function_body(self.text, "Test-CacheFiles")
 		self.assertIn("'cache\\vfs'", cache_check)
 		self.assertIn("} catch {\n\t\treturn $true", cache_check)
@@ -133,7 +134,7 @@ class RemovalTests(unittest.TestCase):
 	def test_removal_never_stops_rclone_while_pending_is_unknown(self):
 		self.assertNotIn("CacheLineWaitSeconds", self.text)
 		self.assertNotIn("$Status[$Name].pending", self.remove)
-		self.assertLess(self.remove.index("if ((-not $counts -and (Test-CacheFiles $Folder)) -or (Test-DirtyCache $Folder)) {"), self.remove.index("Stop-Process"))
+		self.assertLess(self.remove.index("if ((-not $counts -and (Test-CacheFiles $Folder)) -or (Test-DirtyCache $Folder)) {"), self.remove.index(UPLOAD_STOP))
 
 	def test_removal_waits_while_files_are_open_in_windows(self):
 		self.assertIn(" in use (\\d+), to upload (\\d+), uploading (\\d+)'", self.text)
@@ -141,14 +142,15 @@ class RemovalTests(unittest.TestCase):
 		self.assertIn("$pending = [int]$Matches[3] + [int]$Matches[4]", counts)
 		self.assertIn("return @{ open = [Math]::Max(0, [int]$Matches[2] - $pending); pending = $pending }", counts)
 		self.assertIn("if ($counts -and $counts.open -gt 0) {\n\t\t\tSet-State $Name 'removing' ($OpenFilesDetail -f (Get-FileCount $counts.open)) $process.Id $null\n\t\t\treturn\n", self.remove)
-		self.assertLess(self.remove.index("$counts.open -gt 0"), self.remove.index("Stop-Process"))
+		self.assertLess(self.remove.index("$counts.open -gt 0"), self.remove.index(UPLOAD_STOP))
 
 	def test_removal_starts_rclone_again_when_the_cache_is_dirty_after_the_stop(self):
 		dirty = function_body(self.text, "Test-DirtyCache")
 		self.assertIn("$DirtyPattern = '\"Dirty\":\\s*true'", self.text)
-		self.assertIn("$LongPathPrefix + (Join-Path $Folder 'cache\\vfsMeta')", dirty)
+		self.assertIn("$LongPathPrefix + (Join-Path $Folder 'cache\\vfsMeta')", function_body(self.text, "Get-DirtyCount"))
+		self.assertIn("return (Get-DirtyCount $Folder) -gt 0", dirty)
 		self.assertIn("} catch {\n\t\treturn $true", dirty)
-		stop = self.remove.index("Stop-Process")
+		stop = self.remove.index(UPLOAD_STOP)
 		recheck = self.remove.index("if (Test-DirtyCache $Folder) {\n\t\t\t$Processes.Remove($Name)\n\t\t\tSet-State $Name 'removing' $CacheUploadDetail $null $null\n\t\t\treturn\n")
 		self.assertLess(stop, recheck)
 		self.assertLess(recheck, self.remove.index("rd /s /q"))
@@ -171,6 +173,26 @@ class RemovalTests(unittest.TestCase):
 	def test_startup_errors_do_not_end_the_supervisor(self):
 		self.assertRegex(self.text, r"\ntry \{\n(\t.*\n)*\tFind-Adopted\n\} catch \{\n")
 		self.assertNotIn("\nFind-Adopted\n", self.text)
+
+
+class WindowsOnlyRemovalTests(unittest.TestCase):
+	def setUp(self):
+		self.text = read_script(SUPERVISOR_SCRIPT)
+		self.remove = function_body(self.text, "Remove-Share")
+		self.orphan = self.remove[self.remove.index("if (Test-Path -LiteralPath (Join-Path $Folder 'orphan')) {"):self.remove.index("} elseif ($process -and $process.HasExited) {")]
+
+	def test_a_share_the_mac_no_longer_has_never_starts_rclone_to_upload(self):
+		self.assertLess(self.remove.index("'orphan'"), self.remove.index("Start-Mount"))
+		self.assertIn("Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue", self.orphan)
+		self.assertNotIn("Start-Mount", self.orphan)
+
+	def test_files_that_never_reached_the_mac_are_kept_unless_discarded(self):
+		self.assertLess(self.orphan.index("Stop-Process"), self.orphan.index("$unsaved = Get-DirtyCount $Folder"))
+		self.assertIn("if ($unsaved -and -not (Test-Path -LiteralPath (Join-Path $Folder 'discard'))) {\n\t\t\tSet-State $Name 'removing' ($UnsavedDetail -f (Get-FileCount $unsaved)) $null $null\n\t\t\t$Status[$Name].unsaved = $unsaved\n\t\t\treturn\n", self.orphan)
+
+	def test_status_entries_carry_the_windows_path(self):
+		loop = self.text[self.text.index("\nwhile ($true) {\n"):]
+		self.assertIn("$Status[$folder.Name].path = (Read-Share $folder.FullName).mount_path", loop)
 
 
 class UploadFailureTests(unittest.TestCase):
@@ -211,7 +233,7 @@ class UploadFailureTests(unittest.TestCase):
 		remove = function_body(self.text, "Remove-Share")
 		self.assertLess(remove.index("Update-Failures $Name $Folder"), remove.index("Get-CacheCounts"))
 		self.assertIn("Set-State $Name 'removing' ('{0}. {1}' -f $detail, $failed) $process.Id $null\n\t\t\t\t$Status[$Name].failed = $Failures[$Name].Count\n\t\t\t\t$Status[$Name].to_upload = $counts.pending\n", remove)
-		self.assertLess(remove.index("Get-FailureDetail $Name"), remove.index("Stop-Process"))
+		self.assertLess(remove.index("Get-FailureDetail $Name"), remove.index(UPLOAD_STOP))
 
 
 class StatusListingTests(unittest.TestCase):

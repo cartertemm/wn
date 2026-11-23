@@ -25,6 +25,7 @@ $NotDeletedDetail = 'could not delete {0}'
 $OpenFilesDetail = '{0} open in Windows. Close every open file in the share so it can be removed'
 $CacheUploadDetail = 'starting rclone to upload the files in its cache'
 $FailedDetail = '{0} cannot be uploaded to the Mac: {1}: {2}'
+$UnsavedDetail = '{0} in the cache never reached the Mac'
 $Utf8 = New-Object System.Text.UTF8Encoding $false
 $Processes = @{}
 $Status = @{}
@@ -87,14 +88,19 @@ function Test-CacheFiles($Folder) {
 	}
 }
 
-function Test-DirtyCache($Folder) {
+function Get-DirtyCount($Folder) {
 	$meta = $LongPathPrefix + (Join-Path $Folder 'cache\vfsMeta')
-	if (-not [IO.Directory]::Exists($meta)) { return $false }
+	if (-not [IO.Directory]::Exists($meta)) { return 0 }
+	$count = 0
+	foreach ($file in [IO.Directory]::EnumerateFiles($meta, '*', 'AllDirectories')) {
+		if ([IO.File]::ReadAllText($file) -match $DirtyPattern) { $count++ }
+	}
+	return $count
+}
+
+function Test-DirtyCache($Folder) {
 	try {
-		foreach ($file in [IO.Directory]::EnumerateFiles($meta, '*', 'AllDirectories')) {
-			if ([IO.File]::ReadAllText($file) -match $DirtyPattern) { return $true }
-		}
-		return $false
+		return (Get-DirtyCount $Folder) -gt 0
 	} catch {
 		return $true
 	}
@@ -244,12 +250,24 @@ function Start-Mount($Name, $Share, $Folder) {
 function Remove-Share($Name, $Folder) {
 	$process = $Processes[$Name]
 	$shareFile = Join-Path $Folder 'share.json'
-	if ($process -and $process.HasExited) {
+	if (Test-Path -LiteralPath (Join-Path $Folder 'orphan')) {
+		if ($process) {
+			Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+			Wait-Process -Id $process.Id -Timeout $StopWaitSeconds -ErrorAction SilentlyContinue
+			$Processes.Remove($Name)
+			$process = $null
+		}
+		$unsaved = Get-DirtyCount $Folder
+		if ($unsaved -and -not (Test-Path -LiteralPath (Join-Path $Folder 'discard'))) {
+			Set-State $Name 'removing' ($UnsavedDetail -f (Get-FileCount $unsaved)) $null $null
+			$Status[$Name].unsaved = $unsaved
+			return
+		}
+	} elseif ($process -and $process.HasExited) {
 		$Processes.Remove($Name)
 		Set-State $Name 'removing' (Get-ExitDetail $process $Folder) $null $null
 		return
-	}
-	if (-not $process -and (Test-Path -LiteralPath $shareFile) -and (Test-CacheFiles $Folder)) {
+	} elseif (-not $process -and (Test-Path -LiteralPath $shareFile) -and (Test-CacheFiles $Folder)) {
 		$process = Start-Mount $Name (Read-Share $Folder) $Folder
 		if ($process) {
 			Set-State $Name 'removing' $CacheUploadDetail $process.Id $null
@@ -257,8 +275,7 @@ function Remove-Share($Name, $Folder) {
 			$Status[$Name].remove_requested = $true
 		}
 		return
-	}
-	if ($process) {
+	} elseif ($process) {
 		$since = (Get-Item -LiteralPath (Join-Path $Folder 'remove')).LastWriteTime
 		if ($process.StartTime -gt $since) { $since = $process.StartTime }
 		$since = $since.AddTicks(-($since.Ticks % [TimeSpan]::TicksPerSecond))
@@ -361,6 +378,9 @@ while ($true) {
 				Update-Share $folder.Name $folder.FullName
 			} else {
 				Set-State $folder.Name 'incomplete' $NoShareFileDetail $null $null
+			}
+			if ($Status[$folder.Name] -and (Test-Path -LiteralPath (Join-Path $folder.FullName 'share.json'))) {
+				$Status[$folder.Name].path = (Read-Share $folder.FullName).mount_path
 			}
 		} catch {
 			Set-State $folder.Name 'error' ([string]$_) $null $null

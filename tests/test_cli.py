@@ -196,7 +196,7 @@ class ShareCommandTests(CLITestCase):
 
 	def test_unshare_help_names_the_share_argument(self):
 		help_text = self.help_text("unshare")
-		self.assertIn("usage: wn unshare [-h] share", help_text)
+		self.assertIn("usage: wn unshare [-h] [--discard] share", help_text)
 		self.assertIn("as wn shares shows it", help_text)
 		self.assertIn("The files stay on the Mac", help_text)
 
@@ -231,7 +231,10 @@ class ShareCommandTests(CLITestCase):
 		share_commands = self.share_commands()
 		share_commands.remove_share.return_value = None
 		self.assertEqual(self.run_cli("unshare", "Projects")[0], 0)
-		share_commands.remove_share.assert_called_once_with("Projects")
+		share_commands.remove_share.assert_called_once_with("Projects", False)
+		share_commands.remove_share.reset_mock()
+		self.assertEqual(self.run_cli("unshare", "Old", "--discard")[0], 0)
+		share_commands.remove_share.assert_called_once_with("Old", True)
 
 	def test_unshare_passes_on_its_exit_code(self):
 		self.share_commands().remove_share.return_value = 1
