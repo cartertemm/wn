@@ -3,7 +3,7 @@ import re
 import unittest
 
 SCRIPTS_DIRECTORY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wn", "guest", "shares")
-RUNNER_SCRIPTS = ("prepare.ps1", "fetch.ps1", "task.ps1", "cleanup.ps1")
+RUNNER_SCRIPTS = ("prepare.ps1", "fetch.ps1", "task.ps1", "cleanup.ps1", "unprepare.ps1")
 SUPERVISOR_SCRIPT = "wn-shares.ps1"
 FORBIDDEN_FLAGS = ("--pass", "--links", "-L", "--rc", "--sftp-chunk-size")
 UPLOAD_STOP = "\n\t\tStop-Process -Id $process.Id -Force\n"
@@ -301,6 +301,15 @@ class PrepareScriptTests(unittest.TestCase):
 	def test_share_folder_takes_the_requested_letter_case_only_when_nothing_can_be_lost(self):
 		self.assertIn("$existing[0].Name -cne $Params.name -and -not (Test-Path -LiteralPath (Join-Path $ShareFolder 'share.json')) -and -not (Test-CacheFiles $ShareFolder)) {", self.text)
 		self.assertLess(self.text.index("$existing[0].Name -cne $Params.name"), self.text.index("New-Item -ItemType Directory -Force -Path $ShareFolder"))
+
+
+class UnprepareScriptTests(unittest.TestCase):
+	def test_only_an_empty_share_folder_is_removed(self):
+		text = read_script("unprepare.ps1")
+		self.assertIn("$ShareFolder = Join-Path 'C:\\ProgramData\\wn\\shares' $Params.name", text)
+		self.assertIn("\t[IO.Directory]::Delete($ShareFolder)\n} catch [IO.IOException] {", text)
+		self.assertNotIn("rd /s /q", text)
+		self.assertNotIn("Remove-Item", text)
 
 
 class FetchScriptTests(unittest.TestCase):

@@ -26,6 +26,7 @@ from wn.share_sftp import (
 	SHARE_PROTOCOL_VERSION,
 	SUPERVISOR_SCRIPT,
 	TASK_SCRIPT,
+	UNPREPARE_SCRIPT,
 	SharePaths,
 	guest_script_bytes,
 	utc_now,
@@ -77,6 +78,7 @@ class FakeRunner:
 			FETCH_SCRIPT: {"mismatch": None, "winfsp_exit": 0, "winfsp_log": []},
 			TASK_SCRIPT: {"task": "registered"},
 			CLEANUP_SCRIPT: {"cleaned": True, "shares_with_cache": []},
+			UNPREPARE_SCRIPT: {"removed": True},
 		}
 		self.results.update(results or {})
 
@@ -234,6 +236,12 @@ class ShareCommandTestCase(unittest.TestCase):
 		self.assertEqual(self.runner.files[FOLDER + "\\remove"], "")
 		self.assertEqual(load_config().shares, ())
 		self.assert_no_host_key()
+
+	def time_of_the_rollback(self):
+		"""Return a list that gets the clock time at which the rollback asks Windows to remove the share."""
+		times = []
+		self.runner.on_call = lambda call: times.append(self.clock.now) if call == ("push", FOLDER + "\\remove") else None
+		return times
 
 	def hold_lock(self):
 		handle = open(os.path.join(self.paths.root, LOCK_FILE_NAME), "a")
@@ -545,7 +553,8 @@ class AddShareTests(ShareCommandTestCase):
 				self.runner.calls = []
 				self.runner.results[PREPARE_SCRIPT] = result
 				self.assert_refused_with_config_unchanged(message)
-				self.assertEqual(self.runs(), [PREPARE_SCRIPT])
+				self.assertEqual(self.runs(), [PREPARE_SCRIPT, UNPREPARE_SCRIPT])
+				self.assertEqual(self.params_of(UNPREPARE_SCRIPT), {"name": SHARE_NAME})
 				self.assertEqual(self.pushes(), [])
 
 	def test_share_that_windows_is_removing_starts_the_supervisor_and_is_refused(self):
@@ -720,11 +729,12 @@ class StatusPollTests(ShareCommandTestCase):
 
 	def test_a_stale_starting_status_times_out_after_90_s(self):
 		self.slow_status(mounted_at=float("inf"))
+		failed_at = self.time_of_the_rollback()
 		with self.assertRaises(ShareError) as caught:
 			self.add()
 		self.assertIn("Windows did not mount the share within 90 s. Windows reports: starting.", str(caught.exception))
-		self.assertGreaterEqual(self.clock.now, 90)
-		self.assertLess(self.clock.now, 120)
+		self.assertGreaterEqual(failed_at[0], 90)
+		self.assertLess(failed_at[0], 120)
 		self.assert_rolled_back()
 
 	def test_a_change_of_state_moves_the_deadline(self):
@@ -743,10 +753,11 @@ class StatusPollTests(ShareCommandTestCase):
 				self.clock.now = 0
 				self.runner.files.pop(FOLDER + "\\remove", None)
 				self.runner.files[GUEST_STATUS_FILE] = status_text({SHARE_NAME: entry})
+				failed_at = self.time_of_the_rollback()
 				with self.assertRaises(ShareError) as caught:
 					self.add()
 				self.assertEqual(str(caught.exception), "Windows cannot mount the share. Windows reports: " + reported)
-				self.assertLess(self.clock.now, 5)
+				self.assertLess(failed_at[0], 5)
 				self.assert_rolled_back()
 
 	def test_an_error_without_detail_is_waited_out(self):
@@ -894,6 +905,87 @@ class RollbackTests(ShareCommandTestCase):
 		with self.assertRaises(GuestScriptError):
 			self.add()
 		self.assertFalse(os.path.exists(self.paths.log_file(SHARE_NAME)))
+
+	def drop_the_share_after_the_remove_marker(self, entry):
+		"""Report ``entry`` for the share until the rollback pushes the remove marker, then no share."""
+		self.runner.files[GUEST_STATUS_FILE] = lambda: status_text({} if FOLDER + "\\remove" in self.runner.files else {SHARE_NAME: entry})
+
+	def blocked_mount(self):
+		self.drop_the_share_after_the_remove_marker({"state": "blocked", "detail": VM_PATH + " exists as a local folder with files", "pid": None})
+
+	def test_rollback_of_the_only_share_cleans_up_windows(self):
+		self.blocked_mount()
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		self.assertEqual(str(caught.exception), "Windows cannot mount the share. Windows reports: blocked, " + VM_PATH + " exists as a local folder with files")
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, TASK_SCRIPT, CLEANUP_SCRIPT])
+		self.assertEqual(self.output.getvalue(), "")
+		self.assert_rolled_back()
+
+	def test_failed_cleanup_after_a_rollback_does_not_hide_the_error(self):
+		self.blocked_mount()
+		self.runner.results[CLEANUP_SCRIPT] = GuestScriptError(CLEANUP_SCRIPT, 1, "Access is denied")
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		message = str(caught.exception)
+		self.assertTrue(message.startswith("Windows cannot mount the share. Windows reports: blocked"))
+		self.assertTrue(message.endswith("\nAlso could not remove the wn share files and the wn-shares task from Windows: cleanup.ps1 failed in Windows with exit code 1:\nAccess is denied"))
+		self.assert_rolled_back()
+
+	def test_no_cleanup_after_a_rollback_while_other_shares_exist(self):
+		other = self.make_mac_folder("Other")
+		update_config_file({"shares": [Share("Other", "Windows", "mac_to_vm", other, "C:\\Other", False, FIRST_PORT).to_dict()]})
+		self.blocked_mount()
+		with self.assertRaises(ShareError):
+			self.add()
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, TASK_SCRIPT])
+
+	def test_no_cleanup_after_a_rollback_while_windows_lists_another_share(self):
+		blocked = {"state": "blocked", "detail": "blocked", "pid": None}
+		self.runner.files[GUEST_STATUS_FILE] = lambda: status_text({"Old": {"state": "mounted", "detail": "", "pid": 1}, "Stale": {"state": "incomplete", "detail": "", "pid": None}, **({} if FOLDER + "\\remove" in self.runner.files else {SHARE_NAME: blocked})})
+		with self.assertRaises(ShareError):
+			self.add()
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, TASK_SCRIPT])
+
+	def test_no_cleanup_after_a_rollback_while_windows_still_lists_the_share(self):
+		self.runner.files[GUEST_STATUS_FILE] = status_text({SHARE_NAME: {"state": "blocked", "detail": "blocked", "pid": None}})
+		failed_at = self.time_of_the_rollback()
+		with self.assertRaises(ShareError):
+			self.add()
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, TASK_SCRIPT])
+		self.assertLessEqual(self.clock.now - failed_at[0], share_commands.ROLLBACK_REMOVE_TIMEOUT_SECONDS + 5)
+
+	def test_no_cleanup_when_the_wn_task_did_not_run(self):
+		with open(self.paths.state_file, "w") as handle:
+			json.dump({"protocol": SHARE_PROTOCOL_VERSION, "updated": utc_now(), "shares": {}}, handle)
+		self.runner.files[GUEST_STATUS_FILE] = status_text({})
+		with self.assertRaises(ShareError):
+			self.add()
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT])
+
+	def test_ctrl_c_while_windows_prepares_removes_the_empty_share_folder(self):
+		def interrupt(call):
+			if call[:2] == ("run", PREPARE_SCRIPT):
+				raise KeyboardInterrupt
+
+		self.runner.on_call = interrupt
+		with self.assertRaises(KeyboardInterrupt):
+			self.add()
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT, UNPREPARE_SCRIPT])
+		self.assertEqual(load_config().shares, ())
+
+	def test_a_failed_prepare_is_not_followed_by_another_guest_script(self):
+		self.runner.results[PREPARE_SCRIPT] = GuestError("Windows did not confirm C:\\ProgramData\\wn\\exec within 30 s")
+		with self.assertRaises(GuestError):
+			self.add()
+		self.assertEqual(self.runs(), [PREPARE_SCRIPT])
+
+	def test_a_failed_folder_removal_does_not_hide_the_refusal(self):
+		self.runner.results[PREPARE_SCRIPT] = prepare_result(parent_exists=False)
+		self.runner.results[UNPREPARE_SCRIPT] = GuestScriptError(UNPREPARE_SCRIPT, 1, "Access is denied")
+		with self.assertRaises(ShareError) as caught:
+			self.add()
+		self.assertEqual(str(caught.exception), "the folder that holds {} does not exist in Windows. Create it first\nAlso could not remove the empty share folder {} from Windows: unprepare.ps1 failed in Windows with exit code 1:\nAccess is denied".format(VM_PATH, FOLDER))
 
 	def test_failure_before_the_share_file_leaves_no_remove_marker(self):
 		self.runner.push_errors[FOLDER + "\\known_hosts"] = GuestError("utmctl file push failed")

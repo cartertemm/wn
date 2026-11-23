@@ -30,6 +30,7 @@ from wn.share_sftp import (
 	STATE_REFRESH_SECONDS,
 	SUPERVISOR_SCRIPT,
 	TASK_SCRIPT,
+	UNPREPARE_SCRIPT,
 	WINDOWS_RCLONE_NAME,
 	can_bind,
 	ensure_keys,
@@ -73,6 +74,7 @@ MOUNT_TIMEOUT_SECONDS = 90
 MISSED_READS_AFTER_DEADLINE = 3
 REMOVE_TIMEOUT_SECONDS = 180
 REMOVE_PROGRESS_SECONDS = 30
+ROLLBACK_REMOVE_TIMEOUT_SECONDS = 30
 STATUS_POLL_SECONDS = 1
 FETCH_TIMEOUT_SECONDS = 300
 WINFSP_INSTALL_TIMEOUT_SECONDS = 120
@@ -414,9 +416,14 @@ class ShareCommands:
 		lines = "\n".join(log.splitlines()[-MOUNT_LOG_TAIL_LINES:])
 		raise ShareError("Windows did not mount the share within {} s. Windows reports: {}. Last lines of {}:\n{}".format(MOUNT_TIMEOUT_SECONDS, _reported(entry), log_path, lines))
 
-	def _roll_back(self, name, folder, share_file_sent, config_written):
-		"""Ask Windows to remove the share, take it out of the config, and delete its host key. Return what could not be done, as message lines."""
+	def _roll_back(self, name, folder, prepared, share_file_sent, config_written, task_started):
+		"""Undo what wn share did so far: remove the empty share folder or ask Windows to remove the share, take it out of the config, delete its host key, and after the last share remove the wn files from Windows. Return what could not be done, as message lines."""
 		problems = []
+		if prepared and not share_file_sent:
+			try:
+				self._run_script(UNPREPARE_SCRIPT, {"name": name}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+			except WnError as error:
+				problems.append("Also could not remove the empty share folder {} from Windows: {}".format(folder, error))
 		if share_file_sent:
 			try:
 				self.runner.push(folder + "\\" + REMOVE_MARKER_NAME, b"")
@@ -432,7 +439,19 @@ class ShareCommands:
 				return problems
 			remove_file(self.paths.log_file(name))
 		remove_host_key(self.paths, name)
+		if task_started and not shares_for_vm(load_config().shares, self.config.vm_name):
+			problems.extend(self._clean_up_after_a_rollback(name))
 		return problems
+
+	def _clean_up_after_a_rollback(self, name):
+		"""Run the last share cleanup once Windows has dropped the rolled back share and lists no other. Return what could not be done, as message lines."""
+		try:
+			guest = self._wait(self._guest_status, lambda guest: _status_key(guest, name) is None, ROLLBACK_REMOVE_TIMEOUT_SECONDS)
+			if guest is not None and not _listed_shares(guest):
+				self._run_script(CLEANUP_SCRIPT, {}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
+		except WnError as error:
+			return ["Also could not remove the wn share files and the wn-shares task from Windows: {}".format(error)]
+		return []
 
 	def add_share(self, mac_dir, vm_dir, read_only=False, name=None):
 		with self._command_lock():
@@ -455,14 +474,16 @@ class ShareCommands:
 		self.install_binaries(tools, self.paths)
 		self.ensure_keys(self.paths)
 		share = dataclasses.replace(share, port=pick_port(current, self.can_bind))
-		state = self._prepare_guest(name, vm_path)
-		self._refuse_guest_state(state, vm_path)
-		self._install_guest_tools(state, tools)
-		script_changed = self._push_common_files(state)
 		folder = guest_share_folder(name)
+		state = None
 		share_file_sent = False
 		config_written = False
+		task_started = False
 		try:
+			state = self._prepare_guest(name, vm_path)
+			self._refuse_guest_state(state, vm_path)
+			self._install_guest_tools(state, tools)
+			script_changed = self._push_common_files(state)
 			self.new_host_key(self.paths, name)
 			self.runner.push(folder + "\\" + RCLONE_CONF_NAME, render_rclone_conf(share).encode("utf-8"))
 			self.runner.push(folder + "\\" + KNOWN_HOSTS_NAME, render_known_hosts(share, public_host_key(self.paths, name)).encode("utf-8"))
@@ -473,10 +494,12 @@ class ShareCommands:
 			if macos_may_ask(mac_path):
 				self._print(PRIVACY_NOTICE.format(mac_path))
 			self._wait_for_agent(name)
+			task_started = True
 			self._run_script(TASK_SCRIPT, {"restart": script_changed}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 			self._wait_for_mount(name, folder)
 		except BaseException as error:
-			problems = self._roll_back(name, folder, share_file_sent, config_written)
+			prepared = state is not None or isinstance(error, KeyboardInterrupt)
+			problems = self._roll_back(name, folder, prepared, share_file_sent, config_written, task_started)
 			if problems and isinstance(error, WnError):
 				raise ShareError("\n".join([str(error)] + problems)) from error
 			raise

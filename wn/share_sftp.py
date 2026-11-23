@@ -48,6 +48,7 @@ PREPARE_SCRIPT = "prepare.ps1"
 FETCH_SCRIPT = "fetch.ps1"
 TASK_SCRIPT = "task.ps1"
 CLEANUP_SCRIPT = "cleanup.ps1"
+UNPREPARE_SCRIPT = "unprepare.ps1"
 SUPERVISOR_SCRIPT = "wn-shares.ps1"
 RCLONE_CONF_TEMPLATE = (
 	"[share]\n"
