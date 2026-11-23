@@ -91,6 +91,11 @@ class TaskScriptTests(unittest.TestCase):
 		self.assertIn("-DontStopIfGoingOnBatteries", text)
 		self.assertIn("-UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest", text)
 
+	def test_task_runs_at_normal_priority(self):
+		text = read_script("task.ps1")
+		self.assertIn("$NormalPriority = 4", text)
+		self.assertIn("-Priority $NormalPriority", text)
+
 	def test_task_starts_a_killed_supervisor_again(self):
 		text = read_script("task.ps1")
 		self.assertIn("-RepetitionInterval (New-TimeSpan -Minutes $RestartMinutes)", text)

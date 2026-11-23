@@ -3,6 +3,7 @@ $Supervisor = 'C:\ProgramData\wn\wn-shares.ps1'
 $StopWaitSeconds = 10
 $RestartCount = 999
 $RestartMinutes = 1
+$NormalPriority = 4
 
 function Wait-TaskStopped {
 	for ($second = 0; $second -lt $StopWaitSeconds; $second++) {
@@ -15,7 +16,7 @@ $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if (-not $task) {
 	$a = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + $Supervisor)
 	$p = New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
-	$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount $RestartCount -RestartInterval (New-TimeSpan -Minutes $RestartMinutes) -MultipleInstances IgnoreNew
+	$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount $RestartCount -RestartInterval (New-TimeSpan -Minutes $RestartMinutes) -MultipleInstances IgnoreNew -Priority $NormalPriority
 	$t = New-ScheduledTaskTrigger -AtStartup
 	$repeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $RestartMinutes)
 	Register-ScheduledTask -TaskName $TaskName -Action $a -Principal $p -Settings $s -Trigger $t, $repeat -Force | Out-Null
