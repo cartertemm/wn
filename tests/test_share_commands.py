@@ -1504,8 +1504,13 @@ class WindowsOnlyRemoveTests(SavedShareTestCase):
 
 	def test_a_share_only_in_windows_is_removed_from_windows(self):
 		self.answer_in_turn(status_text({"Old": self.old_entry()}), status_text({"Old": self.old_entry(state="removing", detail="")}), status_text({}))
+		self.new_host_key(self.paths, "Old")
+		os.makedirs(self.paths.logs)
+		open(self.paths.log_file("Old"), "w").close()
 		before = self.config_text()
 		self.assertIsNone(self.remove("old"))
+		self.assert_no_host_key("Old")
+		self.assertFalse(os.path.exists(self.paths.log_file("Old")))
 		self.assertEqual(self.pushes(), [self.OLD_FOLDER + "\\orphan", self.OLD_FOLDER + "\\remove"])
 		self.assertEqual(self.runs(), [TASK_SCRIPT, CLEANUP_SCRIPT])
 		self.assertEqual(self.params_of(TASK_SCRIPT), {"restart": False})
@@ -1527,8 +1532,10 @@ class WindowsOnlyRemoveTests(SavedShareTestCase):
 
 	def test_files_that_never_reached_the_mac_stop_the_removal(self):
 		self.answer_in_turn(status_text({"Old": self.old_entry()}), status_text({"Old": self.old_entry(state="removing", detail="2 files in the cache never reached the Mac", unsaved=2)}))
+		self.new_host_key(self.paths, "Old")
 		with self.assertRaises(ShareError) as caught:
 			self.remove("Old")
+		self.assertTrue(os.path.exists(self.paths.host_key("Old")))
 		self.assertEqual(str(caught.exception), "Windows has 2 files in the cache of share Old that never reached the Mac. The Mac has no share named Old, so these files cannot be uploaded, and wn did not remove the share. To keep them, copy them in Windows as an administrator from C:\\ProgramData\\wn\\shares\\Old\\cache\\vfs\\share. Then run wn unshare Old --discard, which removes the share and deletes these files from Windows.")
 		self.assertNotIn(CLEANUP_SCRIPT, self.runs())
 		self.assertLess(self.clock.now, REMOVE_PROGRESS_SECONDS)

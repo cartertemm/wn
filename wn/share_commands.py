@@ -665,6 +665,8 @@ class ShareCommands:
 		self._run_script(TASK_SCRIPT, {"restart": False}, DEFAULT_SCRIPT_TIMEOUT_SECONDS)
 		path = guest[key].get("path")
 		guest = self._wait_for_removal(key, windows_only=True, discard=discard)
+		remove_file(self.paths.log_file(key))
+		remove_host_key(self.paths, key)
 		self._print("Removed {} from Windows.{}".format(key, " {} is gone from Windows.".format(path) if path else ""))
 		self._clean_up_after_the_last_share(guest)
 
