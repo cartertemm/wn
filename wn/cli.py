@@ -658,8 +658,8 @@ COMMANDS = {
 
 
 def _load_command_config(arguments):
-	"""Load the config. The agent that launchd runs leaves out invalid shares, so one bad share does not stop battery sync and the camera. Its share supervisor logs them."""
-	if arguments.command == "agent" and arguments.agent_command == "start" and arguments.foreground:
+	"""Load the config. wn agent start leaves out invalid shares, so one bad share does not stop battery sync and the camera in the agent it starts or serves. Its share supervisor logs them."""
+	if arguments.command == "agent" and arguments.agent_command == "start":
 		return load_config_skipping_bad_shares()[0]
 	return load_config()
 

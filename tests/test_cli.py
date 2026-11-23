@@ -285,6 +285,14 @@ class ShareCommandTests(CLITestCase):
 		self.assertEqual(exit_code, 1)
 		self.assertIn("wn: error: boom", stderr)
 
+	def test_agent_start_without_a_launchd_job_skips_a_bad_share(self):
+		good = {"name": "Projects", "vm": "Windows", "direction": "mac_to_vm", "mac_path": "/a", "vm_path": "C:\\x", "read_only": False, "port": 47321}
+		write_config(self.home.name, {"shares": [good, dict(good, name="Bad", mac_path="/b", vm_path="C:\\y", port=1)]})
+		with mock.patch("wn.agent.serve") as serve:
+			exit_code, _, stderr = self.run_cli("agent", "start")
+		self.assertEqual((exit_code, stderr), (0, ""))
+		self.assertEqual([share.name for share in serve.call_args[0][0].shares], ["Projects"])
+
 
 FAKE_UTMCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_utmctl.py")
 
