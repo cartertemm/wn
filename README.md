@@ -167,6 +167,23 @@ No plugin, server, or agent specific configuration is required.
 1. GPU acceleration.
 2. Windows IoT Enterprise LTSC support.
 
+## Project status and contributions
+
+`wn` is beta software. I use it every day on my own laptop, and it works well
+for me. I also want it to work for everyone who needs it.
+
+If you run into a problem, please open an issue and tell me what happened. Bug
+reports are welcome.
+
+Contributions are welcome too, but please make them with care. AI code
+generation tools can be useful, but generated code still needs to be
+understood, tested, and thoughtfully integrated. Pull requests that amount to
+careless AI slop will be rejected.
+
+A lot of thought and deliberate work has gone into `wn`. While Claude has been used to write substantial portions of
+the code, it only did so after considerable pushback by someone that spent time understanding what he was doing.
+This is not a vibecoded product, and contributions should respect the same standard.
+
 ## Development
 
 Run the tests on macOS:
