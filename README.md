@@ -41,9 +41,15 @@ space, [UTM 5.0.8 or later](https://mac.getutm.app) in `/Applications`, and
 
 ```sh
 git clone https://github.com/cartertemm/wn
-cd wn
-uv run wn setup
+uv tool install ./wn
+wn setup
 ```
+
+`uv tool install` puts `wn` on your `PATH`, so you can run it from any folder.
+If `wn` is not found, run `uv tool update-shell` and open a new terminal.
+After a `git pull`, update it with `uv tool install --reinstall ./wn`. To
+pick up changes in the cloned folder without a reinstall, install it in
+editable mode with `uv tool install -e ./wn`.
 
 Press Return to keep each default. Setup will tell you when the VM is ready.
 
@@ -57,35 +63,35 @@ with 8 CPU cores, 8 GB of memory, a 64 GB disk, a display window, and NVDA.
 For a fully unattended run, pass `--yes` with any settings you want to change:
 
 ```sh
-uv run wn setup --yes --name Windows --software nvda
+wn setup --yes --name Windows --software nvda
 ```
 
 The camera and native battery are enabled by default. Use `--no-camera` or
 `--no-battery` to leave either one out. Use `--headless` to create a VM without
-a display window. Run `uv run wn setup --help` for all available settings.
+a display window. Run `wn setup --help` for all available settings.
 
 ## Use the VM
 
 | Command | What it does |
 |---|---|
-| `uv run wn start` | Starts Windows. |
-| `uv run wn stop` | Shuts down Windows. |
-| `uv run wn status` | Shows whether the VM is running. |
-| `uv run wn ip` | Prints the Windows IP address. |
-| `uv run wn key ctrl+alt+del` | Sends one or more key combinations. |
-| `uv run wn type 'Get-ComputerInfo'` | Types text into Windows. |
-| `uv run wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls the mouse. |
-| `uv run wn screenshot screen.png` | Saves the Windows screen as a PNG. |
-| `uv run wn grab` | Sends every Mac key press to Windows. |
-| `uv run wn delete` | Deletes the VM, its disk, and everything wn made for it on the Mac. Stop the VM first. Add `--all` to also delete the download cache, the share files, and wn-agent.app. Add `--cache` to delete only the download cache. |
+| `wn start` | Starts Windows. |
+| `wn stop` | Shuts down Windows. |
+| `wn status` | Shows whether the VM is running. |
+| `wn ip` | Prints the Windows IP address. |
+| `wn key ctrl+alt+del` | Sends one or more key combinations. |
+| `wn type 'Get-ComputerInfo'` | Types text into Windows. |
+| `wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls the mouse. |
+| `wn screenshot screen.png` | Saves the Windows screen as a PNG. |
+| `wn grab` | Sends every Mac key press to Windows. The first run builds the key helper, which needs the Xcode Command Line Tools (`xcode-select --install`). |
+| `wn delete` | Deletes the VM, its disk, and everything wn made for it on the Mac. Stop the VM first. Add `--all` to also delete the download cache, the share files, and wn-agent.app. Add `--cache` to delete only the download cache. |
 
-Run `uv run wn <command> --help` for the options available to a command.
+Run `wn <command> --help` for the options available to a command.
 
 For everyday use, type in the UTM window. Command maps to the Windows key.
 Control and Option together capture or release the keyboard.
 
 If you prefer to grab the Mac keyboard directly, or use the VM headless, run
-`uv run wn grab`. Press Control, Option, and Command together to release or
+`wn grab`. Press Control, Option, and Command together to release or
 grab the keyboard.
 
 ## Shared folders
@@ -93,7 +99,7 @@ grab the keyboard.
 Show a folder from the Mac as a live folder in Windows:
 
 ```sh
-uv run wn share ~/Projects 'C:\Users\you\Projects'
+wn share ~/Projects 'C:\Users\you\Projects'
 ```
 
 The Windows folder must be missing or empty, and its parent folder must exist.
@@ -101,14 +107,14 @@ Add `--read-only` if Windows should not change the Mac files. List shared
 folders and their state, or stop sharing one, with:
 
 ```sh
-uv run wn shares
-uv run wn unshare Projects
+wn shares
+wn unshare Projects
 ```
 
 Windows writes reach the Mac about five seconds after a file is closed. Mac
 changes reach Windows in under a second, but Windows apps that watch folders
 do not receive change notifications and may need a manual refresh. Mac
-symlinks do not appear in Windows. Run `uv run wn share --help` for the full
+symlinks do not appear in Windows. Run `wn share --help` for the full
 list of file name, attribute, and path limitations.
 
 The wn agent must be running while a folder is shared. If the Mac is asleep or
@@ -198,8 +204,9 @@ The main project folders are:
 1. `wn/` contains the CLI, setup code, UTM configuration, camera helper, and
    VM control code.
 2. `tests/` contains the automated tests.
-3. `keygrab/` contains the Swift keyboard helper, in case you do not want to send keys through UTM.
-4. `efi/` contains the native battery firmware driver.
+3. `wn/keygrab-helper/` contains the Swift keyboard helper, in case you do not want to send keys through UTM.
+4. `efi/` contains the source of the native battery firmware driver. The
+   built driver is `wn/efi/wn-acpi.efi`.
 
 ## License
 

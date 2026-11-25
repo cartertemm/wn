@@ -1,6 +1,7 @@
 """Grab the whole Mac keyboard and send every key press to the guest.
 
-``wn grab`` runs the ``wn-keygrab`` helper from ``keygrab/``. The helper reads
+``wn grab`` builds the ``wn-keygrab`` helper from ``keygrab-helper/main.swift``
+the first time it runs, then runs it. The helper reads
 the keyboard through a macOS event tap and prints one JSON line per key down
 or key up. This module turns those lines into QMP ``input-send-event``
 commands, so the guest gets real key downs and ups: the Windows key (Command),
@@ -10,16 +11,23 @@ The helper starts grabbed. Press its release hotkey (Control+Option+Command by
 default) to give the keyboard back to macOS, and again to grab it.
 """
 
+import hashlib
 import json
 import os
 import signal
 import subprocess
 
+from wn.appbundle import AD_HOC_IDENTITY, CODESIGN_PATH
 from wn.errors import WnError
 from wn.keys import key_event
 
 PACKAGE_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-KEYGRAB_DIRECTORY = os.path.join(os.path.dirname(PACKAGE_DIRECTORY), "keygrab")
+KEYGRAB_DIRECTORY = os.path.join(PACKAGE_DIRECTORY, "keygrab-helper")
+HELPER_SOURCE = os.path.join(KEYGRAB_DIRECTORY, "main.swift")
+HELPER_PATH = os.path.join("~", "Library", "Application Support", "wn", "wn-keygrab")
+SOURCE_HASH_SUFFIX = ".sha256"
+SWIFTC_PATH = "/usr/bin/swiftc"
+SWIFTC_HINT = "Install the Xcode Command Line Tools with 'xcode-select --install'"
 DEFAULT_RELEASE_HOTKEY = "control,option,command"
 QUIT_TIMEOUT_SECONDS = 2.0
 EXIT_NO_PERMISSION = 2
@@ -38,7 +46,49 @@ def default_keycodes_path():
 
 
 def default_helper_path():
-	return os.path.join(KEYGRAB_DIRECTORY, "bin", "wn-keygrab")
+	return os.path.expanduser(HELPER_PATH)
+
+
+def _helper_build_command(output):
+	return [SWIFTC_PATH, "-O", "-o", output, HELPER_SOURCE]
+
+
+def _helper_source_hash(output):
+	digest = hashlib.sha256()
+	digest.update(json.dumps(_helper_build_command(output)).encode())
+	with open(HELPER_SOURCE, "rb") as source_file:
+		digest.update(source_file.read())
+	return digest.hexdigest()
+
+
+def _check(result, tool, hint=None):
+	if result.returncode != 0:
+		detail = (result.stderr or "").strip() or (result.stdout or "").strip() or "no output"
+		message = "{} failed with exit code {}: {}".format(tool, result.returncode, detail)
+		raise WnError(message + ". " + hint if hint else message)
+
+
+def build_helper(run=None):
+	"""Compile wn-keygrab and sign it ad hoc. Return its path.
+
+	The Accessibility permission follows the signed binary, so the helper is rebuilt only when its source changes.
+	"""
+	run = run or subprocess.run
+	path = default_helper_path()
+	hash_path = path + SOURCE_HASH_SUFFIX
+	expected = _helper_source_hash(path)
+	try:
+		with open(hash_path) as hash_file:
+			if hash_file.read().strip() == expected and os.path.exists(path):
+				return path
+	except OSError:
+		pass
+	os.makedirs(os.path.dirname(path), exist_ok=True)
+	_check(run(_helper_build_command(path), capture_output=True, text=True), "swiftc", SWIFTC_HINT)
+	_check(run([CODESIGN_PATH, "--sign", AD_HOC_IDENTITY, "--force", path], capture_output=True, text=True), "codesign")
+	with open(hash_path, "w") as hash_file:
+		hash_file.write(expected + "\n")
+	return path
 
 
 def load_keycode_table(path):
@@ -50,7 +100,7 @@ def load_keycode_table(path):
 	except OSError as error:
 		raise WnError("cannot read keycode table {}: {}".format(path, error)) from None
 	except (ValueError, KeyError, TypeError, AttributeError):
-		raise WnError("{} is not a keycode table like keygrab/keycodes.json".format(path)) from None
+		raise WnError("{} is not a keycode table like keygrab-helper/keycodes.json".format(path)) from None
 
 
 class KeyEventTranslator:
@@ -111,7 +161,7 @@ def _start_helper(helper_path, release_hotkey, start_released):
 	try:
 		return subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True, bufsize=1)
 	except OSError as error:
-		raise WnError("cannot run {}: {}. Build it with keygrab/build.sh".format(helper_path, error)) from None
+		raise WnError("cannot run {}: {}".format(helper_path, error)) from None
 
 
 def _stop_helper(process):

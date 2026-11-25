@@ -13,7 +13,7 @@ import sys
 import urllib.request
 
 UI_JSON_URL = "https://raw.githubusercontent.com/qemu/qemu/master/qapi/ui.json"
-TABLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keycodes.json")
+TABLE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wn", "keygrab-helper", "keycodes.json")
 MIN_EXPECTED_QCODES = 100
 
 

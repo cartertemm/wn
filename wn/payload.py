@@ -29,14 +29,14 @@ from wn.unattend import (
 VOLUME_NAME = "WNSETUP"
 ANSWER_FILE_NAME = "autounattend.xml"
 GUEST_TOOLS_PATTERN = "utm-guest-tools-*.exe"
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MIC_SPEAKER_SCRIPT_PATH = os.path.join(REPO_ROOT, "wn", "guest", MIC_SPEAKER_SCRIPT)
-BATTERY_DRIVER = os.path.join(REPO_ROOT, "efi", "dist", "wn-acpi.efi")
+GUEST_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guest")
+MIC_SPEAKER_SCRIPT_PATH = os.path.join(GUEST_DIRECTORY, MIC_SPEAKER_SCRIPT)
+BATTERY_DRIVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "efi", "wn-acpi.efi")
 BATTERY_FILES = (
 	BATTERY_DRIVER,
-	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_INSTALLER),
-	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_NOTIFY_INSTALLER),
-	os.path.join(REPO_ROOT, "efi", "guest", BATTERY_NOTIFY_SOURCE),
+	os.path.join(GUEST_DIRECTORY, BATTERY_INSTALLER),
+	os.path.join(GUEST_DIRECTORY, BATTERY_NOTIFY_INSTALLER),
+	os.path.join(GUEST_DIRECTORY, BATTERY_NOTIFY_SOURCE),
 )
 
 

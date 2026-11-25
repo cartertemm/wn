@@ -40,7 +40,7 @@ TIMESTAMP = bytes([0xE9, 0x07, 0x08, 0x0B, 0x04, 0x2D, 0x01]) + bytes(9)
 MICROSOFT_OWNER = uuid.UUID("77fa9abd-0359-4d32-bd60-28f4e78f784b")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UTM_SECURE_VARS = "/Applications/UTM.app/Contents/Resources/qemu/edk2-arm-secure-vars.fd"
-DRIVER = os.path.join(REPO, "efi", "dist", "wn-acpi.efi")
+DRIVER = os.path.join(REPO, "wn", "efi", "wn-acpi.efi")
 OUR_HASH = bytes(range(32))
 
 

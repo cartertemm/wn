@@ -410,7 +410,7 @@ def _grab_with(context, client):
 	keycode_table = keygrab.load_keycode_table(config.keygrab_keycodes or keygrab.default_keycodes_path())
 	keygrab.run_grab(
 		client,
-		config.keygrab_binary or keygrab.default_helper_path(),
+		config.keygrab_binary or keygrab.build_helper(),
 		keycode_table,
 		arguments.release_hotkey,
 		arguments.start_released,

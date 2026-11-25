@@ -1,4 +1,4 @@
-"""A stand-in for keygrab/bin/wn-keygrab.
+"""A stand-in for the wn-keygrab helper.
 
 Run as a script, it reads a JSON settings file named by its first argument,
 prints the scripted lines, and logs its other arguments and every stdin command

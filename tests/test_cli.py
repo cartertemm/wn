@@ -664,7 +664,7 @@ class GrabCommandTests(CLITestCase):
 		write_config(self.home.name, {"keygrab_binary": "/no/such/wn-keygrab"})
 		exit_code, _, stderr = self.run_cli("grab", "--dry-run")
 		self.assertEqual(exit_code, 1)
-		self.assertIn("build.sh", stderr)
+		self.assertIn("cannot run /no/such/wn-keygrab", stderr)
 
 	def test_keycodes_override(self):
 		keycodes_path = os.path.join(self.home.name, "keycodes.json")

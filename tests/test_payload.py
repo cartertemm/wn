@@ -69,7 +69,7 @@ class PayloadImageTests(unittest.TestCase):
 
 	def test_battery_files_match_repo(self):
 		stage_payload(self.staging, self.virtio_iso, self.guest_tools_iso, [])
-		for name, repo_path in (("wn-acpi.efi", ("efi", "dist", "wn-acpi.efi")), ("install-wn-acpi.ps1", ("efi", "guest", "install-wn-acpi.ps1")), ("install-wn-battery-notify.ps1", ("efi", "guest", "install-wn-battery-notify.ps1")), ("wn-battery-notify.cs", ("efi", "guest", "wn-battery-notify.cs"))):
+		for name, repo_path in (("wn-acpi.efi", ("wn", "efi", "wn-acpi.efi")), ("install-wn-acpi.ps1", ("wn", "guest", "install-wn-acpi.ps1")), ("install-wn-battery-notify.ps1", ("wn", "guest", "install-wn-battery-notify.ps1")), ("wn-battery-notify.cs", ("wn", "guest", "wn-battery-notify.cs"))):
 			with open(os.path.join(self.staging, "efi", name), "rb") as staged, open(os.path.join(REPO_ROOT, *repo_path), "rb") as source:
 				self.assertEqual(staged.read(), source.read(), name)
 

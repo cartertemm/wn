@@ -2,6 +2,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import tempfile
 import time
 import unittest
@@ -12,7 +13,7 @@ from fake_qmp_server import FakeQMPServer, reply
 from fakes import RecordingQMPClient
 from wn import keygrab
 from wn.errors import WnError
-from wn.keygrab import KeyEventTranslator, default_keycodes_path, load_keycode_table, run_grab
+from wn.keygrab import KeyEventTranslator, build_helper, default_keycodes_path, load_keycode_table, run_grab
 from wn.qmp import QMPClient
 
 RELEASE_HOTKEY = "control,option,command"
@@ -81,6 +82,68 @@ class KeycodeTableTests(unittest.TestCase):
 			table_file.flush()
 			with self.assertRaises(WnError):
 				load_keycode_table(table_file.name)
+
+
+def completed(returncode=0, stderr=""):
+	return subprocess.CompletedProcess([], returncode, stdout="", stderr=stderr)
+
+
+def build_outputs(command, **kwargs):
+	if "-o" in command:
+		open(command[command.index("-o") + 1], "w").close()
+	return completed()
+
+
+class BuildHelperTests(unittest.TestCase):
+	def setUp(self):
+		self.home = tempfile.TemporaryDirectory()
+		self.addCleanup(self.home.cleanup)
+		patcher = mock.patch.dict(os.environ, {"HOME": self.home.name})
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		self.run = mock.Mock(side_effect=build_outputs)
+		self.helper = os.path.join(self.home.name, "Library", "Application Support", "wn", "wn-keygrab")
+
+	def test_source_ships_with_the_package(self):
+		self.assertTrue(os.path.isfile(keygrab.HELPER_SOURCE))
+		self.assertTrue(os.path.isfile(default_keycodes_path()))
+
+	def test_builds_and_signs(self):
+		self.assertEqual(build_helper(self.run), self.helper)
+		self.assertEqual([call.args[0] for call in self.run.call_args_list], [
+			["/usr/bin/swiftc", "-O", "-o", self.helper, keygrab.HELPER_SOURCE],
+			["/usr/bin/codesign", "--sign", "-", "--force", self.helper],
+		])
+		self.assertTrue(os.path.isfile(self.helper))
+
+	def test_second_build_is_skipped(self):
+		build_helper(self.run)
+		self.run.reset_mock()
+		self.assertEqual(build_helper(self.run), self.helper)
+		self.run.assert_not_called()
+
+	def test_changed_source_rebuilds(self):
+		build_helper(self.run)
+		with open(self.helper + ".sha256", "w") as hash_file:
+			hash_file.write("old\n")
+		self.run.reset_mock()
+		build_helper(self.run)
+		self.assertEqual(self.run.call_count, 2)
+
+	def test_missing_helper_rebuilds(self):
+		build_helper(self.run)
+		os.remove(self.helper)
+		self.run.reset_mock()
+		build_helper(self.run)
+		self.assertEqual(self.run.call_count, 2)
+
+	def test_swiftc_failure_names_the_fix(self):
+		self.run.side_effect = lambda command, **kwargs: completed(1, "xcrun: error: invalid active developer path")
+		with self.assertRaises(WnError) as context:
+			build_helper(self.run)
+		self.assertIn("invalid active developer path", str(context.exception))
+		self.assertIn("xcode-select --install", str(context.exception))
+		self.assertFalse(os.path.exists(self.helper + ".sha256"))
 
 
 class KeyEventTranslatorTests(unittest.TestCase):
@@ -265,7 +328,7 @@ class RunGrabTests(unittest.TestCase):
 	def test_missing_helper(self):
 		with self.assertRaises(WnError) as context:
 			run_grab(RecordingQMPClient([]), "/no/such/wn-keygrab", TABLE, RELEASE_HOTKEY, False, self.stdout)
-		self.assertIn("build.sh", str(context.exception))
+		self.assertIn("cannot run /no/such/wn-keygrab", str(context.exception))
 
 
 class InterruptingOutput(io.StringIO):

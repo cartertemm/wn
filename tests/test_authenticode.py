@@ -5,7 +5,7 @@ import unittest
 from wn.authenticode import AuthenticodeError, authenticode_sha256
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DRIVER = os.path.join(REPO, "efi", "dist", "wn-acpi.efi")
+DRIVER = os.path.join(REPO, "wn", "efi", "wn-acpi.efi")
 FAKE_SIGNATURE = b"\x10\x00\x00\x00\x00\x02\x02\x00fake signature"
 
 
