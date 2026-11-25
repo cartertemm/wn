@@ -77,6 +77,7 @@ a display window. Run `uv run wn setup --help` for all available settings.
 | `uv run wn mouse move 640 400 --screen 1280x800` | Moves, clicks, or scrolls the mouse. |
 | `uv run wn screenshot screen.png` | Saves the Windows screen as a PNG. |
 | `uv run wn grab` | Sends every Mac key press to Windows. |
+| `uv run wn delete` | Deletes the VM, its disk, and everything wn made for it on the Mac. Stop the VM first. |
 
 Run `uv run wn <command> --help` for the options available to a command.
 
