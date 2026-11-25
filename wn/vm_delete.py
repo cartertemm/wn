@@ -9,6 +9,7 @@ from typing import Callable
 from wn.agent import LOG_PATH, launch_agent_path, uninstall_launch_agent
 from wn.battery_file import battery_file_path
 from wn.config import REMOVE_SETTING, config_path, update_config_file
+from wn.downloads import DEFAULT_DOWNLOADS_DIR
 from wn.errors import WnError
 from wn.share_sftp import remove_file, remove_host_key, share_paths
 from wn.shares import SUPPORT_DIRECTORY
@@ -48,6 +49,14 @@ def plan_delete(name, config, backend, in_utm, include_all=False):
 	if os.path.exists(config_path()) and (shares or active):
 		items.append(DeleteItem("the settings for {} in {}".format(name, config_path()), functools.partial(_update_config, config, name, active)))
 	return items
+
+
+def plan_cache_delete():
+	"""Return the item that removes the download cache, or no items when there is no cache."""
+	cache = os.path.expanduser(DEFAULT_DOWNLOADS_DIR)
+	if not os.path.exists(cache):
+		return []
+	return [DeleteItem("the download cache {}".format(cache), functools.partial(shutil.rmtree, cache))]
 
 
 def run_delete(items, output, errors):

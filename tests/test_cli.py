@@ -979,6 +979,39 @@ class DeleteCommandTests(CLITestCase):
 		self.assertIn("Windows is running. Stop it first with wn stop", stderr)
 		self.assertTrue(os.path.exists(support))
 
+	def test_cache_removes_only_the_download_cache(self):
+		write_config(self.home.name, {"vm_name": "Windows"})
+		cache = os.path.join(self.home.name, "Library", "Application Support", "wn", "downloads")
+		os.makedirs(cache)
+		exit_code, stdout, stderr = self.run_cli("delete", "--cache", "--yes")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.backend.calls, [])
+		self.assertFalse(os.path.exists(cache))
+		self.assertTrue(os.path.exists(self.battery))
+		self.assertEqual(self.config_values(), {"vm_name": "Windows"})
+		self.assertEqual(stdout, "wn delete removes:\n  the download cache {0}\nRemoved the download cache {0}\n".format(cache))
+
+	def test_cache_asks_first(self):
+		cache = os.path.join(self.home.name, "Library", "Application Support", "wn", "downloads")
+		os.makedirs(cache)
+		exit_code, stdout, _ = self.run_cli("delete", "--cache", stdin=TerminalInput("n\n"))
+		self.assertEqual(exit_code, 1)
+		self.assertIn("Delete these? [y/N]: the download cache: not deleted\n", stdout)
+		self.assertTrue(os.path.exists(cache))
+
+	def test_cache_without_a_cache_has_nothing_to_delete(self):
+		exit_code, stdout, _ = self.run_cli("delete", "--cache", "--yes")
+		self.assertEqual(exit_code, 1)
+		self.assertEqual(stdout, "nothing to delete for the download cache\n")
+		self.assertEqual(self.backend.calls, [])
+
+	def test_cache_rejects_a_name_and_all(self):
+		for extra in (["Windows"], ["--all"]):
+			with self.subTest(extra=extra), mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit) as caught:
+				self.run_cli("delete", "--cache", "--yes", *extra)
+			self.assertEqual(caught.exception.code, 2)
+			self.assertEqual(self.backend.calls, [])
+
 	def test_nothing_to_delete(self):
 		os.remove(self.battery)
 		self.backend.in_utm = False

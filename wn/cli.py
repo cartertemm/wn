@@ -88,10 +88,13 @@ def build_parser():
 	stop.set_defaults(stop_parser=stop)
 	subcommands.add_parser("status", help="show whether the VM is running")
 	delete = subcommands.add_parser("delete", help="delete a VM and everything wn made for it on the Mac",
-		description="Delete the VM in UTM with its disk, its battery file, its camera socket, and its shares. For the VM in vm_name, also remove vm_name and the wn agent launch agent. The download cache stays.")
+		description="Delete the VM in UTM with its disk, its battery file, its camera socket, and its shares. For the VM in vm_name, also remove vm_name and the wn agent launch agent. The download cache stays unless you add --all. With --cache, delete only the download cache.")
 	delete.add_argument("name", nargs="?", metavar="NAME", help="the VM to delete (default: vm_name from the config)")
 	delete.add_argument("--yes", action="store_true", help="delete without asking first")
-	delete.add_argument("--all", action="store_true", help="also delete the launch agent and the folder {} with the download cache, the share files, and wn-agent.app".format(SUPPORT_DIRECTORY))
+	scope = delete.add_mutually_exclusive_group()
+	scope.add_argument("--all", action="store_true", help="also delete the launch agent and the folder {} with the download cache, the share files, and wn-agent.app".format(SUPPORT_DIRECTORY))
+	scope.add_argument("--cache", action="store_true", help="delete only the download cache {}. Takes no NAME".format(DEFAULT_DOWNLOADS_DIR))
+	delete.set_defaults(delete_parser=delete)
 	subcommands.add_parser("ip", help="print the guest IP address")
 
 	key = subcommands.add_parser("key", help="press key combos, such as ctrl+alt+del or win+r")
@@ -655,6 +658,10 @@ def run_remove_share(context):
 
 def run_delete(context):
 	arguments = context.arguments
+	if arguments.cache:
+		if arguments.name:
+			arguments.delete_parser.error("--cache cannot be used with NAME")
+		return _confirm_and_delete(context, vm_delete.plan_cache_delete(), "the download cache")
 	name = arguments.name or context.config.vm_name
 	backend = context.backend_for(name)
 	in_utm = backend.exists()
@@ -663,14 +670,18 @@ def run_delete(context):
 	if not in_utm:
 		context.print("UTM has no VM named {}".format(name))
 	items = vm_delete.plan_delete(name, context.config, backend, in_utm, arguments.all)
+	return _confirm_and_delete(context, items, name)
+
+
+def _confirm_and_delete(context, items, subject):
 	if not items:
-		context.print("nothing to delete for {}".format(name))
+		context.print("nothing to delete for {}".format(subject))
 		return EXIT_FAILURE
 	context.print("wn delete removes:")
 	for item in items:
 		context.print("  " + item.label)
-	if not arguments.yes and not _confirm(context, "Delete these?", "cannot ask before deleting because input is not a terminal. Add --yes to delete without asking"):
-		context.print("{}: not deleted".format(name))
+	if not context.arguments.yes and not _confirm(context, "Delete these?", "cannot ask before deleting because input is not a terminal. Add --yes to delete without asking"):
+		context.print("{}: not deleted".format(subject))
 		return EXIT_FAILURE
 	return vm_delete.run_delete(items, context.stdout, context.stderr)
 

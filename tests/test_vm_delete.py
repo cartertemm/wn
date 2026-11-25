@@ -10,7 +10,8 @@ from wn.config import load_config
 from wn.share_sftp import share_paths
 from wn.shares import FIRST_PORT, SUPPORT_DIRECTORY
 from wn.utm_config import camera_socket_file, default_battery_file
-from wn.vm_delete import DeleteItem, plan_delete, run_delete
+from wn.downloads import DEFAULT_DOWNLOADS_DIR
+from wn.vm_delete import DeleteItem, plan_cache_delete, plan_delete, run_delete
 
 OTHER_SHARE = share_item(name="Other", vm="Other", mac_path="/Users/c/Other", vm_path="C:\\Users\\c\\Other", port=FIRST_PORT + 1)
 
@@ -91,6 +92,20 @@ class PlanDeleteTests(DeleteTestCase):
 		write_config(self.home.name, {"vm_name": "Windows", "battery_file": battery})
 		touch(battery)
 		self.assertIn("the battery file {}".format(battery), self.labels("Windows", in_utm=False))
+
+
+class PlanCacheDeleteTests(DeleteTestCase):
+	def test_no_cache_lists_nothing(self):
+		self.assertEqual(plan_cache_delete(), [])
+
+	def test_cache_item_removes_the_cache_folder(self):
+		cache = os.path.expanduser(DEFAULT_DOWNLOADS_DIR)
+		touch(os.path.join(cache, "windows.iso"))
+		items = plan_cache_delete()
+		self.assertEqual([item.label for item in items], ["the download cache {}".format(cache)])
+		items[0].remove()
+		self.assertFalse(os.path.exists(cache))
+		self.assertTrue(os.path.exists(os.path.dirname(cache)))
 
 
 class ConfigUpdateTests(DeleteTestCase):
