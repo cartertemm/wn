@@ -8,8 +8,12 @@ from typing import Callable
 from wn.agent import launch_agent_path, uninstall_launch_agent
 from wn.battery_file import battery_file_path
 from wn.config import REMOVE_SETTING, config_path, update_config_file
+from wn.errors import WnError
 from wn.share_sftp import remove_file, remove_host_key, share_paths
 from wn.utm_config import camera_socket_file, default_battery_file
+
+EXIT_SUCCESS = 0
+EXIT_FAILURE = 1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -37,6 +41,23 @@ def plan_delete(name, config, backend, in_utm):
 	if os.path.exists(config_path()) and (shares or active):
 		items.append(DeleteItem("the settings for {} in {}".format(name, config_path()), functools.partial(_update_config, config, name, active)))
 	return items
+
+
+def run_delete(items, output, errors):
+	"""Remove each item in order. Report a failure and go on with the rest. Return the exit code."""
+	failed = False
+	for item in items:
+		try:
+			item.remove()
+		except (OSError, WnError) as error:
+			errors.write("wn: error: cannot remove {}: {}\n".format(item.label, error))
+			failed = True
+			continue
+		output.write("Removed {}\n".format(item.label))
+	if failed:
+		errors.write("wn: error: some items were not removed. Fix the errors above, then run wn delete again\n")
+		return EXIT_FAILURE
+	return EXIT_SUCCESS
 
 
 def _update_config(config, name, active):

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import unittest
@@ -9,7 +10,7 @@ from wn.config import load_config
 from wn.share_sftp import share_paths
 from wn.shares import FIRST_PORT
 from wn.utm_config import camera_socket_file, default_battery_file
-from wn.vm_delete import plan_delete
+from wn.vm_delete import DeleteItem, plan_delete, run_delete
 
 OTHER_SHARE = share_item(name="Other", vm="Other", mac_path="/Users/c/Other", vm_path="C:\\Users\\c\\Other", port=FIRST_PORT + 1)
 
@@ -98,6 +99,35 @@ class ConfigUpdateTests(DeleteTestCase):
 		next(item for item in items if item.label == "the host keys of share Projects").remove()
 		self.assertFalse(os.path.exists(paths.host_key("Projects")))
 		self.assertFalse(os.path.exists(paths.host_public_key("Projects")))
+
+
+class RunDeleteTests(unittest.TestCase):
+	def run_items(self, items):
+		output = io.StringIO()
+		errors = io.StringIO()
+		exit_code = run_delete(items, output, errors)
+		return exit_code, output.getvalue(), errors.getvalue()
+
+	def test_removes_every_item_in_order(self):
+		removed = []
+		items = [DeleteItem("first", lambda: removed.append("first")), DeleteItem("second", lambda: removed.append("second"))]
+		exit_code, output, errors = self.run_items(items)
+		self.assertEqual(exit_code, 0)
+		self.assertEqual(removed, ["first", "second"])
+		self.assertEqual(output, "Removed first\nRemoved second\n")
+		self.assertEqual(errors, "")
+
+	def test_a_failure_does_not_stop_the_rest(self):
+		removed = []
+
+		def fail():
+			raise OSError("Permission denied")
+		items = [DeleteItem("first", fail), DeleteItem("second", lambda: removed.append("second"))]
+		exit_code, output, errors = self.run_items(items)
+		self.assertEqual(exit_code, 1)
+		self.assertEqual(removed, ["second"])
+		self.assertEqual(output, "Removed second\n")
+		self.assertEqual(errors, "wn: error: cannot remove first: Permission denied\nwn: error: some items were not removed. Fix the errors above, then run wn delete again\n")
 
 
 if __name__ == "__main__":
