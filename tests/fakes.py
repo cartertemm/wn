@@ -69,12 +69,13 @@ def unused_port():
 
 
 class FakeBackend(Backend):
-	def __init__(self, socket_path="/fake/qmp.sock", session_socket_path="/fake/qmp-session.sock", ip_address="192.168.64.5", state="running"):
+	def __init__(self, socket_path="/fake/qmp.sock", session_socket_path="/fake/qmp-session.sock", ip_address="192.168.64.5", state="running", in_utm=True):
 		self.calls = []
 		self.socket_path = socket_path
 		self.session_socket_path = session_socket_path
 		self.ip_address = ip_address
 		self.state = state
+		self.in_utm = in_utm
 		self.files = {}
 		self.on_exec = None
 
@@ -88,6 +89,14 @@ class FakeBackend(Backend):
 	def status(self):
 		self.calls.append(("status",))
 		return VMStatus(name="Windows", state=self.state)
+
+	def exists(self):
+		self.calls.append(("exists",))
+		return self.in_utm
+
+	def delete(self):
+		self.calls.append(("delete",))
+		self.in_utm = False
 
 	def ip(self):
 		self.calls.append(("ip",))
