@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 import os
+import shutil
 from typing import Callable
 
 from wn.agent import LOG_PATH, launch_agent_path, uninstall_launch_agent
@@ -10,6 +11,7 @@ from wn.battery_file import battery_file_path
 from wn.config import REMOVE_SETTING, config_path, update_config_file
 from wn.errors import WnError
 from wn.share_sftp import remove_file, remove_host_key, share_paths
+from wn.shares import SUPPORT_DIRECTORY
 from wn.utm_config import camera_socket_file, default_battery_file
 
 EXIT_SUCCESS = 0
@@ -22,12 +24,14 @@ class DeleteItem:
 	remove: Callable[[], object]
 
 
-def plan_delete(name, config, backend, in_utm):
-	"""Return the items to remove for VM ``name``, in removal order. Only things that exist are listed."""
+def plan_delete(name, config, backend, in_utm, include_all=False):
+	"""Return the items to remove for VM ``name``, in removal order. Only things that exist are listed.
+
+	With ``include_all``, also remove the launch agent and the whole wn support folder."""
 	active = name == config.vm_name
 	shares = [share for share in config.shares if share.vm == name]
 	items = []
-	if active and os.path.exists(launch_agent_path()):
+	if (active or include_all) and os.path.exists(launch_agent_path()):
 		items.append(DeleteItem("the wn agent launch agent, {}, and its log {}".format(launch_agent_path(), os.path.expanduser(LOG_PATH)), _uninstall_agent))
 	if in_utm:
 		items.append(DeleteItem("the VM {} in UTM, with its disk".format(name), backend.delete))
@@ -38,6 +42,9 @@ def plan_delete(name, config, backend, in_utm):
 	paths = share_paths()
 	for share in shares:
 		items.append(DeleteItem("the host keys and the log of share {}".format(share.name), functools.partial(_remove_share_files, paths, share.name)))
+	support = os.path.expanduser(SUPPORT_DIRECTORY)
+	if include_all and os.path.exists(support):
+		items.append(DeleteItem("the folder {} with the download cache, the share files, and wn-agent.app".format(support), functools.partial(shutil.rmtree, support)))
 	if os.path.exists(config_path()) and (shares or active):
 		items.append(DeleteItem("the settings for {} in {}".format(name, config_path()), functools.partial(_update_config, config, name, active)))
 	return items

@@ -961,6 +961,24 @@ class DeleteCommandTests(CLITestCase):
 		self.assertNotIn(("status",), self.backend.calls)
 		self.assertFalse(os.path.exists(self.battery))
 
+	def test_all_also_removes_the_support_folder(self):
+		support = os.path.join(self.home.name, "Library", "Application Support", "wn")
+		os.makedirs(os.path.join(support, "downloads"))
+		exit_code, stdout, stderr = self.run_cli("delete", "--all", "--yes")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn(("delete",), self.backend.calls)
+		self.assertFalse(os.path.exists(support))
+		self.assertIn("Removed the folder {} with the download cache, the share files, and wn-agent.app\n".format(support), stdout)
+
+	def test_all_refuses_a_running_vm(self):
+		self.backend.state = "running"
+		support = os.path.join(self.home.name, "Library", "Application Support", "wn")
+		os.makedirs(support)
+		exit_code, _, stderr = self.run_cli("delete", "--all", "--yes")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("Windows is running. Stop it first with wn stop", stderr)
+		self.assertTrue(os.path.exists(support))
+
 	def test_nothing_to_delete(self):
 		os.remove(self.battery)
 		self.backend.in_utm = False

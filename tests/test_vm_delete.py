@@ -8,7 +8,7 @@ from fakes import FakeBackend, share_item, short_temporary_directory, write_conf
 from wn.agent import LOG_PATH, launch_agent_path
 from wn.config import load_config
 from wn.share_sftp import share_paths
-from wn.shares import FIRST_PORT
+from wn.shares import FIRST_PORT, SUPPORT_DIRECTORY
 from wn.utm_config import camera_socket_file, default_battery_file
 from wn.vm_delete import DeleteItem, plan_delete, run_delete
 
@@ -34,8 +34,8 @@ class DeleteTestCase(unittest.TestCase):
 		with open(os.path.join(self.home.name, ".config", "wn", "config.json")) as config_file:
 			return json.load(config_file)
 
-	def labels(self, name, in_utm=True):
-		return [item.label for item in plan_delete(name, load_config(), self.backend, in_utm)]
+	def labels(self, name, in_utm=True, include_all=False):
+		return [item.label for item in plan_delete(name, load_config(), self.backend, in_utm, include_all)]
 
 
 class PlanDeleteTests(DeleteTestCase):
@@ -63,6 +63,28 @@ class PlanDeleteTests(DeleteTestCase):
 			"the host keys and the log of share Other",
 			"the settings for Other in {}".format(os.path.join(self.home.name, ".config", "wn", "config.json")),
 		])
+
+	def test_all_adds_the_support_folder_before_the_settings(self):
+		write_config(self.home.name, {"vm_name": "Windows", "shares": [share_item()]})
+		os.makedirs(os.path.expanduser(SUPPORT_DIRECTORY))
+		self.assertEqual(self.labels("Windows", in_utm=False, include_all=True), [
+			"the host keys and the log of share Projects",
+			"the folder {} with the download cache, the share files, and wn-agent.app".format(os.path.expanduser(SUPPORT_DIRECTORY)),
+			"the settings for Windows in {}".format(os.path.join(self.home.name, ".config", "wn", "config.json")),
+		])
+
+	def test_all_without_the_support_folder_leaves_it_out(self):
+		self.assertEqual(self.labels("Windows", in_utm=False, include_all=True), [])
+
+	def test_all_for_another_vm_includes_the_launch_agent(self):
+		write_config(self.home.name, {"vm_name": "Windows"})
+		touch(launch_agent_path())
+		self.assertIn("the wn agent launch agent, {}, and its log {}".format(launch_agent_path(), os.path.expanduser(LOG_PATH)), self.labels("Other", in_utm=False, include_all=True))
+
+	def test_all_folder_item_removes_the_folder(self):
+		touch(os.path.join(os.path.expanduser(SUPPORT_DIRECTORY), "downloads", "file.zip"))
+		plan_delete("Windows", load_config(), self.backend, False, True)[-1].remove()
+		self.assertFalse(os.path.exists(os.path.expanduser(SUPPORT_DIRECTORY)))
 
 	def test_active_vm_uses_the_battery_file_from_the_config(self):
 		battery = os.path.join(self.home.name, "custom-battery.bin")

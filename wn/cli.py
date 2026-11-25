@@ -23,7 +23,7 @@ from wn.qmp import QMPConnectionError, QMPError, qmp_client_for
 from wn.screendump import save_screenshot
 from wn.setup import DEFAULT_DISK_GIB, SOFTWARE_CHOICES, STOPPED_STATE, Installer, SetupOptions
 from wn.share_commands import ShareCommands
-from wn.shares import LIST_COMMAND, REMOVE_COMMAND, SHARE_COMMAND, shares_for_vm
+from wn.shares import LIST_COMMAND, REMOVE_COMMAND, SHARE_COMMAND, SUPPORT_DIRECTORY, shares_for_vm
 from wn.text_input import text_to_combos
 from wn.unattend import DEFAULT_EDITION, GENERIC_PRODUCT_KEYS
 from wn.utm_config import (
@@ -91,6 +91,7 @@ def build_parser():
 		description="Delete the VM in UTM with its disk, its battery file, its camera socket, and its shares. For the VM in vm_name, also remove vm_name and the wn agent launch agent. The download cache stays.")
 	delete.add_argument("name", nargs="?", metavar="NAME", help="the VM to delete (default: vm_name from the config)")
 	delete.add_argument("--yes", action="store_true", help="delete without asking first")
+	delete.add_argument("--all", action="store_true", help="also delete the launch agent and the folder {} with the download cache, the share files, and wn-agent.app".format(SUPPORT_DIRECTORY))
 	subcommands.add_parser("ip", help="print the guest IP address")
 
 	key = subcommands.add_parser("key", help="press key combos, such as ctrl+alt+del or win+r")
@@ -661,7 +662,7 @@ def run_delete(context):
 		raise WnError("{} is running. Stop it first with wn stop".format(name))
 	if not in_utm:
 		context.print("UTM has no VM named {}".format(name))
-	items = vm_delete.plan_delete(name, context.config, backend, in_utm)
+	items = vm_delete.plan_delete(name, context.config, backend, in_utm, arguments.all)
 	if not items:
 		context.print("nothing to delete for {}".format(name))
 		return EXIT_FAILURE
