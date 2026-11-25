@@ -41,15 +41,13 @@ space, [UTM 5.0.8 or later](https://mac.getutm.app) in `/Applications`, and
 
 ```sh
 git clone https://github.com/cartertemm/wn
-uv tool install ./wn
+uv tool install -e ./wn
 wn setup
 ```
 
-`uv tool install` puts `wn` on your `PATH`, so you can run it from any folder.
-If `wn` is not found, run `uv tool update-shell` and open a new terminal.
-After a `git pull`, update it with `uv tool install --reinstall ./wn`. To
-pick up changes in the cloned folder without a reinstall, install it in
-editable mode with `uv tool install -e ./wn`.
+`uv tool install -e` puts `wn` on your `PATH`, so you can run it from any
+folder. It runs the code in the cloned folder, so a `git pull` updates it. If
+`wn` is not found, run `uv tool update-shell` and open a new terminal.
 
 Press Return to keep each default. Setup will tell you when the VM is ready.
 
