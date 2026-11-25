@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 from fakes import FakeBackend, share_item, short_temporary_directory, write_config
-from wn.agent import launch_agent_path
+from wn.agent import LOG_PATH, launch_agent_path
 from wn.config import load_config
 from wn.share_sftp import share_paths
 from wn.shares import FIRST_PORT
@@ -48,11 +48,11 @@ class PlanDeleteTests(DeleteTestCase):
 		touch(default_battery_file("Windows"))
 		touch(camera_socket_file("Windows"))
 		self.assertEqual(self.labels("Windows"), [
-			"the wn agent launch agent, {}".format(launch_agent_path()),
+			"the wn agent launch agent, {}, and its log {}".format(launch_agent_path(), os.path.expanduser(LOG_PATH)),
 			"the VM Windows in UTM, with its disk",
 			"the battery file {}".format(default_battery_file("Windows")),
 			"the camera socket {}".format(camera_socket_file("Windows")),
-			"the host keys of share Projects",
+			"the host keys and the log of share Projects",
 			"the settings for Windows in {}".format(os.path.join(self.home.name, ".config", "wn", "config.json")),
 		])
 
@@ -60,7 +60,7 @@ class PlanDeleteTests(DeleteTestCase):
 		write_config(self.home.name, {"vm_name": "Windows", "shares": [share_item(), OTHER_SHARE]})
 		touch(launch_agent_path())
 		self.assertEqual(self.labels("Other", in_utm=False), [
-			"the host keys of share Other",
+			"the host keys and the log of share Other",
 			"the settings for Other in {}".format(os.path.join(self.home.name, ".config", "wn", "config.json")),
 		])
 
@@ -90,15 +90,26 @@ class ConfigUpdateTests(DeleteTestCase):
 		self.remove_config_item("Other")
 		self.assertEqual(self.config_values(), {"vm_name": "Windows"})
 
-	def test_share_item_removes_the_host_keys(self):
+	def test_share_item_removes_the_host_keys_and_the_log(self):
 		write_config(self.home.name, {"vm_name": "Windows", "shares": [share_item()]})
 		paths = share_paths()
 		touch(paths.host_key("Projects"))
 		touch(paths.host_public_key("Projects"))
+		touch(paths.log_file("Projects"))
 		items = plan_delete("Windows", load_config(), self.backend, False)
-		next(item for item in items if item.label == "the host keys of share Projects").remove()
+		next(item for item in items if item.label == "the host keys and the log of share Projects").remove()
 		self.assertFalse(os.path.exists(paths.host_key("Projects")))
 		self.assertFalse(os.path.exists(paths.host_public_key("Projects")))
+		self.assertFalse(os.path.exists(paths.log_file("Projects")))
+
+	def test_launch_agent_item_removes_the_agent_log(self):
+		write_config(self.home.name, {"vm_name": "Windows"})
+		touch(launch_agent_path())
+		touch(os.path.expanduser(LOG_PATH))
+		with mock.patch("wn.vm_delete.uninstall_launch_agent") as uninstall:
+			plan_delete("Windows", load_config(), self.backend, False)[0].remove()
+		uninstall.assert_called_once_with()
+		self.assertFalse(os.path.exists(os.path.expanduser(LOG_PATH)))
 
 
 class RunDeleteTests(unittest.TestCase):

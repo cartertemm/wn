@@ -5,7 +5,7 @@ import functools
 import os
 from typing import Callable
 
-from wn.agent import launch_agent_path, uninstall_launch_agent
+from wn.agent import LOG_PATH, launch_agent_path, uninstall_launch_agent
 from wn.battery_file import battery_file_path
 from wn.config import REMOVE_SETTING, config_path, update_config_file
 from wn.errors import WnError
@@ -28,7 +28,7 @@ def plan_delete(name, config, backend, in_utm):
 	shares = [share for share in config.shares if share.vm == name]
 	items = []
 	if active and os.path.exists(launch_agent_path()):
-		items.append(DeleteItem("the wn agent launch agent, {}".format(launch_agent_path()), uninstall_launch_agent))
+		items.append(DeleteItem("the wn agent launch agent, {}, and its log {}".format(launch_agent_path(), os.path.expanduser(LOG_PATH)), _uninstall_agent))
 	if in_utm:
 		items.append(DeleteItem("the VM {} in UTM, with its disk".format(name), backend.delete))
 	battery_file = battery_file_path(config) if active else default_battery_file(name)
@@ -37,7 +37,7 @@ def plan_delete(name, config, backend, in_utm):
 			items.append(DeleteItem("{} {}".format(label, path), functools.partial(remove_file, path)))
 	paths = share_paths()
 	for share in shares:
-		items.append(DeleteItem("the host keys of share {}".format(share.name), functools.partial(remove_host_key, paths, share.name)))
+		items.append(DeleteItem("the host keys and the log of share {}".format(share.name), functools.partial(_remove_share_files, paths, share.name)))
 	if os.path.exists(config_path()) and (shares or active):
 		items.append(DeleteItem("the settings for {} in {}".format(name, config_path()), functools.partial(_update_config, config, name, active)))
 	return items
@@ -58,6 +58,16 @@ def run_delete(items, output, errors):
 		errors.write("wn: error: some items were not removed. Fix the errors above, then run wn delete again\n")
 		return EXIT_FAILURE
 	return EXIT_SUCCESS
+
+
+def _uninstall_agent():
+	uninstall_launch_agent()
+	remove_file(os.path.expanduser(LOG_PATH))
+
+
+def _remove_share_files(paths, name):
+	remove_host_key(paths, name)
+	remove_file(paths.log_file(name))
 
 
 def _update_config(config, name, active):
