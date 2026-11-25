@@ -1,6 +1,7 @@
 """Command line interface for wn."""
 
 import argparse
+import dataclasses
 import difflib
 import getpass
 import json
@@ -9,7 +10,7 @@ import shlex
 import sys
 import time
 
-from wn import __version__, agent, keygrab, mouse
+from wn import __version__, agent, keygrab, mouse, vm_delete
 from wn.backend import create_backend
 from wn.backends.utm import DEFAULT_VM_NAME
 from wn.battery_file import battery_writer, prepare_battery_file
@@ -86,6 +87,10 @@ def build_parser():
 	stop.add_argument("--yes", action="store_true", help="with --force, power off without asking first")
 	stop.set_defaults(stop_parser=stop)
 	subcommands.add_parser("status", help="show whether the VM is running")
+	delete = subcommands.add_parser("delete", help="delete a VM and everything wn made for it on the Mac",
+		description="Delete the VM in UTM with its disk, its battery file, its camera socket, and its shares. For the VM in vm_name, also remove vm_name and the wn agent launch agent. The download cache stays.")
+	delete.add_argument("name", nargs="?", metavar="NAME", help="the VM to delete (default: vm_name from the config)")
+	delete.add_argument("--yes", action="store_true", help="delete without asking first")
 	subcommands.add_parser("ip", help="print the guest IP address")
 
 	key = subcommands.add_parser("key", help="press key combos, such as ctrl+alt+del or win+r")
@@ -236,6 +241,12 @@ class CommandContext:
 			self._backend = self._backend_factory(self.config)
 		return self._backend
 
+	def backend_for(self, vm_name):
+		"""Return a backend for ``vm_name``, which may be a VM other than vm_name in the config."""
+		if vm_name == self.config.vm_name:
+			return self.backend
+		return self._backend_factory(dataclasses.replace(self.config, vm_name=vm_name))
+
 	def qmp_address(self, session=False):
 		return self.config.qmp_socket or self.backend.qmp_socket_path(session=session)
 
@@ -296,11 +307,15 @@ def _wait_until_stopped(context, timeout, announce=False):
 		time.sleep(STOP_POLL_SECONDS)
 
 
-def _confirm_power_off(context):
+def _confirm(context, question, no_terminal_message):
 	if not context.stdin.isatty():
-		raise WnError("cannot ask before powering off because input is not a terminal. Add --yes to power off without asking")
-	question = "Power off {} without shutting it down? Unsaved work is lost.".format(context.config.vm_name)
+		raise WnError(no_terminal_message)
 	return Prompter(context.stdin, context.stdout).ask(question, False, lambda answer: answer.lower() in YES_ANSWERS, default_text="y/N")
+
+
+def _confirm_power_off(context):
+	question = "Power off {} without shutting it down? Unsaved work is lost.".format(context.config.vm_name)
+	return _confirm(context, question, "cannot ask before powering off because input is not a terminal. Add --yes to power off without asking")
 
 
 def _wake_display(context):
@@ -637,10 +652,33 @@ def run_remove_share(context):
 	return _run_share_action(context, lambda commands: commands.remove_share(name, context.arguments.discard), lambda: _remove_stopped_message(name))
 
 
+def run_delete(context):
+	arguments = context.arguments
+	name = arguments.name or context.config.vm_name
+	backend = context.backend_for(name)
+	in_utm = backend.exists()
+	if in_utm and backend.status().state != STOPPED_STATE:
+		raise WnError("{} is running. Stop it first with wn stop".format(name))
+	if not in_utm:
+		context.print("UTM has no VM named {}".format(name))
+	items = vm_delete.plan_delete(name, context.config, backend, in_utm)
+	if not items:
+		context.print("nothing to delete for {}".format(name))
+		return EXIT_FAILURE
+	context.print("wn delete removes:")
+	for item in items:
+		context.print("  " + item.label)
+	if not arguments.yes and not _confirm(context, "Delete these?", "cannot ask before deleting because input is not a terminal. Add --yes to delete without asking"):
+		context.print("{}: not deleted".format(name))
+		return EXIT_FAILURE
+	return vm_delete.run_delete(items, context.stdout, context.stderr)
+
+
 COMMANDS = {
 	"start": run_start,
 	"stop": run_stop,
 	"status": run_status,
+	"delete": run_delete,
 	"ip": run_ip,
 	"key": run_key,
 	"type": run_type,

@@ -15,7 +15,8 @@ from wn.cli import main
 from wn.errors import WnError
 from wn.keys import combo_to_input_events
 from wn.qmp import QMPConnectionError
-from wn.utm_config import UTM_GROUP_CONTAINER, qmp_socket_file
+from wn.shares import FIRST_PORT
+from wn.utm_config import UTM_GROUP_CONTAINER, default_battery_file, qmp_socket_file
 
 
 class TerminalInput(io.StringIO):
@@ -894,6 +895,78 @@ class UpdateVMArgsTests(CLITestCase):
 		self.assertEqual(exit_code, 1)
 		self.assertIn("stop", stderr)
 		self.assertEqual(self.read_plist()["QEMU"]["AdditionalArguments"], OLD_ARGUMENTS)
+
+
+class DeleteCommandTests(CLITestCase):
+	def setUp(self):
+		super().setUp()
+		self.backend.state = "stopped"
+		self.battery = default_battery_file("Windows")
+		os.makedirs(os.path.dirname(self.battery), exist_ok=True)
+		with open(self.battery, "w"):
+			pass
+
+	def config_values(self):
+		with open(os.path.join(self.home.name, ".config", "wn", "config.json")) as config_file:
+			return json.load(config_file)
+
+	def test_yes_deletes_the_vm_its_files_and_its_settings(self):
+		write_config(self.home.name, {"vm_name": "Windows", "camera": True, "shares": [share_item()]})
+		exit_code, stdout, stderr = self.run_cli("delete", "--yes")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn(("delete",), self.backend.calls)
+		self.assertFalse(os.path.exists(self.battery))
+		self.assertEqual(self.config_values(), {"camera": True})
+		self.assertIn("Removed the VM Windows in UTM, with its disk\n", stdout)
+
+	def test_running_vm_is_refused(self):
+		self.backend.state = "running"
+		exit_code, _, stderr = self.run_cli("delete", "--yes")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("Windows is running. Stop it first with wn stop", stderr)
+		self.assertNotIn(("delete",), self.backend.calls)
+		self.assertTrue(os.path.exists(self.battery))
+
+	def test_no_keeps_everything(self):
+		exit_code, stdout, _ = self.run_cli("delete", stdin=TerminalInput("n\n"))
+		self.assertEqual(exit_code, 1)
+		self.assertIn("Delete these? [y/N]: Windows: not deleted\n", stdout)
+		self.assertNotIn(("delete",), self.backend.calls)
+		self.assertTrue(os.path.exists(self.battery))
+
+	def test_yes_answer_deletes(self):
+		exit_code, _, stderr = self.run_cli("delete", stdin=TerminalInput("y\n"))
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn(("delete",), self.backend.calls)
+
+	def test_without_terminal_needs_yes(self):
+		exit_code, _, stderr = self.run_cli("delete", stdin=io.StringIO("y\n"))
+		self.assertEqual(exit_code, 1)
+		self.assertIn("Add --yes", stderr)
+		self.assertNotIn(("delete",), self.backend.calls)
+
+	def test_another_vm_keeps_vm_name_and_other_shares(self):
+		other = share_item(name="Other", vm="Other", mac_path="/Users/c/Other", vm_path="C:\\Users\\c\\Other", port=FIRST_PORT + 1)
+		write_config(self.home.name, {"vm_name": "Windows", "shares": [share_item(), other]})
+		exit_code, _, stderr = self.run_cli("delete", "Other", "--yes")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertEqual(self.config_values(), {"vm_name": "Windows", "shares": [share_item()]})
+		self.assertTrue(os.path.exists(self.battery))
+
+	def test_vm_unknown_to_utm_still_removes_its_files(self):
+		self.backend.in_utm = False
+		exit_code, stdout, stderr = self.run_cli("delete", "--yes")
+		self.assertEqual(exit_code, 0, stderr)
+		self.assertIn("UTM has no VM named Windows\n", stdout)
+		self.assertNotIn(("status",), self.backend.calls)
+		self.assertFalse(os.path.exists(self.battery))
+
+	def test_nothing_to_delete(self):
+		os.remove(self.battery)
+		self.backend.in_utm = False
+		exit_code, stdout, _ = self.run_cli("delete", "--yes")
+		self.assertEqual(exit_code, 1)
+		self.assertIn("nothing to delete for Windows\n", stdout)
 
 
 if __name__ == "__main__":
